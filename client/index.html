@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+
+  <!-- PWA Meta Tags -->
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <meta name="theme-color" content="#3b82f6" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Chatgorithm" />
+
+  <!-- Manifest PWA -->
+  <link rel="manifest" href="/manifest.json" />
+
+  <!-- Iconos -->
+  <link rel="icon" type="image/x-icon" href="/logo.ico" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/logo.png" />
+  <link rel="icon" type="image/png" sizes="32x32" href="/logo.png" />
+
+  <title>Chatgorithm</title>
+</head>
+
+<body
+  class="bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f1021] to-black text-slate-200 antialiased selection:bg-indigo-500/30 selection:text-indigo-200 bg-fixed">
+  <div id="root"></div>
+  <script type="module" src="/src/main.tsx"></script>
+
+  <!-- Registrar Service Worker para Push Notifications -->
+  <script>
+    if ('serviceWorker' in navigator) {
+      window.addEventListener('load', async () => {
+        try {
+          const registration = await navigator.serviceWorker.register('/sw.js');
+          console.log('✅ Service Worker registrado:', registration.scope);
+        } catch (error) {
+          console.error('❌ Error registrando Service Worker:', error);
+        }
+      });
+    }
+  </script>
+</body>
+
+</html>
