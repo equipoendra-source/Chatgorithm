@@ -22,7 +22,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const isDark = theme === 'dark';
 
     const isProduction = window.location.hostname.includes('render.com');
-    const API_URL = isProduction ? 'https://chatgorithm.onrender.com/api' : 'http://localhost:3000/api';
+    const API_URL = isProduction ? 'https://chatgorithm-vubn.onrender.com/api' : 'http://localhost:3000/api';
 
     const [appointments, setAppointments] = useState<Appointment[]>([]);
     const [loading, setLoading] = useState(true);

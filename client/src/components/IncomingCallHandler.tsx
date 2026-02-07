@@ -59,7 +59,7 @@ export function IncomingCallHandler() {
                 window.location.hostname.includes('netlify.app') ||
                 window.location.hostname.includes('vercel.app');
             const API_URL = isProduction
-                ? 'https://chatgorithm.onrender.com/api'
+                ? 'https://chatgorithm-vubn.onrender.com/api'
                 : 'http://localhost:3000/api';
 
             console.log('📞 [IncomingCallHandler] Obteniendo token Twilio...');
@@ -254,8 +254,8 @@ export function IncomingCallHandler() {
                                 <button
                                     onClick={toggleMute}
                                     className={`w-14 h-14 rounded-full transition-all flex items-center justify-center ${isMuted
-                                            ? 'bg-yellow-100 text-yellow-600'
-                                            : (isDark ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-200 text-slate-600 hover:bg-slate-300')
+                                        ? 'bg-yellow-100 text-yellow-600'
+                                        : (isDark ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-200 text-slate-600 hover:bg-slate-300')
                                         }`}
                                 >
                                     {isMuted ? '🔇' : '🎤'}

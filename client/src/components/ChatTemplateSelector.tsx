@@ -26,7 +26,7 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
   const isDark = theme === 'dark';
 
   const isProduction = window.location.hostname.includes('render.com');
-  const API_URL_BASE = isProduction ? 'https://chatgorithm.onrender.com/api' : 'http://localhost:3000/api';
+  const API_URL_BASE = isProduction ? 'https://chatgorithm-vubn.onrender.com/api' : 'http://localhost:3000/api';
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);
@@ -162,8 +162,8 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
                       key={template.id}
                       onClick={() => handleSelectTemplate(template)}
                       className={`w-full text-left p-3 border rounded-xl transition-all group flex justify-between items-center ${isDark
-                          ? 'hover:bg-blue-900/20 border-slate-700 hover:border-blue-800/50'
-                          : 'hover:bg-blue-50 border-slate-100 hover:border-blue-200'
+                        ? 'hover:bg-blue-900/20 border-slate-700 hover:border-blue-800/50'
+                        : 'hover:bg-blue-50 border-slate-100 hover:border-blue-200'
                         }`}
                     >
                       <div>
@@ -195,8 +195,8 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
                         value={variableValues[key]}
                         onChange={(e) => setVariableValues({ ...variableValues, [key]: e.target.value })}
                         className={`w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all ${isDark
-                            ? 'bg-slate-700 border-slate-600 text-white placeholder:text-slate-500'
-                            : 'bg-slate-50 border-slate-200'
+                          ? 'bg-slate-700 border-slate-600 text-white placeholder:text-slate-500'
+                          : 'bg-slate-50 border-slate-200'
                           }`}
                         placeholder="Escribe aquí..."
                         autoFocus={key === '1'}

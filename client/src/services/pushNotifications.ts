@@ -10,7 +10,7 @@ const isLocal = !isNative && typeof window !== 'undefined' &&
 
 const API_URL = isLocal
     ? 'http://localhost:3001'
-    : 'https://chatgorithm.onrender.com';
+    : 'https://chatgorithm-vubn.onrender.com';
 
 console.log('🚀 [Push] API URL Config:', { isNative, isLocal, API_URL });
 

@@ -3,7 +3,7 @@
 import { Capacitor } from '@capacitor/core';
 
 // Central authentication server (always fixed - this is the main Chatgorithm server)
-export const AUTH_SERVER_URL = 'https://chatgorithm.onrender.com';
+export const AUTH_SERVER_URL = 'https://chatgorithm-vubn.onrender.com';
 
 // Detect if running in Capacitor native app (Android/iOS)
 const isCapacitorNative = Capacitor.isNativePlatform();
@@ -36,7 +36,7 @@ export const getCompanyBackendUrl = (): string | null => {
 };
 
 // Legacy: Default backend URL (used before company login or as fallback)
-const PRODUCTION_URL = 'https://chatgorithm.onrender.com';
+const PRODUCTION_URL = 'https://chatgorithm-vubn.onrender.com';
 const LOCAL_URL = 'http://localhost:3000';
 
 export const API_BASE_URL = isCapacitorNative
