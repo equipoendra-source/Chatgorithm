@@ -1613,6 +1613,8 @@ app.get('/webhook', (req, res) => { if (req.query['hub.mode'] === 'subscribe' &&
 app.post('/webhook', async (req, res) => {
     try {
         const body = req.body;
+        console.log(`📨 [WEBHOOK] POST recibido. object=${body.object}, entries=${body.entry?.length || 0}`);
+
         if (body.object && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
             const change = body.entry[0].changes[0].value;
             const msg = change.messages[0];
@@ -1639,7 +1641,7 @@ app.post('/webhook', async (req, res) => {
             processedWebhookIds.add(msg.id);
             setTimeout(() => processedWebhookIds.delete(msg.id), 300000); // 5 mins
 
-            console.log(`📩 Webhook msg from ${from}: ${text}`);
+            console.log(`📩 [WEBHOOK] Mensaje de ${from}: "${text}" (tipo: ${msg.type}, phoneId: ${originPhoneId})`);
 
             const contactRecord = await handleContactUpdate(from, text, change.contacts?.[0]?.profile?.name, originPhoneId);
 
@@ -1652,6 +1654,7 @@ app.post('/webhook', async (req, res) => {
                 origin_phone_id: originPhoneId,
                 recipient: originPhoneId // <--- ESTO ARREGLA EL FILTRO DEL FRONTEND
             });
+            console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
 
             if (activeAiChats.has(from)) {
                 console.log(`🤖 IA activada por sesión activa para ${from}`);
@@ -1662,20 +1665,27 @@ app.post('/webhook', async (req, res) => {
             } else {
                 console.log(`🔕 IA ignorada. Status=${contactRecord?.get('status')}, Assigned=${contactRecord?.get('assigned_to')}`);
             }
-        }
-
-        if (body.object && body.entry?.[0]?.changes?.[0]?.field === 'message_template_status_update') {
+        } else if (body.object && body.entry?.[0]?.changes?.[0]?.value?.statuses) {
+            // Status updates (delivered, read, etc.) - ignorar silenciosamente
+            console.log(`📊 [WEBHOOK] Status update recibido (no es mensaje)`);
+        } else if (body.object && body.entry?.[0]?.changes?.[0]?.field === 'message_template_status_update') {
             const metaId = body.entry[0].changes[0].value.message_template_id;
             const newStatus = body.entry[0].changes[0].value.event;
+            console.log(`📋 [WEBHOOK] Template status update: ${metaId} -> ${newStatus}`);
             if (base) {
                 try {
                     const records = await base(TABLE_TEMPLATES).select({ filterByFormula: `{MetaId} = '${metaId}'` }).firstPage();
                     if (records.length > 0) await base(TABLE_TEMPLATES).update([{ id: records[0].id, fields: { "Status": newStatus } }]);
                 } catch (e) { console.error("Error status plantilla:", e); }
             }
+        } else {
+            console.log(`⚠️ [WEBHOOK] Body no reconocido:`, JSON.stringify(body).substring(0, 500));
         }
         res.sendStatus(200);
-    } catch (e) { res.sendStatus(500); }
+    } catch (e: any) {
+        console.error("💥 [WEBHOOK] Error procesando webhook:", e.message, e.stack);
+        res.sendStatus(200); // Siempre responder 200 para que Meta no reintente indefinidamente
+    }
 });
 
 // ==========================================
