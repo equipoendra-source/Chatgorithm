@@ -1789,15 +1789,12 @@ io.on('connection', (socket) => {
         }
 
         if (token) {
+            // 1. SIEMPRE guardar y emitir el mensaje al UI (prioridad alta)
             try {
-                if (msg.type !== 'note') {
-                    await axios.post(`https://graph.facebook.com/v17.0/${originId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: msg.text } }, { headers: { Authorization: `Bearer ${token}` } });
-                }
-                // Usamos saveAndEmitMessage, que ahora emite socket primero
                 await saveAndEmitMessage({
                     text: msg.text,
                     sender: msg.sender,
-                    recipient: cleanTo, // Usamos cleanTo aquí también
+                    recipient: cleanTo,
                     type: msg.type || 'text',
                     origin_phone_id: originId,
                     timestamp: new Date().toISOString()
@@ -1805,7 +1802,19 @@ io.on('connection', (socket) => {
 
                 const prev = msg.type === 'note' ? `📝 Nota: ${msg.text}` : `Tú: ${msg.text}`;
                 await handleContactUpdate(cleanTo, prev, undefined, originId);
-            } catch (e: any) { console.error("Error envío socket/wa:", e.response?.data || e.message); }
+            } catch (e: any) {
+                console.error("❌ Error guardando mensaje:", e.message);
+            }
+
+            // 2. Intentar enviar por WhatsApp (puede fallar sin afectar al UI)
+            if (msg.type !== 'note') {
+                try {
+                    await axios.post(`https://graph.facebook.com/v17.0/${originId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: msg.text } }, { headers: { Authorization: `Bearer ${token}` } });
+                    console.log(`✅ [WA] Mensaje enviado a ${cleanTo}`);
+                } catch (e: any) {
+                    console.error("⚠️ [WA] Error enviando por WhatsApp (mensaje guardado en UI):", e.response?.data || e.message);
+                }
+            }
         }
     });
 
