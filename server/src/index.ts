@@ -1800,7 +1800,7 @@ io.on('connection', (socket) => {
 
                 const prev = msg.type === 'note' ? `📝 Nota: ${msg.text}` : `Tú: ${msg.text}`;
                 await handleContactUpdate(cleanTo, prev, undefined, originId);
-            } catch (e: any) { console.error("Error envío socket/wa:", e.message); }
+            } catch (e: any) { console.error("Error envío socket/wa:", e.response?.data || e.message); }
         }
     });
 
