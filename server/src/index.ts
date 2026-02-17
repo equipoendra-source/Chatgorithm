@@ -1750,7 +1750,12 @@ io.on('connection', (socket) => {
 
     // CHAT MESSAGE (CORREGIDO PARA SYNC)
     socket.on('chatMessage', async (msg) => {
-        const originId = msg.originPhoneId || waPhoneId || "default";
+        // FIX: Validar que el originPhoneId existe en BUSINESS_ACCOUNTS, si no, usar waPhoneId
+        const rawOriginId = msg.originPhoneId || waPhoneId || "default";
+        const originId = BUSINESS_ACCOUNTS[rawOriginId] ? rawOriginId : (waPhoneId || "default");
+        if (rawOriginId !== originId) {
+            console.log(`⚠️ [chatMessage] originPhoneId '${rawOriginId}' no válido, usando fallback: '${originId}'`);
+        }
         const token = getToken(originId);
         const cleanTo = cleanNumber(msg.targetPhone); // LIMPIEZA
 
