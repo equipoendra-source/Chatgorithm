@@ -692,7 +692,7 @@ async function sendWhatsAppText(to: string, body: string, originPhoneId: string)
 
     try {
         await axios.post(
-            `https://graph.facebook.com/v17.0/${originPhoneId}/messages`,
+            `https://graph.facebook.com/v21.0/${originPhoneId}/messages`,
             { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body } },
             { headers: { Authorization: `Bearer ${token}` } }
         );
@@ -774,7 +774,7 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
             if (token) {
                 try {
                     await axios.post(
-                        `https://graph.facebook.com/v17.0/${originPhoneId}/messages`,
+                        `https://graph.facebook.com/v21.0/${originPhoneId}/messages`,
                         {
                             messaging_product: "whatsapp",
                             to: cleanNumber(userPhone || ""),
@@ -1439,7 +1439,7 @@ app.post('/api/send-template', async (req, res) => {
     const cleanTo = cleanNumber(phone);
     try {
         const parameters = variables.map((val: string) => ({ type: "text", text: val }));
-        await axios.post(`https://graph.facebook.com/v17.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: language }, components: [{ type: "body", parameters }] } }, { headers: { Authorization: `Bearer ${token}` } });
+        await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: language }, components: [{ type: "body", parameters }] } }, { headers: { Authorization: `Bearer ${token}` } });
         await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender: senderName || "Agente", recipient: cleanTo, timestamp: new Date().toISOString(), type: "template", origin_phone_id: originPhoneId });
         res.json({ success: true });
     } catch (e: any) { res.status(400).json({ error: "Error envío" }); }
@@ -1465,7 +1465,7 @@ app.get('/api/analytics', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Error" }); }
 });
 
-app.get('/api/media/:id', async (req, res) => { if (!waToken) return res.sendStatus(500); try { const urlRes = await axios.get(`https://graph.facebook.com/v17.0/${req.params.id}`, { headers: { 'Authorization': `Bearer ${waToken}` } }); const mediaRes = await axios.get(urlRes.data.url, { headers: { 'Authorization': `Bearer ${waToken}` }, responseType: 'stream' }); res.setHeader('Content-Type', mediaRes.headers['content-type']); mediaRes.data.pipe(res); } catch (e) { res.sendStatus(404); } });
+app.get('/api/media/:id', async (req, res) => { if (!waToken) return res.sendStatus(500); try { const urlRes = await axios.get(`https://graph.facebook.com/v21.0/${req.params.id}`, { headers: { 'Authorization': `Bearer ${waToken}` } }); const mediaRes = await axios.get(urlRes.data.url, { headers: { 'Authorization': `Bearer ${waToken}` }, responseType: 'stream' }); res.setHeader('Content-Type', mediaRes.headers['content-type']); mediaRes.data.pipe(res); } catch (e) { res.sendStatus(404); } });
 // Función para convertir audio WebM a OGG Opus usando FFmpeg
 async function convertAudioToOggOpus(inputBuffer: Buffer, originalMimeType: string): Promise<{ buffer: Buffer, mimeType: string, filename: string }> {
     // Si ya es OGG real (no webm disfrazado), retornamos tal cual
@@ -1574,7 +1574,7 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
         formData.append('messaging_product', 'whatsapp');
 
         console.log(`📤 [Upload] Subiendo a WhatsApp Media API... (${fileMimeType})`);
-        const uploadRes = await axios.post(`https://graph.facebook.com/v17.0/${originPhoneId || waPhoneId}/media`, formData, { headers: { 'Authorization': `Bearer ${token}`, ...formData.getHeaders() } });
+        const uploadRes = await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/media`, formData, { headers: { 'Authorization': `Bearer ${token}`, ...formData.getHeaders() } });
         const mediaId = uploadRes.data.id;
         console.log(`✅ [Upload] Media subida, ID: ${mediaId}`);
 
@@ -1587,7 +1587,7 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
         const payload: any = { messaging_product: "whatsapp", to: cleanTo, type: msgType };
         payload[msgType] = { id: mediaId, ...(msgType === 'document' && { filename: fileName }) };
 
-        const msgRes = await axios.post(`https://graph.facebook.com/v17.0/${originPhoneId || waPhoneId}/messages`, payload, { headers: { Authorization: `Bearer ${token}` } });
+        const msgRes = await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, payload, { headers: { Authorization: `Bearer ${token}` } });
         console.log(`✅ [Upload] Mensaje enviado a WhatsApp:`, msgRes.data);
 
         let textLog = file.originalname; let saveType = 'document';
@@ -1618,7 +1618,12 @@ app.post('/webhook', async (req, res) => {
         if (body.object && body.entry?.[0]?.changes?.[0]?.value?.messages?.[0]) {
             const change = body.entry[0].changes[0].value;
             const msg = change.messages[0];
-            const originPhoneId = change.metadata.phone_number_id;
+
+            // FIX: Safely access metadata and log if missing
+            const originPhoneId = change.metadata?.phone_number_id || waPhoneId || "unknown_phone_id";
+            if (!change.metadata) {
+                console.warn("⚠️ [WEBHOOK] 'metadata' faltante en change object:", JSON.stringify(change).substring(0, 500));
+            }
 
             // Limpieza de datos entrantes
             const from = cleanNumber(msg.from);
@@ -1819,7 +1824,7 @@ io.on('connection', (socket) => {
             // 2. Intentar enviar por WhatsApp (puede fallar sin afectar al UI)
             if (msg.type !== 'note') {
                 try {
-                    await axios.post(`https://graph.facebook.com/v17.0/${originId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: msg.text } }, { headers: { Authorization: `Bearer ${token}` } });
+                    await axios.post(`https://graph.facebook.com/v21.0/${originId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: msg.text } }, { headers: { Authorization: `Bearer ${token}` } });
                     console.log(`✅ [WA] Mensaje enviado a ${cleanTo}`);
                 } catch (e: any) {
                     console.error("⚠️ [WA] Error enviando por WhatsApp (mensaje guardado en UI):", e.response?.data || e.message);
