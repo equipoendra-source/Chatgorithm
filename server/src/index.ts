@@ -572,7 +572,11 @@ async function getSystemPrompt() {
         } catch (e) { }
     }
     const now = new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
-    return promptTemplate.replace('{{DATE_PLACEHOLDER}}', now);
+    // Reemplazar placeholder si existe
+    promptTemplate = promptTemplate.replace('{{DATE_PLACEHOLDER}}', now);
+    // SIEMPRE anteponer la fecha actual al prompt para que el modelo NUNCA se confunda
+    const datePrefix = `⚠️ INFORMACIÓN CRÍTICA - FECHA Y HORA ACTUAL: ${now} (zona horaria: Madrid, España). DEBES usar esta fecha para TODOS los cálculos de fechas (hoy, mañana, la semana que viene, etc.). NO uses ninguna otra fecha.\n\n`;
+    return datePrefix + promptTemplate;
 }
 
 // ==========================================
