@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "406832339692",
+    "project_id": "chatgorim-13b4b",
+    "storage_bucket": "chatgorim-13b4b.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:406832339692:android:43275325db4346ede263c9",
+        "android_client_info": {
+          "package_name": "com.chatgorithm.app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAy7KCPfMbeberQJrj5QhjzNVRhqrfEGas"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
