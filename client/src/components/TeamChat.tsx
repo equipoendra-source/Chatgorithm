@@ -175,10 +175,14 @@ export function TeamChat({ socket, user, channel }: TeamChatProps) {
     const fmtTime = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
     // ── Upload ────────────────────────────────────────────────────────────
-    const uploadFile = async (file: File) => {
+    const uploadFile = async (file: File | Blob, filename?: string) => {
         setIsUploading(true);
         const formData = new FormData();
-        formData.append('file', file);
+        if (filename) {
+            formData.append('file', file, filename);
+        } else {
+            formData.append('file', file as File);
+        }
         try {
             // Corrected: API_URL already includes /api, so we use /team/upload
             const res = await fetch(`${API_URL}/team/upload`, { method: 'POST', body: formData });
@@ -253,12 +257,10 @@ export function TeamChat({ socket, user, channel }: TeamChatProps) {
                     const finalExt = ext;
 
                     const audioBlob = new Blob(chunks, { type: finalMimeType });
-                    // @ts-ignore
-                    const audioFile = new File([audioBlob], `voice.${finalExt}`, { type: finalMimeType });
 
-                    console.log(`🎤 [Team] Enviando audio nativo (${finalExt}): ${audioFile.size} bytes`);
-                    
-                    const data = await uploadFile(audioFile);
+                    console.log(`🎤 [Team] Enviando audio nativo (${finalExt}): ${audioBlob.size} bytes`);
+
+                    const data = await uploadFile(audioBlob, `voice.${finalExt}`);
                     if (data?.url) {
                         const currentChannel = channelRef.current;
                         const currentUser = userRef.current;
