@@ -18,6 +18,7 @@ import webpush from 'web-push';
 import admin from 'firebase-admin';
 import sharp from 'sharp';
 import { v2 as cloudinary } from 'cloudinary';
+import bcrypt from 'bcryptjs';
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
@@ -393,12 +394,21 @@ async function sendFCMNotification(payload: { title: string, body: string, data?
         const response = await admin.messaging().sendEachForMulticast(message);
         console.log(`📱 [FCM] Enviadas: ${response.successCount}/${tokensToNotify.length}`);
 
-        // Eliminar tokens inválidos
+        // Eliminar tokens inválidos de memoria y de Airtable
         response.responses.forEach((resp, idx) => {
             if (!resp.success && resp.error?.code === 'messaging/registration-token-not-registered') {
                 const invalidToken = tokensToNotify[idx];
                 for (const [key, val] of fcmTokens.entries()) {
                     if (val.token === invalidToken) fcmTokens.delete(key);
+                }
+                // Borrar también de Airtable para que no vuelva a cargarse en el próximo reinicio
+                if (base) {
+                    base('FCMTokens').select({
+                        filterByFormula: `{token} = '${invalidToken}'`,
+                        maxRecords: 1
+                    }).firstPage().then(records => {
+                        if (records.length > 0) base!('FCMTokens').destroy([records[0].id]).catch(() => {});
+                    }).catch(() => {});
                 }
             }
         });
@@ -1028,7 +1038,7 @@ async function stopConversation(phone: string) {
     return "Fin conversación.";
 }
 
-async function getChatHistory(phone: string, limit = 10) {
+async function getChatHistory(phone: string, currentText?: string, limit = 10) {
     if (!base) return [];
     try {
         const clean = cleanNumber(phone);
@@ -1039,8 +1049,10 @@ async function getChatHistory(phone: string, limit = 10) {
         }).all();
         const history = [...records].reverse().map((r: any) => {
             const sender = r.get('sender') as string;
-            const isBot = sender === 'Bot IA' || sender === 'Agente' || /[a-zA-Z]/.test(sender);
-            return { role: isBot ? "model" : "user", parts: [{ text: r.get('text') as string || "" }] };
+            // Remitentes de clientes son siempre dígitos puros (número de teléfono limpio)
+            // Cualquier otro valor (Bot IA, Agente, nombre de agente...) es el lado "model"
+            const isBot = !/^\d+$/.test(sender);
+            return { role: isBot ? "model" : "user", parts: [{ text: r.get('text') as string || "" }], _ts: r.get('timestamp') as string };
         });
 
         // FIX CRÍTICO GEMINI: Asegurar que el primer mensaje es 'user'
@@ -1048,7 +1060,27 @@ async function getChatHistory(phone: string, limit = 10) {
             history.shift();
         }
 
-        return history;
+        // FIX DUPLICIDAD: Eliminar el mensaje actual si ya fue guardado en Airtable
+        // Solo si tiene menos de 15 segundos (artefacto de concurrencia, no un mensaje repetido a propósito)
+        if (currentText && history.length > 0) {
+            const lastMsg = history[history.length - 1];
+            const isRecent = lastMsg._ts && (Date.now() - new Date(lastMsg._ts).getTime()) < 15000;
+            if (lastMsg.role === 'user' && lastMsg.parts[0].text === currentText && isRecent) {
+                console.log("✂️ Eliminando mensaje actual del historial para evitar duplicidad.");
+                history.pop();
+            }
+        }
+
+        // NORMALIZACIÓN GEMINI: Garantizar roles estrictamente alternos (user/model/user...)
+        // Gemini lanza error si recibe dos mensajes seguidos del mismo rol
+        const validHistory: { role: string, parts: { text: string }[] }[] = [];
+        for (const { _ts, ...msg } of history) {
+            if (validHistory.length === 0 || validHistory[validHistory.length - 1].role !== msg.role) {
+                validHistory.push(msg);
+            }
+        }
+
+        return validHistory;
 
     } catch (e) { return []; }
 }
@@ -1085,16 +1117,7 @@ async function processAI(text: string, contactPhone: string, contactName: string
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            const history = await getChatHistory(clean);
-
-            // --- FIX DUPLICIDAD DE RAÍZ ---
-            if (history.length > 0) {
-                const lastMsg = history[history.length - 1];
-                if (lastMsg.role === 'user' && lastMsg.parts[0].text === text) {
-                    console.log("✂️ Eliminando mensaje actual del historial para evitar duplicidad.");
-                    history.pop();
-                }
-            }
+            const history = await getChatHistory(clean, text);
 
             const systemPrompt = await getSystemPrompt();
 
@@ -1205,7 +1228,22 @@ app.post('/api/company-auth', async (req, res) => {
         const backendUrl = company.get('BackendUrl') as string;
         const companyName = company.get('CompanyName') as string;
 
-        if (storedPassword !== password) {
+        let passwordMatch = false;
+        if (storedPassword) {
+            if (storedPassword.startsWith('$2b$')) {
+                passwordMatch = await bcrypt.compare(password, storedPassword);
+            } else {
+                passwordMatch = storedPassword === password;
+                if (passwordMatch) {
+                    try {
+                        const hashed = await bcrypt.hash(storedPassword, 10);
+                        await base('Companies').update([{ id: company.id, fields: { "Password": hashed } }]);
+                    } catch (_) {}
+                }
+            }
+        }
+
+        if (!passwordMatch) {
             console.log(`❌ [Company Auth] Contraseña incorrecta para: ${companyId}`);
             return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
         }
@@ -1488,6 +1526,19 @@ app.post('/api/create-template', async (req, res) => {
         const formattedName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
         let metaId = "meta_" + Date.now();
         let status = "PENDING";
+
+        // Validar que las variables son secuenciales empezando por {{1}}
+        const varMatches = body.match(/{{\d+}}/g);
+        if (varMatches) {
+            const varNumbers = [...new Set(varMatches.map((m: string) => parseInt(m.replace(/[^\d]/g, ''))))].sort((a: number, b: number) => a - b) as number[];
+            const isSequential = varNumbers.every((num: number, i: number) => num === i + 1);
+            if (!isSequential) {
+                return res.status(400).json({
+                    success: false,
+                    error: `Las variables deben ser secuenciales empezando por {{1}}. Variables encontradas: ${varNumbers.map((n: number) => `{{${n}}}`).join(', ')}`
+                });
+            }
+        }
 
         if (waToken && waBusinessId) {
             try {
@@ -1866,9 +1917,6 @@ app.post('/webhook', async (req, res) => {
 // ==========================================
 io.on('connection', (socket) => {
     socket.on('request_config', async () => { if (base) { const r = await base('Config').select().all(); socket.emit('config_list', r.map(x => ({ id: x.id, name: x.get('name'), type: x.get('type') }))); } });
-    socket.on('register_presence', (u) => { onlineUsers.set(socket.id, u); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); });
-    socket.on('disconnect', () => { onlineUsers.delete(socket.id); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); });
-    socket.on('typing', (d) => { socket.broadcast.emit('remote_typing', d); });
     socket.on('add_config', async (data) => { if (base) { await base('Config').create([{ fields: { "name": data.name, "type": data.type } }]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
     socket.on('delete_config', async (id) => { if (base) { const realId = (typeof id === 'object' && id.id) ? id.id : id; await base('Config').destroy([realId]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
     socket.on('update_config', async (d) => { if (base) { await base('Config').update([{ id: d.id, fields: { "name": d.name } }]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
@@ -1877,10 +1925,10 @@ io.on('connection', (socket) => {
     socket.on('delete_quick_reply', async (id) => { if (base) { await base('QuickReplies').destroy([id]); const r = await base('QuickReplies').select().all(); io.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
     socket.on('update_quick_reply', async (d) => { if (base) { await base('QuickReplies').update([{ id: d.id, fields: { "Title": d.title, "Content": d.content, "Shortcut": d.shortcut } }]); const r = await base('QuickReplies').select().all(); io.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
     socket.on('request_agents', async () => { if (base) { const r = await base('Agents').select().all(); socket.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); } });
-    socket.on('login_attempt', async (data) => { if (!base) return; const r = await base('Agents').select({ filterByFormula: `{name} = '${data.name}'`, maxRecords: 1 }).firstPage(); if (r.length > 0) { const pwd = r[0].get('password'); const prefs = r[0].get('Preferences') ? JSON.parse(r[0].get('Preferences') as string) : {}; if (!pwd || String(pwd).trim() === "" || String(pwd) === String(data.password)) socket.emit('login_success', { username: r[0].get('name'), role: r[0].get('role'), preferences: prefs }); else socket.emit('login_error', 'Contraseña incorrecta'); } else socket.emit('login_error', 'Usuario no encontrado'); });
-    socket.on('create_agent', async (d) => { if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password || "" } }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
+    socket.on('login_attempt', async (data) => { if (!base) return; const r = await base('Agents').select({ filterByFormula: `{name} = '${data.name}'`, maxRecords: 1 }).firstPage(); if (r.length > 0) { const pwd = r[0].get('password'); const prefs = r[0].get('Preferences') ? JSON.parse(r[0].get('Preferences') as string) : {}; let agentPasswordOk = false; if (!pwd || String(pwd).trim() === "") { agentPasswordOk = true; } else if (String(pwd).startsWith('$2b$')) { agentPasswordOk = await bcrypt.compare(String(data.password), String(pwd)); } else { agentPasswordOk = String(pwd) === String(data.password); if (agentPasswordOk) { try { const hashed = await bcrypt.hash(String(pwd), 10); await base('Agents').update([{ id: r[0].id, fields: { "password": hashed } }]); } catch (_) {} } } if (agentPasswordOk) socket.emit('login_success', { username: r[0].get('name'), role: r[0].get('role'), preferences: prefs }); else socket.emit('login_error', 'Contraseña incorrecta'); } else socket.emit('login_error', 'Usuario no encontrado'); });
+    socket.on('create_agent', async (d) => { if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
     socket.on('delete_agent', async (d) => { if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
-    socket.on('update_agent', async (d) => { if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
+    socket.on('update_agent', async (d) => { if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
 
     // REQUEST CONTACTS
     socket.on('request_contacts', async () => {
