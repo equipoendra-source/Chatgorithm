@@ -1530,7 +1530,7 @@ app.post('/api/create-template', async (req, res) => {
         // Validar que las variables son secuenciales empezando por {{1}}
         const varMatches = body.match(/{{\d+}}/g);
         if (varMatches) {
-            const varNumbers = [...new Set(varMatches.map((m: string) => parseInt(m.replace(/[^\d]/g, ''))))].sort((a: number, b: number) => a - b) as number[];
+            const varNumbers = ([...new Set(varMatches.map((m: string) => parseInt(m.replace(/[^\d]/g, ''))))] as number[]).sort((a, b) => a - b);
             const isSequential = varNumbers.every((num: number, i: number) => num === i + 1);
             if (!isSequential) {
                 return res.status(400).json({
