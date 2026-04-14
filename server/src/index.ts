@@ -1158,12 +1158,28 @@ async function processAI(text: string, contactPhone: string, contactName: string
                     else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
                     else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
 
+                    // Si book_appointment tuvo éxito, enviar confirmación directamente al cliente
+                    // porque Gemini llamará stop_conversation después (no texto), dejando result2.text() vacío
+                    if (call.name === "book_appointment" && toolResult.startsWith("✅")) {
+                        await sendWhatsAppText(clean, toolResult, originPhoneId);
+                    }
+
                     const result2 = await chat.sendMessage([{
                         functionResponse: { name: call.name, response: { result: toolResult } }
                     }]);
 
+                    // result2 puede traer stop_conversation como tool call en lugar de texto
+                    const result2Calls = result2.response.functionCalls();
+                    if (result2Calls && result2Calls.length > 0) {
+                        for (const call2 of result2Calls) {
+                            if (call2.name === "stop_conversation") await stopConversation(clean);
+                        }
+                    }
+
                     const finalTxt = result2.response.text();
-                    await processJsonResponse(finalTxt, clean, originPhoneId);
+                    if (finalTxt && finalTxt.trim()) {
+                        await processJsonResponse(finalTxt, clean, originPhoneId);
+                    }
                 }
             } else {
                 const txt = response.text();
