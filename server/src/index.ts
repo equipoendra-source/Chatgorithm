@@ -410,8 +410,8 @@ async function sendFCMNotification(payload: { title: string, body: string, data?
                         filterByFormula: `{token} = '${invalidToken}'`,
                         maxRecords: 1
                     }).firstPage().then(records => {
-                        if (records.length > 0) base!('FCMTokens').destroy([records[0].id]).catch(() => {});
-                    }).catch(() => {});
+                        if (records.length > 0) base!('FCMTokens').destroy([records[0].id]).catch((e: any) => { console.error('[FCM] Error eliminando token inválido de Airtable:', e.message); });
+                    }).catch((e: any) => { console.error('[FCM] Error buscando token inválido en Airtable:', e.message); });
                 }
             }
         });
@@ -1267,7 +1267,7 @@ app.post('/api/company-auth', async (req, res) => {
                     try {
                         const hashed = await bcrypt.hash(storedPassword, 10);
                         await base('Companies').update([{ id: company.id, fields: { "Password": hashed } }]);
-                    } catch (_) {}
+                    } catch (e: any) { console.error('[Auth] Error hasheando contraseña en Airtable:', e.message); }
                 }
             }
         }
@@ -1484,7 +1484,7 @@ app.get('/api/appointments', async (req, res) => {
     try {
         const records = await base('Appointments').select({ sort: [{ field: "Date", direction: "asc" }] }).all();
         res.json(records.map(r => ({ id: r.id, date: r.get('Date'), status: r.get('Status'), clientPhone: r.get('ClientPhone'), clientName: r.get('ClientName') })));
-    } catch (e) { res.status(500).json({ error: "Error fetching appointments" }); }
+    } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
 });
 
 app.post('/api/appointments', async (req, res) => {
@@ -1492,7 +1492,7 @@ app.post('/api/appointments', async (req, res) => {
     try {
         await base('Appointments').create([{ fields: { "Date": req.body.date, "Status": "Available" } }]);
         res.json({ success: true });
-    } catch (e) { res.status(400).json({ error: "Error creating" }); }
+    } catch (e: any) { console.error('[API] Error POST /appointments:', e.message); res.status(400).json({ error: "Error creating" }); }
 });
 
 app.put('/api/appointments/:id', async (req, res) => {
@@ -1504,12 +1504,12 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.clientName !== undefined) f["ClientName"] = req.body.clientName;
         await base('Appointments').update([{ id: req.params.id, fields: f }]);
         res.json({ success: true });
-    } catch (e) { res.status(400).json({ error: "Error updating" }); }
+    } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
 });
 
 app.delete('/api/appointments/:id', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
-    try { await base('Appointments').destroy([req.params.id]); res.json({ success: true }); } catch (e) { res.status(400).json({ error: "Error deleting" }); }
+    try { await base('Appointments').destroy([req.params.id]); res.json({ success: true }); } catch (e: any) { console.error('[API] Error DELETE /appointments/:id:', e.message); res.status(400).json({ error: "Error deleting" }); }
 });
 
 // SCHEDULE CONFIG API
@@ -1643,7 +1643,7 @@ app.get('/api/analytics', async (req, res) => {
         const statusMap: Record<string, number> = {}; contacts.forEach(c => { const s = (c.get('status') as string) || 'Otros'; statusMap[s] = (statusMap[s] || 0) + 1; });
         const statusDistribution = Object.entries(statusMap).map(([name, count]) => ({ name, count }));
         res.json({ kpis: { totalContacts, totalMessages, newLeads }, activity: activityData, agents: agentPerformance, statuses: statusDistribution });
-    } catch (e) { res.status(500).json({ error: "Error" }); }
+    } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }
 });
 
 app.get('/api/media/:id', async (req, res) => { if (!waToken) return res.sendStatus(500); try { const urlRes = await axios.get(`https://graph.facebook.com/v21.0/${req.params.id}`, { headers: { 'Authorization': `Bearer ${waToken}` } }); const mediaRes = await axios.get(urlRes.data.url, { headers: { 'Authorization': `Bearer ${waToken}` }, responseType: 'stream' }); res.setHeader('Content-Type', mediaRes.headers['content-type']); mediaRes.data.pipe(res); } catch (e) { res.sendStatus(404); } });
