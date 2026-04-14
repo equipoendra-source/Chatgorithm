@@ -8,7 +8,8 @@ const isNative = Capacitor.isNativePlatform();
 const isLocal = !isNative && typeof window !== 'undefined' &&
     (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
 
-let API_URL = 'https://chatgorithm-vubn.onrender.com/api';
+import { API_URL as SHARED_API_URL } from '../config/api';
+let API_URL = SHARED_API_URL;
 
 export const setPushApiUrl = (url: string) => {
     // Asegurarse de que el backendUrl incluya el sufijo /api necesario para las rutas del servidor

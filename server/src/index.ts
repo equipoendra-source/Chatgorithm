@@ -1898,7 +1898,8 @@ app.post('/webhook', async (req, res) => {
 
             console.log(`📩 [WEBHOOK] Mensaje de ${from}: "${text}" (tipo: ${msg.type}, mediaId: ${inboundMediaId || 'ninguno'}, phoneId: ${originPhoneId})`);
 
-            const contactRecord = await handleContactUpdate(from, text, change.contacts?.[0]?.profile?.name, originPhoneId);
+            const metaProfileName = change.contacts?.[0]?.profile?.name || undefined;
+            const contactRecord = await handleContactUpdate(from, text, metaProfileName, originPhoneId);
 
             // CORRECCIÓN CRÍTICA: Añadir recipient como originPhoneId y pasar el tipo y mediaId correcto
             await saveAndEmitMessage({

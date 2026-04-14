@@ -3,6 +3,7 @@ import {
   X, Search, ChevronRight, Send, Loader2, User, LayoutTemplate
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
+import { API_URL as SHARED_API_URL } from '../config/api';
 
 interface Template {
   id: string;
@@ -25,8 +26,7 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
   const { theme } = useTheme();
   const isDark = theme === 'dark';
 
-  const isProduction = window.location.hostname.includes('render.com');
-  const API_URL_BASE = isProduction ? 'https://chatgorithm-vubn.onrender.com/api' : 'http://localhost:3000/api';
+  const API_URL_BASE = SHARED_API_URL;
 
   const [templates, setTemplates] = useState<Template[]>([]);
   const [loading, setLoading] = useState(true);

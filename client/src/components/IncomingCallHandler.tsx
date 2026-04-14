@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Device, Call } from '@twilio/voice-sdk';
 import { Phone, PhoneOff, PhoneIncoming, User } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
+import { API_URL as SHARED_API_URL } from '../config/api';
 
 /**
  * Componente global que siempre escucha llamadas entrantes de Twilio.
@@ -55,12 +56,7 @@ export function IncomingCallHandler() {
     const initDevice = async () => {
         try {
             // URL de producción o local
-            const isProduction = window.location.hostname.includes('render.com') ||
-                window.location.hostname.includes('netlify.app') ||
-                window.location.hostname.includes('vercel.app');
-            const API_URL = isProduction
-                ? 'https://chatgorithm-vubn.onrender.com/api'
-                : 'http://localhost:3000/api';
+            const API_URL = SHARED_API_URL;
 
             console.log('📞 [IncomingCallHandler] Obteniendo token Twilio...');
             const response = await fetch(`${API_URL}/voice/token`);
@@ -75,7 +71,7 @@ export function IncomingCallHandler() {
             // Crear dispositivo
             const newDevice = new Device(data.token, {
                 codecPreferences: ['opus', 'pcmu'] as any,
-                logLevel: isProduction ? 'error' : 'debug'
+                logLevel: 'error'
             });
 
             // Eventos del dispositivo
