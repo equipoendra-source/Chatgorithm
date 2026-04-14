@@ -137,6 +137,9 @@ const processedWebhookIds = new Set<string>();
 // VAPID keys - En producción, guárdalas en variables de entorno
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BNibvQQfVfb6ozHGy2xqnt5JJV_rqq8hGmj5qQuJb1xozXnN7LX5aVfWlqDqx_1BHDlPvFxTf_IiQOI5Y8mMEFs';
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'X9mNyJVnqAhWJnH5fFYP_EWcqLwvB3g8IvXMaE7KqY0';
+if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
+    console.warn('⚠️ [WebPush] VAPID_PUBLIC_KEY o VAPID_PRIVATE_KEY no configuradas en env. Las notificaciones web push no funcionarán correctamente.');
+}
 
 // Configurar VAPID
 webpush.setVapidDetails(
@@ -523,7 +526,7 @@ async function clearAppointmentCache(phone: string) {
                 fields: { "appointment_cache": "" }
             }]);
         }
-    } catch (e) { }
+    } catch (e) { console.error('[Cache] Error limpiando caché de citas en Airtable:', e); }
 }
 
 // --- HELPER: CORRECCIÓN HUSO HORARIO (MADRID) ---
@@ -650,7 +653,7 @@ async function getSystemPrompt() {
         try {
             const records = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage();
             if (records.length > 0) promptTemplate = records[0].get('Value') as string;
-        } catch (e) { }
+        } catch (e) { console.error('[BotSettings] Error cargando prompt personalizado, usando prompt por defecto:', e); }
     }
     const now = new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
     // Reemplazar placeholder si existe
@@ -696,7 +699,7 @@ async function saveAndEmitMessage(msg: any) {
                 if (contacts.length > 0 && contacts[0].get('name')) {
                     senderName = contacts[0].get('name') as string;
                 }
-            } catch (e) { }
+            } catch (e) { console.error('[Push] Error obteniendo nombre del contacto para notificación:', e); }
         }
 
         // Enviar notificación FCM filtrada por preferencias/asignación
@@ -2105,10 +2108,10 @@ io.on('connection', (socket) => {
 
             const history = records.map(r => ({
                 id: r.id,
-                content: r.get('content'),
-                sender: r.get('sender'),
-                timestamp: r.get('timestamp'),
-                channel: r.get('channel')
+                content: r.get('content') || '',
+                sender: r.get('sender') || 'Desconocido',
+                timestamp: r.get('timestamp') || null,
+                channel: r.get('channel') || ''
             }));
 
             socket.emit('team_history', { channel: channelName, history });

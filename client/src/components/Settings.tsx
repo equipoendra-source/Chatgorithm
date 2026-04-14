@@ -167,7 +167,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const handleSavePrompt = async () => {
         setIsLoadingPrompt(true);
         try { await fetch(`${API_URL}/bot-config`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ prompt: botPrompt }) }); setSuccess("Guardado"); }
-        catch (e) { setError("Error"); } finally { setIsLoadingPrompt(false); }
+        catch (e) { console.error("[Settings] Error guardando prompt:", e); setError("Error al guardar el prompt"); } finally { setIsLoadingPrompt(false); }
     };
 
     const handleSaveSchedule = async () => {
