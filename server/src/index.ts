@@ -1590,7 +1590,11 @@ app.post('/api/send-template', async (req, res) => {
         await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
         await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender: senderName || "Agente", recipient: cleanTo, timestamp: new Date().toISOString(), type: "template", origin_phone_id: originPhoneId });
         res.json({ success: true });
-    } catch (e: any) { res.status(400).json({ error: "Error envío" }); }
+    } catch (e: any) {
+        const metaError = e?.response?.data?.error?.message || e?.message || "Error envío";
+        console.error("❌ [send-template] Error Meta:", JSON.stringify(e?.response?.data || e?.message));
+        res.status(400).json({ error: metaError });
+    }
 });
 
 // Analytics
