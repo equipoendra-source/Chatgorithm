@@ -36,7 +36,7 @@ const WhatsAppTemplatesManager = () => {
   const [formData, setFormData] = useState({
     name: '',
     category: 'MARKETING',
-    language: 'es',
+    language: 'es_ES',
     body: '',
     footer: ''
   });
@@ -163,7 +163,7 @@ const WhatsAppTemplatesManager = () => {
   };
 
   const resetForm = () => {
-    setFormData({ name: '', category: 'MARKETING', language: 'es', body: '', footer: '' });
+    setFormData({ name: '', category: 'MARKETING', language: 'es_ES', body: '', footer: '' });
     setVariableMap({});
   };
 
@@ -354,7 +354,7 @@ const WhatsAppTemplatesManager = () => {
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="md:col-span-2"><label className="text-xs font-bold text-slate-400 uppercase mb-1.5 block ml-1">Nombre Único</label><input type="text" value={formData.name} onChange={(e) => setFormData({ ...formData, name: e.target.value })} placeholder="ej: oferta_navidad_2025" className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none font-medium transition-all ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder:text-slate-500' : 'bg-slate-50 border-slate-200 text-slate-700 placeholder:text-slate-300'}`} /></div>
                   <div><label className="text-xs font-bold text-slate-400 uppercase mb-1.5 block ml-1">Categoría</label><select value={formData.category} onChange={(e) => setFormData({ ...formData, category: e.target.value })} className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none font-medium transition-all appearance-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}`}><option value="MARKETING">Marketing (Ofertas)</option><option value="UTILITY">Utilidad (Pedidos)</option><option value="AUTHENTICATION">Autenticación (OTP)</option></select></div>
-                  <div><label className="text-xs font-bold text-slate-400 uppercase mb-1.5 block ml-1">Idioma</label><select value={formData.language} onChange={(e) => setFormData({ ...formData, language: e.target.value })} className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none font-medium transition-all appearance-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}`}><option value="es">Español (ES)</option><option value="en_US">Inglés (US)</option></select></div>
+                  <div><label className="text-xs font-bold text-slate-400 uppercase mb-1.5 block ml-1">Idioma</label><select value={formData.language} onChange={(e) => setFormData({ ...formData, language: e.target.value })} className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none font-medium transition-all appearance-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-slate-50 border-slate-200 text-slate-700'}`}><option value="es_ES">Español (España)</option><option value="es_MX">Español (México)</option><option value="en_US">Inglés (US)</option></select></div>
                 </div>
                 <div><div className="flex justify-between items-end mb-1.5 ml-1"><label className="text-xs font-bold text-slate-400 uppercase">Mensaje</label><button onClick={insertVariable} className={`text-xs font-bold flex items-center gap-1 px-2 py-1 rounded-lg transition-colors ${isDark ? 'bg-green-900/40 text-green-400 hover:bg-green-900/60' : 'text-green-600 hover:text-green-700 bg-green-50 hover:bg-green-100'}`}><Braces size={12} /> Insertar Variable</button></div><div className="relative group"><textarea value={formData.body} onChange={(e) => setFormData({ ...formData, body: e.target.value })} rows={4} className={`w-full p-4 border rounded-xl focus:ring-2 focus:ring-green-500 outline-none resize-none shadow-sm transition-all leading-relaxed ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder:text-slate-400 group-hover:border-slate-500' : 'bg-white border-slate-200 text-slate-700 group-hover:border-slate-300'}`} placeholder="Hola {{1}}, gracias por tu compra..." /></div></div>
                 {Object.keys(variableMap).length > 0 && (<div className={`border rounded-xl p-4 animate-in fade-in slide-in-from-top-2 ${isDark ? 'bg-blue-900/20 border-blue-800' : 'bg-blue-50/50 border-blue-100'}`}><h3 className={`text-sm font-bold mb-3 flex items-center gap-2 ${isDark ? 'text-blue-300' : 'text-blue-800'}`}><Info size={16} /> Definir Variables</h3><div className="space-y-3">{Object.keys(variableMap).sort().map(num => (<div key={num} className="flex items-center gap-3"><span className={`font-mono text-xs font-bold px-2 py-1.5 rounded-lg border shadow-sm shrink-0 ${isDark ? 'bg-slate-700 text-blue-300 border-blue-900' : 'bg-white text-blue-600 border-blue-100'}`}>{`{{${num}}}`}</span><span className="text-slate-400 text-sm">=</span><input type="text" value={variableMap[num]} onChange={(e) => setVariableMap({ ...variableMap, [num]: e.target.value })} placeholder={`Ej: Nombre Cliente...`} className={`flex-1 p-2 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-blue-100'}`} /></div>))}</div></div>)}
