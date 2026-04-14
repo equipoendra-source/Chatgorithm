@@ -4,6 +4,7 @@ import {
     RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
+import { API_URL as API_URL_BASE } from '../config/api';
 
 interface Appointment {
     id: string;
@@ -21,8 +22,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const { theme } = useTheme();
     const isDark = theme === 'dark';
 
-    const isProduction = window.location.hostname.includes('render.com');
-    const API_URL = isProduction ? 'https://chatgorithm-vubn.onrender.com/api' : 'http://localhost:3000/api';
+    const API_URL = API_URL_BASE;
 
     const [appointments, setAppointments] = useState<Appointment[]>([]);
     const [loading, setLoading] = useState(true);
