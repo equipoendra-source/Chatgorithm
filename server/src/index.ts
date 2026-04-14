@@ -616,8 +616,12 @@ Analiza el mensaje del cliente para detectar qué necesita:
 - Cliente dice un día (ej: "el lunes", "mañana", "hoy") → Calcula fecha YYYY-MM-DD basándote en la fecha actual
 - Llama get_available_appointments(date="YYYY-MM-DD") → Muestra las horas
 
-**PASO 3 - RESERVA:**
-- Cliente responde con un NÚMERO (ej: "1", "3", "opción 2") → **PARA TODO** → Llama book_appointment(optionIndex=número)
+**PASO 3 - NOMBRE (solo si es desconocido):**
+- Si {{NOMBRE_CONOCIDO}} → salta al PASO 4 directamente
+- Si el nombre NO es conocido → pregunta: "¿Me puedes decir tu nombre para registrar la cita?" → espera respuesta
+
+**PASO 4 - RESERVA:**
+- Cliente responde con un NÚMERO (ej: "1", "3", "opción 2") → **PARA TODO** → Llama book_appointment(optionIndex=número, clientName=nombre del cliente)
 - Tras confirmar → Llama SIEMPRE stop_conversation()
 
 ### 3. DESPUÉS DE RESERVAR O ASIGNAR DEPARTAMENTO
@@ -626,8 +630,9 @@ Analiza el mensaje del cliente para detectar qué necesita:
 
 ### 4. SI EL CLIENTE DICE UN NÚMERO
 Si el mensaje del cliente es SOLO un número como "1", "2", "11":
-- **INMEDIATAMENTE** llama book_appointment(optionIndex=ese número)
-- NO preguntes nada más
+- Si {{NOMBRE_CONOCIDO}} → **INMEDIATAMENTE** llama book_appointment(optionIndex=ese número, clientName={{NOMBRE_CLIENTE}})
+- Si el nombre NO es conocido → pregunta el nombre primero, luego reserva
+- NO preguntes el nombre si ya lo tienes
 
 ## FORMATO DE RESPUESTA (OBLIGATORIO)
 Tu respuesta SIEMPRE debe ser JSON válido:
@@ -1119,7 +1124,11 @@ async function processAI(text: string, contactPhone: string, contactName: string
         try {
             const history = await getChatHistory(clean, text);
 
-            const systemPrompt = await getSystemPrompt();
+            const rawPrompt = await getSystemPrompt();
+            const nombreConocido = contactName && contactName !== "Cliente";
+            const systemPrompt = rawPrompt
+                .replace(/\{\{NOMBRE_CONOCIDO\}\}/g, nombreConocido ? `SÍ, el nombre es "${contactName}"` : "NO, nombre desconocido")
+                .replace(/\{\{NOMBRE_CLIENTE\}\}/g, nombreConocido ? contactName : "");
 
             const model = genAI.getGenerativeModel({
                 model: MODEL_NAME,
@@ -1134,7 +1143,7 @@ async function processAI(text: string, contactPhone: string, contactName: string
                     functionDeclarations: [
                         { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." } }, required: ["date"] } },
-                        { name: "book_appointment", description: "Book an appointment using the slot index number. Call this when user says a number like '1' or '2' or '11'. After booking, ALWAYS call stop_conversation.", parameters: { type: SchemaType.OBJECT, properties: { optionIndex: { type: SchemaType.NUMBER, description: "Index number from the list (e.g., 1)" } }, required: ["optionIndex"] } },
+                        { name: "book_appointment", description: "Book an appointment using the slot index number. Call this when user says a number like '1' or '2' or '11'. After booking, ALWAYS call stop_conversation.", parameters: { type: SchemaType.OBJECT, properties: { optionIndex: { type: SchemaType.NUMBER, description: "Index number from the list (e.g., 1)" }, clientName: { type: SchemaType.STRING, description: "Full name of the client for the appointment. Always include this — use the name collected during conversation or the known contact name." } }, required: ["optionIndex", "clientName"] } },
                         { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs sales, workshop, or admin help.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: ["Ventas", "Taller", "Admin"], format: "enum" } }, required: ["department"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
                     ]
@@ -1154,7 +1163,7 @@ async function processAI(text: string, contactPhone: string, contactName: string
 
                     if (call.name === "get_available_days") toolResult = await getAvailableDays();
                     else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
-                    else if (call.name === "book_appointment") toolResult = await bookAppointment(Number(args.optionIndex), clean, contactName);
+                    else if (call.name === "book_appointment") toolResult = await bookAppointment(Number(args.optionIndex), clean, args.clientName || contactName);
                     else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
                     else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
 
