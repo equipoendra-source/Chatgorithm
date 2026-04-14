@@ -616,9 +616,9 @@ Analiza el mensaje del cliente para detectar qué necesita:
 - Cliente dice un día (ej: "el lunes", "mañana", "hoy") → Calcula fecha YYYY-MM-DD basándote en la fecha actual
 - Llama get_available_appointments(date="YYYY-MM-DD") → Muestra las horas
 
-**PASO 3 - NOMBRE (solo si es desconocido):**
-- Si {{NOMBRE_CONOCIDO}} → salta al PASO 4 directamente
-- Si el nombre NO es conocido → pregunta: "¿Me puedes decir tu nombre para registrar la cita?" → espera respuesta
+**PASO 3 - NOMBRE (solo si no lo sabes):**
+- Si ya tienes el nombre del cliente → salta al PASO 4
+- Si NO sabes el nombre → pregunta: "¿Me puedes decir tu nombre para registrar la cita?" → espera respuesta
 
 **PASO 4 - RESERVA:**
 - Cliente responde con un NÚMERO (ej: "1", "3", "opción 2") → **PARA TODO** → Llama book_appointment(optionIndex=número, clientName=nombre del cliente)
@@ -630,8 +630,8 @@ Analiza el mensaje del cliente para detectar qué necesita:
 
 ### 4. SI EL CLIENTE DICE UN NÚMERO
 Si el mensaje del cliente es SOLO un número como "1", "2", "11":
-- Si {{NOMBRE_CONOCIDO}} → **INMEDIATAMENTE** llama book_appointment(optionIndex=ese número, clientName={{NOMBRE_CLIENTE}})
-- Si el nombre NO es conocido → pregunta el nombre primero, luego reserva
+- Si ya tienes el nombre → **INMEDIATAMENTE** llama book_appointment(optionIndex=ese número, clientName=nombre conocido)
+- Si NO tienes el nombre → pregunta el nombre primero, luego cuando lo tengas reserva
 - NO preguntes el nombre si ya lo tienes
 
 ## FORMATO DE RESPUESTA (OBLIGATORIO)
@@ -1126,9 +1126,10 @@ async function processAI(text: string, contactPhone: string, contactName: string
 
             const rawPrompt = await getSystemPrompt();
             const nombreConocido = contactName && contactName !== "Cliente";
-            const systemPrompt = rawPrompt
-                .replace(/\{\{NOMBRE_CONOCIDO\}\}/g, nombreConocido ? `SÍ, el nombre es "${contactName}"` : "NO, nombre desconocido")
-                .replace(/\{\{NOMBRE_CLIENTE\}\}/g, nombreConocido ? contactName : "");
+            const nombreContexto = nombreConocido
+                ? `\n\n⚠️ DATO DEL CLIENTE: Su nombre ya es conocido: "${contactName}". NO le preguntes el nombre.`
+                : `\n\n⚠️ DATO DEL CLIENTE: Nombre desconocido. Si va a reservar cita, pregúntale su nombre antes de llamar a book_appointment.`;
+            const systemPrompt = rawPrompt + nombreContexto;
 
             const model = genAI.getGenerativeModel({
                 model: MODEL_NAME,
