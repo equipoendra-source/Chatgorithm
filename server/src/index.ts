@@ -1513,7 +1513,7 @@ app.get('/api/templates', async (req, res) => {
     if (!base) return res.status(500).json({});
     try {
         const r = await base(TABLE_TEMPLATES).select().all();
-        res.json(r.map(x => ({ id: x.id, name: x.get('Name'), status: x.get('Status'), body: x.get('Body'), variableMapping: x.get('VariableMapping') ? JSON.parse(x.get('VariableMapping') as string) : {} })));
+        res.json(r.map(x => ({ id: x.id, name: x.get('Name'), status: x.get('Status'), body: x.get('Body'), language: x.get('Language'), variableMapping: x.get('VariableMapping') ? JSON.parse(x.get('VariableMapping') as string) : {} })));
     } catch (e: any) {
         console.error('Error fetching templates:', e.message);
         res.status(500).json({ error: 'Error fetching templates' });
