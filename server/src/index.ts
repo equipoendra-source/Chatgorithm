@@ -1585,7 +1585,9 @@ app.post('/api/send-template', async (req, res) => {
     const cleanTo = cleanNumber(phone);
     try {
         const parameters = variables.map((val: string) => ({ type: "text", text: val }));
-        await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: language }, components: [{ type: "body", parameters }] } }, { headers: { Authorization: `Bearer ${token}` } });
+        const templateObj: any = { name: templateName, language: { code: language } };
+        if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
+        await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
         await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender: senderName || "Agente", recipient: cleanTo, timestamp: new Date().toISOString(), type: "template", origin_phone_id: originPhoneId });
         res.json({ success: true });
     } catch (e: any) { res.status(400).json({ error: "Error envío" }); }
