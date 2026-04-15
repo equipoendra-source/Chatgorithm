@@ -342,7 +342,7 @@ function App() {
                         >
                             <ArrowLeft className="w-6 h-6 text-slate-300 group-hover:text-indigo-400 transition-colors" />
                         </button>
-                        <CalendarDashboard readOnly={true} />
+                        <CalendarDashboard readOnly={user.role === 'agent'} />
                     </div>
                 </div>
             </div>

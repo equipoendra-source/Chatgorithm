@@ -616,10 +616,17 @@ Si ya sabes lo que quiere (ej: reservar cita), incluye el saludo Y ya responde a
 
 ### 1. DETECCIÓN DE INTENCIÓN
 Analiza el mensaje del cliente:
-- **Cita / Revisión / ITV / Cambio de aceite / Reparación** → Sigue el flujo de citas (pasos 2-5)
+- **Cita / Reserva / Revisión / ITV / Cambio de aceite / Reparación** → Sigue el flujo de citas (pasos 2-5)
+- **Cancelar / Anular / Quitar cita** → Sigue el flujo de CANCELACIÓN (paso C)
 - **Ventas / Comprar / Precio de un vehículo** → Llama assign_department("Ventas")
 - **Avería urgente / Taller** → Llama assign_department("Taller")
 - **Otro tema** → Saluda amablemente y pregunta en qué puedes ayudarle
+
+### C. FLUJO DE CANCELACIÓN
+- Llama cancel_appointment() directamente
+- Si responde "CITA_CANCELADA: [fecha]" → confirma al cliente: "Su cita del [fecha] ha sido cancelada correctamente. El hueco ha quedado libre. ¿Desea reservar una nueva fecha?"
+- Si responde "No_appointment_found" → responde: "No encontré ninguna cita próxima reservada a su nombre. ¿Podría confirmarlo o desea reservar una nueva?"
+- Llama stop_conversation() después de confirmar la cancelación
 
 ### 2. FLUJO DE CITAS — SIGUE ESTE ORDEN EXACTO
 
@@ -1059,6 +1066,39 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
     }
 }
 
+async function cancelAppointment(clientPhone: string) {
+    if (!base) return "Error BD";
+    const clean = cleanNumber(clientPhone);
+    try {
+        // Buscar la cita reservada más próxima del cliente
+        const now = new Date().toISOString();
+        const records = await base('Appointments').select({
+            filterByFormula: `AND({Status} = 'Booked', {ClientPhone} = '${clean}', {Date} >= '${now}')`,
+            sort: [{ field: "Date", direction: "asc" }],
+            maxRecords: 1
+        }).firstPage();
+
+        if (records.length === 0) {
+            return "No_appointment_found";
+        }
+
+        const record = records[0];
+        const dateVal = new Date(record.get('Date') as string);
+        const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
+
+        await base('Appointments').update([{
+            id: record.id,
+            fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "" }
+        }]);
+
+        console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate}`);
+        return `✅ CITA_CANCELADA: ${humanDate}`;
+    } catch (e: any) {
+        console.error(`❌ [Cancel] Error:`, e.message);
+        return "Error técnico al cancelar.";
+    }
+}
+
 async function assignDepartment(clientPhone: string, department: string) {
     if (!base) return "Error BD";
     try {
@@ -1184,8 +1224,9 @@ async function processAI(text: string, contactPhone: string, contactName: string
                         { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." } }, required: ["date"] } },
                         { name: "book_appointment", description: "Book an appointment using the slot index number. ONLY call this when you have ALL 5 required pieces of data: optionIndex, clientName, licensePlate, carBrand and carModel. After booking, ALWAYS call stop_conversation.", parameters: { type: SchemaType.OBJECT, properties: { optionIndex: { type: SchemaType.NUMBER, description: "Index number chosen by the client from the list (e.g., 1, 2, 3)" }, clientName: { type: SchemaType.STRING, description: "Full name of the client for the appointment." }, licensePlate: { type: SchemaType.STRING, description: "Vehicle license plate (matrícula), e.g. '1234ABC' or 'B-4521-KL'." }, carBrand: { type: SchemaType.STRING, description: "Vehicle make/brand, e.g. 'Ford', 'Toyota', 'BMW', 'Volkswagen'." }, carModel: { type: SchemaType.STRING, description: "Vehicle model, e.g. 'Focus', 'Corolla', 'Serie 3', 'Golf'." } }, required: ["optionIndex", "clientName", "licensePlate", "carBrand", "carModel"] } },
+                        { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs sales, workshop, or admin help.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: ["Ventas", "Taller", "Admin"], format: "enum" } }, required: ["department"] } },
-                        { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
+                        { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking, cancelling an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
                     ]
                 }]
             });
@@ -1204,6 +1245,7 @@ async function processAI(text: string, contactPhone: string, contactName: string
                     if (call.name === "get_available_days") toolResult = await getAvailableDays();
                     else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
                     else if (call.name === "book_appointment") toolResult = await bookAppointment(Number(args.optionIndex), clean, args.clientName || contactName, args.licensePlate || '', args.carBrand || '', args.carModel || '');
+                    else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
                     else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
                     else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
 
