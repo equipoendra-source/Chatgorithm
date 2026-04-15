@@ -1047,9 +1047,13 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
         const clean = cleanNumber(clientPhone);
         const contacts = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'`, maxRecords: 1 }).firstPage();
         if (contacts.length > 0) {
-            console.log(`📅 [Book] Actualizando contacto a 'Cerrado'...`);
-            // Usamos 'Cerrado' porque ya existe en el single-select de Airtable
-            await base('Contacts').update([{ id: contacts[0].id, fields: { "status": "Cerrado" } }]);
+            console.log(`📅 [Book] Actualizando contacto a 'Cerrado' y nombre '${clientName}'...`);
+            const contactFields: any = { "status": "Cerrado" };
+            // Actualizar nombre solo si el bot lo recopiló (no es el valor por defecto "Cliente")
+            if (clientName && clientName !== "Cliente") {
+                contactFields["name"] = clientName;
+            }
+            await base('Contacts').update([{ id: contacts[0].id, fields: contactFields }]);
             io.emit('contact_updated_notification');
         }
 
@@ -1997,8 +2001,15 @@ app.post('/webhook', async (req, res) => {
             });
             console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
 
+            // Comprobar si hay sesión de reserva activa en Airtable (sobrevive reinicios)
+            const hasPendingBooking = !activeAiChats.has(from) && !!(await getAppointmentCache(from));
+
             if (activeAiChats.has(from)) {
                 console.log(`🤖 IA activada por sesión activa para ${from}`);
+                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId);
+            } else if (hasPendingBooking) {
+                console.log(`🤖 IA reactivada por reserva pendiente en cache para ${from}`);
+                activeAiChats.add(from);
                 processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId);
             } else if (contactRecord && (contactRecord.get('status') === 'Nuevo' || contactRecord.get('status') === 'Cerrado') && !contactRecord.get('assigned_to')) {
                 console.log(`🤖 IA activada (status=${contactRecord.get('status')}) para ${from}`);
