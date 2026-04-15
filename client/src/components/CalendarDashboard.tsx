@@ -12,6 +12,9 @@ interface Appointment {
     status: 'Available' | 'Booked';
     clientPhone?: string;
     clientName?: string;
+    matricula?: string;
+    marca?: string;
+    modelo?: string;
 }
 
 interface CalendarDashboardProps {
@@ -34,6 +37,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const [editStatus, setEditStatus] = useState('');
     const [editName, setEditName] = useState('');
     const [editPhone, setEditPhone] = useState('');
+    const [editMatricula, setEditMatricula] = useState('');
+    const [editMarca, setEditMarca] = useState('');
+    const [editModelo, setEditModelo] = useState('');
 
     // Crear Manual
     const [newDate, setNewDate] = useState('');
@@ -67,6 +73,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
         setEditPhone(appt.clientPhone || '');
+        setEditMatricula(appt.matricula || '');
+        setEditMarca(appt.marca || '');
+        setEditModelo(appt.modelo || '');
     };
 
     const handleUpdateAppt = async () => {
@@ -78,7 +87,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                 body: JSON.stringify({
                     status: editStatus,
                     clientName: editName,
-                    clientPhone: editPhone
+                    clientPhone: editPhone,
+                    matricula: editMatricula,
+                    marca: editMarca,
+                    modelo: editModelo
                 })
             });
             if (res.ok) {
@@ -378,6 +390,41 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                             placeholder="Ej: 34600..."
                                             disabled={readOnly}
                                         />
+                                    </div>
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Matrícula</label>
+                                        <input
+                                            type="text"
+                                            value={editMatricula}
+                                            onChange={(e) => setEditMatricula(e.target.value)}
+                                            className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                            placeholder="Ej: 1234ABC"
+                                            disabled={readOnly}
+                                        />
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Marca</label>
+                                            <input
+                                                type="text"
+                                                value={editMarca}
+                                                onChange={(e) => setEditMarca(e.target.value)}
+                                                className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                                placeholder="Ej: Ford"
+                                                disabled={readOnly}
+                                            />
+                                        </div>
+                                        <div>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Modelo</label>
+                                            <input
+                                                type="text"
+                                                value={editModelo}
+                                                onChange={(e) => setEditModelo(e.target.value)}
+                                                className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                                placeholder="Ej: Focus"
+                                                disabled={readOnly}
+                                            />
+                                        </div>
                                     </div>
                                 </div>
                             )}

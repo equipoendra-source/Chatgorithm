@@ -677,10 +677,15 @@ async function getSystemPrompt() {
         } catch (e) { console.error('[BotSettings] Error cargando prompt personalizado, usando prompt por defecto:', e); }
     }
     const now = new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
+    const todayISO = new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+    const tom = new Date(); tom.setDate(tom.getDate() + 1);
+    const tomorrowISO = tom.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+    const dat = new Date(); dat.setDate(dat.getDate() + 2);
+    const dayAfterISO = dat.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
     // Reemplazar placeholder si existe
     promptTemplate = promptTemplate.replace('{{DATE_PLACEHOLDER}}', now);
-    // SIEMPRE anteponer la fecha actual al prompt para que el modelo NUNCA se confunda
-    const datePrefix = `⚠️ INFORMACIÓN CRÍTICA - FECHA Y HORA ACTUAL: ${now} (zona horaria: Madrid, España). DEBES usar esta fecha para TODOS los cálculos de fechas (hoy, mañana, la semana que viene, etc.). NO uses ninguna otra fecha.\n\n`;
+    // SIEMPRE anteponer la fecha actual al prompt con formato ISO para cálculos precisos
+    const datePrefix = `⚠️ FECHA Y HORA ACTUAL: ${now}\n- HOY en formato YYYY-MM-DD: ${todayISO}\n- MAÑANA en formato YYYY-MM-DD: ${tomorrowISO}\n- PASADO MAÑANA en formato YYYY-MM-DD: ${dayAfterISO}\nUSA SIEMPRE el formato YYYY-MM-DD exacto de arriba para llamar a las herramientas. NO calcules fechas manualmente.\n\n`;
     return datePrefix + promptTemplate;
 }
 
@@ -1514,7 +1519,7 @@ app.get('/api/appointments', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
         const records = await base('Appointments').select({ sort: [{ field: "Date", direction: "asc" }] }).all();
-        res.json(records.map(r => ({ id: r.id, date: r.get('Date'), status: r.get('Status'), clientPhone: r.get('ClientPhone'), clientName: r.get('ClientName') })));
+        res.json(records.map(r => ({ id: r.id, date: r.get('Date'), status: r.get('Status'), clientPhone: r.get('ClientPhone'), clientName: r.get('ClientName'), matricula: r.get('Matricula'), marca: r.get('Marca'), modelo: r.get('Modelo') })));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
 });
 
@@ -1533,6 +1538,9 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.status) f["Status"] = req.body.status;
         if (req.body.clientPhone !== undefined) f["ClientPhone"] = req.body.clientPhone;
         if (req.body.clientName !== undefined) f["ClientName"] = req.body.clientName;
+        if (req.body.matricula !== undefined) f["Matricula"] = req.body.matricula;
+        if (req.body.marca !== undefined) f["Marca"] = req.body.marca;
+        if (req.body.modelo !== undefined) f["Modelo"] = req.body.modelo;
         await base('Appointments').update([{ id: req.params.id, fields: f }]);
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
