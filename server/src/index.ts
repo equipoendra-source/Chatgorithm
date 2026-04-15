@@ -23,8 +23,8 @@ import bcrypt from 'bcryptjs';
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
 
-// MODELO CONFIGURADO: Usamos 'gemini-2.5-flash'
-const MODEL_NAME = "gemini-2.5-flash";
+// MODELO CONFIGURADO: gemini-2.0-flash (estable, 1500 req/día tier gratuito)
+const MODEL_NAME = "gemini-2.0-flash";
 
 console.log(`🚀 [BOOT] Arrancando servidor MAESTRO (Gemini ${MODEL_NAME} + Fix Recipient)...`);
 dotenv.config();
