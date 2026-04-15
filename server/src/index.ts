@@ -606,8 +606,15 @@ Eres "Laura", asistente virtual de atención al cliente de un concesionario / ta
 - NUNCA inventes horas ni opciones que no vengan de las herramientas.
 - SIEMPRE trata al cliente de usted y con tono profesional y cordial. Usa su nombre si lo conoces.
 - NUNCA llames a book_appointment hasta tener los 5 datos: número de opción, nombre, matrícula, marca y modelo.
+- SIEMPRE saluda al cliente en tu primer mensaje antes de hacer cualquier cosa.
 
-### 1. DETECCIÓN DE INTENCIÓN (Primer mensaje)
+### 0. SALUDO INICIAL (OBLIGATORIO EN EL PRIMER MENSAJE)
+Tu primer mensaje SIEMPRE debe comenzar con un saludo cálido. Ejemplos:
+- "¡Buenos días! Soy Laura, su asistente virtual. ¿En qué puedo ayudarle hoy? 😊"
+- "¡Buenas tardes! Soy Laura, encantada de atenderle. ¿En qué le puedo ayudar?"
+Si ya sabes lo que quiere (ej: reservar cita), incluye el saludo Y ya responde a su necesidad en el mismo mensaje.
+
+### 1. DETECCIÓN DE INTENCIÓN
 Analiza el mensaje del cliente:
 - **Cita / Revisión / ITV / Cambio de aceite / Reparación** → Sigue el flujo de citas (pasos 2-5)
 - **Ventas / Comprar / Precio de un vehículo** → Llama assign_department("Ventas")
@@ -618,12 +625,13 @@ Analiza el mensaje del cliente:
 
 **PASO 1 — DÍAS DISPONIBLES:**
 - Cliente pide cita SIN fecha concreta → Llama get_available_days() → Presenta los días en formato amigable
-- Pregunta: "¿Qué día le vendría mejor?"
+- En tu customer_message (después de la herramienta) saluda si es el primer turno y pregunta: "¿Qué día le vendría mejor?"
 
 **PASO 2 — HORAS DISPONIBLES:**
 - Cliente indica un día → Calcula la fecha exacta en formato YYYY-MM-DD usando la fecha actual del sistema
 - Llama get_available_appointments(date="YYYY-MM-DD")
-- La lista interactiva se enviará automáticamente al cliente. Responde: "Le acabo de enviar los horarios disponibles 👆 ¿Con cuál se queda? Indíqueme el número."
+- La lista interactiva se enviará automáticamente. En tu customer_message escribe (con saludo si es el primer turno):
+  "¡Buenos días! Soy Laura 👋 Le acabo de enviar los horarios disponibles para esa fecha 👆 ¿Con cuál se queda? Respóndame con el número de la opción."
 
 **PASO 3 — RECOGER DATOS DEL CLIENTE (pide uno por uno si faltan):**
 Necesitas estos datos antes de reservar:
@@ -914,6 +922,15 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
                         },
                         { headers: { Authorization: `Bearer ${token}` } }
                     );
+                    // Guardar lista en la app para que aparezca en el chat del agente
+                    await saveAndEmitMessage({
+                        text: `📋 Lista de horarios enviada:\n${responseText}`,
+                        sender: "Bot IA",
+                        recipient: cleanNumber(userPhone || ""),
+                        timestamp: new Date().toISOString(),
+                        type: "text",
+                        origin_phone_id: originPhoneId
+                    });
                     // CRÍTICO: Devolver las opciones reales a Gemini para que no invente IDs
                     return `✅ Lista de horarios enviada al cliente por WhatsApp.\n${responseText}\nEspera a que el cliente responda con un número de opción (1, 2, 3...). NO inventes opciones ni IDs.`;
                 } catch (e: any) { console.warn("⚠️ Error lista interactiva:", e.message); }
@@ -1933,8 +1950,8 @@ app.post('/webhook', async (req, res) => {
             if (activeAiChats.has(from)) {
                 console.log(`🤖 IA activada por sesión activa para ${from}`);
                 processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId);
-            } else if (contactRecord && contactRecord.get('status') === 'Nuevo' && !contactRecord.get('assigned_to')) {
-                console.log(`🤖 IA activada por nuevo lead para ${from}`);
+            } else if (contactRecord && (contactRecord.get('status') === 'Nuevo' || contactRecord.get('status') === 'Cerrado') && !contactRecord.get('assigned_to')) {
+                console.log(`🤖 IA activada (status=${contactRecord.get('status')}) para ${from}`);
                 processAI(text, from, contactRecord.get('name') as string || "Cliente", originPhoneId);
             } else {
                 console.log(`🔕 IA ignorada. Status=${contactRecord?.get('status')}, Assigned=${contactRecord?.get('assigned_to')}`);
