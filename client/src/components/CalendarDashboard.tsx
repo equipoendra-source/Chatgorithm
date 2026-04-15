@@ -356,8 +356,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
             {/* MODAL EDICIÓN CITA */}
             {selectedAppt && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
-                    <div className={`rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden ${isDark ? 'glass-panel border-white/5' : 'bg-white'}`}>
-                        <div className={`p-4 border-b flex justify-between items-center ${isDark ? 'border-white/5 bg-slate-900/30' : 'border-slate-100 bg-slate-50'}`}>
+                    <div className={`rounded-2xl shadow-2xl w-full max-w-sm flex flex-col max-h-[90vh] ${isDark ? 'glass-panel border-white/5' : 'bg-white'}`}>
+                        <div className={`p-4 border-b flex justify-between items-center flex-shrink-0 ${isDark ? 'border-white/5 bg-slate-900/30' : 'border-slate-100 bg-slate-50'}`}>
                             <h3 className={`font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}>
                                 {readOnly ? <Eye size={18} className="text-blue-500" /> : <CalendarIcon size={18} className="text-purple-500" />}
                                 {readOnly ? 'Detalles Cita' : 'Gestionar Cita'}
@@ -365,7 +365,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                             <button onClick={() => setSelectedAppt(null)} className={`p-1 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-400 hover:text-slate-600'}`}><X size={20} /></button>
                         </div>
 
-                        <div className="p-6 space-y-4">
+                        <div className="p-6 space-y-4 overflow-y-auto flex-1">
                             <div className={`text-center mb-6 p-4 rounded-xl border ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-100'}`}>
                                 <div className={`text-2xl font-bold font-mono ${isDark ? 'text-white' : 'text-slate-800'}`}>
                                     {formatTimeRange(selectedAppt.date)}
@@ -450,23 +450,25 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                 </div>
                             )}
 
+                            {/* Cancelar reserva — visible para TODOS los roles */}
+                            {selectedAppt.status === 'Booked' && (
+                                <div className={`pt-4 border-t mt-4 ${isDark ? 'border-slate-700' : 'border-slate-100'}`}>
+                                    <button
+                                        onClick={handleCancelBooking}
+                                        className={`w-full py-2.5 rounded-xl font-bold text-sm transition flex items-center justify-center gap-2 border ${isDark ? 'bg-orange-900/20 border-orange-800 text-orange-400 hover:bg-orange-900/40' : 'bg-orange-50 border-orange-200 text-orange-600 hover:bg-orange-100'}`}
+                                    >
+                                        <X size={16} /> Cancelar Reserva (liberar hueco)
+                                    </button>
+                                </div>
+                            )}
+
+                            {/* Borrar/Guardar — solo admins y managers */}
                             {!readOnly && (
-                                <div className={`space-y-2 pt-4 border-t mt-4 ${isDark ? 'border-slate-700' : 'border-slate-100'}`}>
-                                    {/* Cancelar reserva — solo si está Booked */}
-                                    {selectedAppt.status === 'Booked' && (
-                                        <button
-                                            onClick={handleCancelBooking}
-                                            className={`w-full py-2.5 rounded-xl font-bold text-sm transition flex items-center justify-center gap-2 border ${isDark ? 'bg-orange-900/20 border-orange-800 text-orange-400 hover:bg-orange-900/40' : 'bg-orange-50 border-orange-200 text-orange-600 hover:bg-orange-100'}`}
-                                        >
-                                            <X size={16} /> Cancelar Reserva (liberar hueco)
-                                        </button>
-                                    )}
-                                    <div className="flex gap-2">
-                                        <button onClick={() => handleDelete(selectedAppt.id)} className={`p-3 rounded-xl transition border ${isDark ? 'bg-red-900/20 border-red-900 text-red-400 hover:bg-red-900/30' : 'text-red-500 bg-red-50 hover:bg-red-100 border-red-100'}`} title="Borrar hueco definitivamente"><Trash2 size={20} /></button>
-                                        <button onClick={handleUpdateAppt} className="flex-1 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition flex items-center justify-center gap-2 shadow-lg active:scale-95">
-                                            <Save size={18} /> Guardar Cambios
-                                        </button>
-                                    </div>
+                                <div className="flex gap-2">
+                                    <button onClick={() => handleDelete(selectedAppt.id)} className={`p-3 rounded-xl transition border ${isDark ? 'bg-red-900/20 border-red-900 text-red-400 hover:bg-red-900/30' : 'text-red-500 bg-red-50 hover:bg-red-100 border-red-100'}`} title="Borrar hueco definitivamente"><Trash2 size={20} /></button>
+                                    <button onClick={handleUpdateAppt} className="flex-1 bg-slate-900 text-white font-bold rounded-xl hover:bg-slate-800 transition flex items-center justify-center gap-2 shadow-lg active:scale-95">
+                                        <Save size={18} /> Guardar Cambios
+                                    </button>
                                 </div>
                             )}
                         </div>
