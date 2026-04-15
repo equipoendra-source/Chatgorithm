@@ -596,54 +596,67 @@ async function runScheduleMaintenance() {
     } catch (e) { console.error("Error mantenimiento agenda:", e); }
 }
 
-// --- PROMPT DEFAULT (MEJORADO: FLUJO 2 PASOS + DEPARTAMENTOS) ---
+// --- PROMPT DEFAULT (MEJORADO: FLUJO COMPLETO + DATOS VEHÍCULO + PROFESIONAL) ---
 const BASE_SYSTEM_PROMPT = `Fecha y hora actual: {{DATE_PLACEHOLDER}} (zona horaria: Madrid, España)
 
-Eres "Laura", asistente virtual de atención al cliente.
+Eres "Laura", asistente virtual de atención al cliente de un concesionario / taller. Eres amable, profesional y eficiente.
 
-## 🚨 REGLAS CRÍTICAS - LEE CON ATENCIÓN 🚨
+## 🚨 REGLAS ABSOLUTAS — NUNCA INCUMPLIR 🚨
+- NUNCA muestres IDs internos, códigos técnicos ni texto tipo "rec-XXXXX" o similares. El cliente jamás debe ver identificadores internos del sistema.
+- NUNCA inventes horas ni opciones que no vengan de las herramientas.
+- SIEMPRE trata al cliente de usted y con tono profesional y cordial. Usa su nombre si lo conoces.
+- NUNCA llames a book_appointment hasta tener los 5 datos: número de opción, nombre, matrícula, marca y modelo.
 
 ### 1. DETECCIÓN DE INTENCIÓN (Primer mensaje)
-Analiza el mensaje del cliente para detectar qué necesita:
-- **Cita/Reserva** → Sigue el flujo de citas (paso 2)
-- **Ventas/Comprar/Precio** → Llama assign_department("Ventas")
-- **Taller/Reparación/Avería** → Llama assign_department("Taller")
-- **Otro tema** → Saluda amablemente y pregunta en qué puedes ayudar
+Analiza el mensaje del cliente:
+- **Cita / Revisión / ITV / Cambio de aceite / Reparación** → Sigue el flujo de citas (pasos 2-5)
+- **Ventas / Comprar / Precio de un vehículo** → Llama assign_department("Ventas")
+- **Avería urgente / Taller** → Llama assign_department("Taller")
+- **Otro tema** → Saluda amablemente y pregunta en qué puedes ayudarle
 
-### 2. FLUJO DE CITAS (OBLIGATORIO 2 PASOS)
-**PASO 1 - DÍAS:**
-- Cliente pide cita SIN fecha específica → Llama get_available_days() → Muestra días disponibles
-- Pregunta: "¿Qué día te vendría mejor?"
+### 2. FLUJO DE CITAS — SIGUE ESTE ORDEN EXACTO
 
-**PASO 2 - HORAS:**
-- Cliente dice un día (ej: "el lunes", "mañana", "hoy") → Calcula fecha YYYY-MM-DD basándote en la fecha actual
-- Llama get_available_appointments(date="YYYY-MM-DD") → Muestra las horas
+**PASO 1 — DÍAS DISPONIBLES:**
+- Cliente pide cita SIN fecha concreta → Llama get_available_days() → Presenta los días en formato amigable
+- Pregunta: "¿Qué día le vendría mejor?"
 
-**PASO 3 - NOMBRE (solo si no lo sabes):**
-- Si ya tienes el nombre del cliente → salta al PASO 4
-- Si NO sabes el nombre → pregunta: "¿Me puedes decir tu nombre para registrar la cita?" → espera respuesta
+**PASO 2 — HORAS DISPONIBLES:**
+- Cliente indica un día → Calcula la fecha exacta en formato YYYY-MM-DD usando la fecha actual del sistema
+- Llama get_available_appointments(date="YYYY-MM-DD")
+- La lista interactiva se enviará automáticamente al cliente. Responde: "Le acabo de enviar los horarios disponibles 👆 ¿Con cuál se queda? Indíqueme el número."
 
-**PASO 4 - RESERVA:**
-- Cliente responde con un NÚMERO (ej: "1", "3", "opción 2") → **PARA TODO** → Llama book_appointment(optionIndex=número, clientName=nombre del cliente)
-- Tras confirmar → Llama SIEMPRE stop_conversation()
+**PASO 3 — RECOGER DATOS DEL CLIENTE (pide uno por uno si faltan):**
+Necesitas estos datos antes de reservar:
+  a) Nombre completo del cliente (si ya lo conoces, no lo preguntes)
+  b) Matrícula del vehículo
+  c) Marca del vehículo (ej: Ford, Toyota, BMW, Volkswagen)
+  d) Modelo del vehículo (ej: Focus, Corolla, Serie 3, Golf)
+
+Pide los datos faltantes de forma natural y uno a uno. Ejemplo:
+"Perfecto, le he apuntado el horario. Para completar la reserva necesito unos datos de su vehículo. ¿Me puede indicar la matrícula?"
+
+**PASO 4 — CONFIRMAR HORA Y DATOS:**
+Cuando tengas el número de opción elegido + nombre + matrícula + marca + modelo:
+- Llama book_appointment(optionIndex=número, clientName=nombre, licensePlate=matrícula, carBrand=marca, carModel=modelo)
+- Tras la confirmación → Llama SIEMPRE stop_conversation()
 
 ### 3. DESPUÉS DE RESERVAR O ASIGNAR DEPARTAMENTO
-- **SIEMPRE** llama stop_conversation() para desactivarte
-- NO respondas más después de eso
+- **SIEMPRE** llama stop_conversation() inmediatamente después
+- NO respondas nada más una vez llamado stop_conversation
 
-### 4. SI EL CLIENTE DICE UN NÚMERO
-Si el mensaje del cliente es SOLO un número como "1", "2", "11":
-- Si ya tienes el nombre → **INMEDIATAMENTE** llama book_appointment(optionIndex=ese número, clientName=nombre conocido)
-- Si NO tienes el nombre → pregunta el nombre primero, luego cuando lo tengas reserva
-- NO preguntes el nombre si ya lo tienes
+### 4. CUANDO EL CLIENTE ENVÍA UN NÚMERO SOLO (ej: "1", "2", "3")
+Ese número es la selección de hora de la lista enviada. Actúa así:
+- Comprueba qué datos del PASO 3 te faltan (nombre, matrícula, marca, modelo)
+- Si faltan datos → pídelos antes de reservar, indicando qué ya tienes
+- Si los tienes todos → **INMEDIATAMENTE** llama book_appointment con todos los parámetros completos
 
 ## FORMATO DE RESPUESTA (OBLIGATORIO)
-Tu respuesta SIEMPRE debe ser JSON válido:
+Tu respuesta SIEMPRE debe ser JSON válido con esta estructura exacta:
 {
-  "customer_message": "Mensaje para el cliente (emoji permitidos)",
+  "customer_message": "Mensaje cordial para el cliente (emojis permitidos, tono profesional)",
   "internal_control": { "intent": "BOOKING|SALES|SUPPORT", "status": "active|completed" }
 }
-NO respondas con texto plano. SOLO JSON.`;
+NO respondas nunca con texto plano. SOLO JSON válido.`;
 
 const DEFAULT_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT;
 
@@ -901,7 +914,8 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
                         },
                         { headers: { Authorization: `Bearer ${token}` } }
                     );
-                    return JSON.stringify({ status: "success", info: "List sent via WhatsApp." });
+                    // CRÍTICO: Devolver las opciones reales a Gemini para que no invente IDs
+                    return `✅ Lista de horarios enviada al cliente por WhatsApp.\n${responseText}\nEspera a que el cliente responda con un número de opción (1, 2, 3...). NO inventes opciones ni IDs.`;
                 } catch (e: any) { console.warn("⚠️ Error lista interactiva:", e.message); }
             }
         }
@@ -960,10 +974,10 @@ async function getAvailableDays() {
     }
 }
 
-async function bookAppointment(optionIndex: number, clientPhone: string, clientName: string) {
+async function bookAppointment(optionIndex: number, clientPhone: string, clientName: string, licensePlate: string = '', carBrand: string = '', carModel: string = '') {
     if (!base) return "Error BD";
 
-    console.log(`📅 [Book] Intentando reservar opción ${optionIndex} para ${clientPhone}`);
+    console.log(`📅 [Book] Intentando reservar opción ${optionIndex} para ${clientPhone} | Vehículo: ${licensePlate} ${carBrand} ${carModel}`);
 
     // Intentar obtener cache (primero memoria, luego Airtable)
     const userMap = await getAppointmentCache(clientPhone);
@@ -997,7 +1011,7 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
         const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
         console.log(`📅 [Book] Actualizando cita a Booked...`);
-        await base('Appointments').update([{ id: realId, fields: { "Status": "Booked", "ClientPhone": clientPhone, "ClientName": clientName } }]);
+        await base('Appointments').update([{ id: realId, fields: { "Status": "Booked", "ClientPhone": clientPhone, "ClientName": clientName, "Matricula": licensePlate, "Marca": carBrand, "Modelo": carModel } }]);
         console.log(`✅ [Book] Cita actualizada correctamente`);
 
         // CRÍTICO: Cambiar status del contacto para que la IA NO se reactive
@@ -1147,7 +1161,7 @@ async function processAI(text: string, contactPhone: string, contactName: string
                     functionDeclarations: [
                         { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." } }, required: ["date"] } },
-                        { name: "book_appointment", description: "Book an appointment using the slot index number. Call this when user says a number like '1' or '2' or '11'. After booking, ALWAYS call stop_conversation.", parameters: { type: SchemaType.OBJECT, properties: { optionIndex: { type: SchemaType.NUMBER, description: "Index number from the list (e.g., 1)" }, clientName: { type: SchemaType.STRING, description: "Full name of the client for the appointment. Always include this — use the name collected during conversation or the known contact name." } }, required: ["optionIndex", "clientName"] } },
+                        { name: "book_appointment", description: "Book an appointment using the slot index number. ONLY call this when you have ALL 5 required pieces of data: optionIndex, clientName, licensePlate, carBrand and carModel. After booking, ALWAYS call stop_conversation.", parameters: { type: SchemaType.OBJECT, properties: { optionIndex: { type: SchemaType.NUMBER, description: "Index number chosen by the client from the list (e.g., 1, 2, 3)" }, clientName: { type: SchemaType.STRING, description: "Full name of the client for the appointment." }, licensePlate: { type: SchemaType.STRING, description: "Vehicle license plate (matrícula), e.g. '1234ABC' or 'B-4521-KL'." }, carBrand: { type: SchemaType.STRING, description: "Vehicle make/brand, e.g. 'Ford', 'Toyota', 'BMW', 'Volkswagen'." }, carModel: { type: SchemaType.STRING, description: "Vehicle model, e.g. 'Focus', 'Corolla', 'Serie 3', 'Golf'." } }, required: ["optionIndex", "clientName", "licensePlate", "carBrand", "carModel"] } },
                         { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs sales, workshop, or admin help.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: ["Ventas", "Taller", "Admin"], format: "enum" } }, required: ["department"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
                     ]
@@ -1167,7 +1181,7 @@ async function processAI(text: string, contactPhone: string, contactName: string
 
                     if (call.name === "get_available_days") toolResult = await getAvailableDays();
                     else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
-                    else if (call.name === "book_appointment") toolResult = await bookAppointment(Number(args.optionIndex), clean, args.clientName || contactName);
+                    else if (call.name === "book_appointment") toolResult = await bookAppointment(Number(args.optionIndex), clean, args.clientName || contactName, args.licensePlate || '', args.carBrand || '', args.carModel || '');
                     else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
                     else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
 
