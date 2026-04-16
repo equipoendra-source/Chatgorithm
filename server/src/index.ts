@@ -133,6 +133,11 @@ const cleanNumber = (phone: any) => {
 const appointmentOptionsCache = new Map<string, Record<number, string>>();
 const processedWebhookIds = new Set<string>();
 
+// --- TARJETA DE AGENTE ---
+// Rastrea qué agente respondió último a cada contacto (para enviar tarjeta solo al cambiar)
+const lastAgentPerContact = new Map<string, string>();   // phone → agentName
+const agentCardUrlCache = new Map<string, string>();     // agentName → cloudinary URL
+
 // --- WEB PUSH NOTIFICATIONS ---
 // VAPID keys - En producción, guárdalas en variables de entorno
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BNibvQQfVfb6ozHGy2xqnt5JJV_rqq8hGmj5qQuJb1xozXnN7LX5aVfWlqDqx_1BHDlPvFxTf_IiQOI5Y8mMEFs';
@@ -825,6 +830,79 @@ async function handleContactUpdate(phone: string, text: string, name: string = "
             return n[0];
         }
     } catch (e) { console.error("Error Contactos:", e); return null; }
+}
+
+// ==========================================
+//  TARJETA DE AGENTE — Imagen automática
+// ==========================================
+async function generateAgentCard(agentName: string): Promise<string> {
+    // Devolver URL cacheada si ya existe
+    const cached = agentCardUrlCache.get(agentName);
+    if (cached) return cached;
+
+    const initial = agentName.charAt(0).toUpperCase();
+    // Escapar caracteres especiales para SVG
+    const safeName = agentName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    const svg = `<svg width="600" height="200" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#4f46e5"/>
+      <stop offset="100%" style="stop-color:#7c3aed"/>
+    </linearGradient>
+  </defs>
+  <rect width="600" height="200" rx="20" fill="url(#bg)"/>
+  <rect x="12" y="12" width="576" height="176" rx="14" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
+  <circle cx="90" cy="100" r="45" fill="rgba(255,255,255,0.2)"/>
+  <text x="90" y="116" text-anchor="middle" font-size="42" fill="white" font-family="Arial, Helvetica, sans-serif" font-weight="bold">${initial}</text>
+  <text x="170" y="72" font-size="13" fill="rgba(255,255,255,0.7)" font-family="Arial, Helvetica, sans-serif" letter-spacing="3">LE ATIENDE</text>
+  <text x="170" y="115" font-size="32" font-weight="bold" fill="white" font-family="Arial, Helvetica, sans-serif">${safeName}</text>
+  <line x1="170" y1="132" x2="380" y2="132" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>
+  <text x="170" y="158" font-size="13" fill="rgba(255,255,255,0.45)" font-family="Arial, Helvetica, sans-serif">Chatgorithm</text>
+</svg>`;
+
+    const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
+
+    const result: any = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+            { folder: 'agent-cards', public_id: `agent-card-${agentName.replace(/\s+/g, '-').toLowerCase()}`, overwrite: true, resource_type: 'image' },
+            (error: any, res: any) => { if (error) reject(error); else resolve(res); }
+        );
+        stream.end(pngBuffer);
+    });
+
+    const url = result.secure_url;
+    agentCardUrlCache.set(agentName, url);
+    console.log(`🪪 [AgentCard] Tarjeta generada para "${agentName}": ${url}`);
+    return url;
+}
+
+async function sendAgentCardIfNeeded(cleanTo: string, agentName: string, originPhoneId: string, token: string): Promise<void> {
+    const lastAgent = lastAgentPerContact.get(cleanTo);
+
+    // Mismo agente que antes → no enviar tarjeta
+    if (lastAgent === agentName) return;
+
+    // Actualizar tracking
+    lastAgentPerContact.set(cleanTo, agentName);
+
+    try {
+        console.log(`🪪 [AgentCard] Cambio de agente detectado para ${cleanTo}: "${lastAgent || '(ninguno)'}" → "${agentName}"`);
+        const cardUrl = await generateAgentCard(agentName);
+
+        // Enviar imagen por WhatsApp
+        await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId}/messages`, {
+            messaging_product: "whatsapp",
+            to: cleanTo,
+            type: "image",
+            image: { link: cardUrl }
+        }, { headers: { Authorization: `Bearer ${token}` } });
+
+        console.log(`✅ [AgentCard] Tarjeta de "${agentName}" enviada a ${cleanTo}`);
+    } catch (err: any) {
+        // NUNCA bloquear el mensaje real por un fallo en la tarjeta
+        console.error(`⚠️ [AgentCard] Error (no afecta al mensaje):`, err.message);
+    }
 }
 
 async function sendWhatsAppText(to: string, body: string, originPhoneId: string) {
@@ -2165,7 +2243,12 @@ io.on('connection', (socket) => {
                 console.error("❌ Error guardando mensaje:", e.message);
             }
 
-            // 2. Intentar enviar por WhatsApp (puede fallar sin afectar al UI)
+            // 2. Enviar tarjeta de agente si ha cambiado quién atiende
+            if (msg.type !== 'note') {
+                await sendAgentCardIfNeeded(cleanTo, msg.sender, originId, token);
+            }
+
+            // 3. Intentar enviar por WhatsApp (puede fallar sin afectar al UI)
             if (msg.type !== 'note') {
                 try {
                     await axios.post(`https://graph.facebook.com/v21.0/${originId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: msg.text } }, { headers: { Authorization: `Bearer ${token}` } });
