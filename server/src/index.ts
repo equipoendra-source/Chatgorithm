@@ -89,6 +89,7 @@ const twilioCallerId = process.env.TWILIO_CALLER_ID;
 
 const TABLE_TEMPLATES = 'Templates';
 const TABLE_TEAM_MESSAGES = 'TeamMessages';
+const TABLE_SCHEDULED_NOTIFICATIONS = 'ScheduledNotifications';
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 const BUSINESS_ACCOUNTS: Record<string, string> = {
@@ -599,6 +600,268 @@ async function runScheduleMaintenance() {
             await delay(200);
         }
     } catch (e) { console.error("Error mantenimiento agenda:", e); }
+}
+
+// ==========================================
+//  SISTEMA DE NOTIFICACIONES AUTOMÁTICAS
+// ==========================================
+
+// --- Enviar plantilla WhatsApp (reutilizable) ---
+async function sendTemplateMessage(phone: string, templateName: string, variables: string[], originPhoneId: string): Promise<boolean> {
+    const token = getToken(originPhoneId);
+    if (!token) { console.error(`❌ [Notif] Token no encontrado para ${originPhoneId}`); return false; }
+    const cleanTo = cleanNumber(phone);
+    try {
+        const parameters = variables.map(val => ({ type: "text", text: val }));
+        const templateObj: any = { name: templateName, language: { code: "es" } };
+        if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
+
+        await axios.post(
+            `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
+            { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+
+        await saveAndEmitMessage({
+            text: `[Notificación] ${templateName}`,
+            sender: "Sistema",
+            recipient: cleanTo,
+            timestamp: new Date().toISOString(),
+            type: "template",
+            origin_phone_id: originPhoneId
+        });
+        return true;
+    } catch (e: any) {
+        console.error(`❌ [Notif] Error enviando plantilla ${templateName} a ${cleanTo}:`, e.response?.data?.error?.message || e.message);
+        return false;
+    }
+}
+
+// --- Programar notificación con idempotencia ---
+async function scheduleNotification(params: {
+    type: string, phone: string, appointmentId?: string,
+    templateName: string, variables: string,
+    scheduledFor: string, originPhoneId: string
+}): Promise<boolean> {
+    if (!base) return false;
+    try {
+        const formula = params.appointmentId
+            ? `AND({type}='${params.type}', {phone}='${params.phone}', {appointmentId}='${params.appointmentId}', OR({status}='pending', {status}='sent'))`
+            : `AND({type}='${params.type}', {phone}='${params.phone}', {scheduledFor}='${params.scheduledFor}', OR({status}='pending', {status}='sent'))`;
+
+        const existing = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: formula, maxRecords: 1
+        }).firstPage();
+
+        if (existing.length > 0) return false; // idempotencia: ya existe
+
+        await base(TABLE_SCHEDULED_NOTIFICATIONS).create([{ fields: {
+            type: params.type,
+            phone: params.phone,
+            appointmentId: params.appointmentId || '',
+            templateName: params.templateName,
+            variables: params.variables,
+            scheduledFor: params.scheduledFor,
+            status: 'pending',
+            retryCount: 0,
+            origin_phone_id: params.originPhoneId,
+            createdAt: new Date().toISOString()
+        }}]);
+
+        console.log(`📋 [Notif] Programada: ${params.type} → ${params.phone} para ${new Date(params.scheduledFor).toLocaleString('es-ES', { timeZone: 'Europe/Madrid' })}`);
+        return true;
+    } catch (e: any) {
+        console.error(`❌ [Notif] Error programando ${params.type}:`, e.message);
+        return false;
+    }
+}
+
+// --- Programar secuencia post-venta completa ---
+async function schedulePostSaleSequence(phone: string, clientName: string, vehicleDesc: string, originPhoneId: string): Promise<void> {
+    const now = new Date();
+    const milestones = [
+        { type: 'postventa_7d',  days: 7,   template: 'postventa_dia7' },
+        { type: 'postventa_30d', days: 30,  template: 'postventa_dia30' },
+        { type: 'postventa_6m',  days: 180, template: 'postventa_revision_6m' },
+        { type: 'postventa_12m', days: 365, template: 'postventa_revision_12m' },
+    ];
+
+    for (const m of milestones) {
+        const sendDate = new Date(now);
+        sendDate.setDate(sendDate.getDate() + m.days);
+        sendDate.setHours(10, 0, 0, 0); // Enviar a las 10:00
+
+        await scheduleNotification({
+            type: m.type,
+            phone: cleanNumber(phone),
+            templateName: m.template,
+            variables: JSON.stringify([clientName, vehicleDesc]),
+            scheduledFor: sendDate.toISOString(),
+            originPhoneId
+        });
+        await delay(200);
+    }
+    console.log(`📋 [PostVenta] Secuencia completa programada para ${phone} (4 hitos)`);
+}
+
+// --- Opt-out: cliente escribe BAJA ---
+async function handleNotificationOptOut(phone: string, originPhoneId: string): Promise<void> {
+    if (!base) return;
+    const clean = cleanNumber(phone);
+    try {
+        // 1. Marcar contacto como opted-out
+        const contacts = await base('Contacts').select({
+            filterByFormula: `{phone}='${clean}'`, maxRecords: 1
+        }).firstPage();
+
+        if (contacts.length > 0) {
+            await base('Contacts').update([{
+                id: contacts[0].id,
+                fields: { opted_out_notifications: true }
+            }]);
+        }
+
+        // 2. Cancelar todas las notificaciones pendientes
+        const pending = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND({phone}='${clean}', {status}='pending')`
+        }).all();
+
+        for (let i = 0; i < pending.length; i += 10) {
+            const batch = pending.slice(i, i + 10).map(r => ({
+                id: r.id, fields: { status: 'cancelled' as const }
+            }));
+            await base(TABLE_SCHEDULED_NOTIFICATIONS).update(batch);
+            await delay(200);
+        }
+
+        // 3. Confirmar al cliente
+        await sendWhatsAppText(clean, '✅ Entendido. No recibirá más mensajes automáticos de nuestra parte. Si necesita algo, no dude en escribirnos.', originPhoneId);
+
+        console.log(`🚫 [Notif] Opt-out: ${clean}. ${pending.length} notificaciones canceladas.`);
+    } catch (e: any) {
+        console.error(`❌ [Notif] Error en opt-out:`, e.message);
+    }
+}
+
+// --- Worker principal: escanea citas y envía pendientes ---
+async function runNotificationScheduler() {
+    if (!base) return;
+    const now = new Date();
+    console.log(`⏰ [Notif] Scheduler ejecutándose... ${now.toLocaleString('es-ES', { timeZone: 'Europe/Madrid' })}`);
+
+    try {
+        // ============================================
+        // FASE 1: Recordatorios de citas (T-24h, T-1h)
+        // ============================================
+        const bookedAppts = await base('Appointments').select({
+            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='')`
+        }).all();
+
+        for (const appt of bookedAppts) {
+            const apptDate = new Date(appt.get('Date') as string);
+            const msUntil = apptDate.getTime() - now.getTime();
+            const hoursUntil = msUntil / (1000 * 60 * 60);
+            const minutesUntil = msUntil / (1000 * 60);
+            const clientPhone = cleanNumber(appt.get('ClientPhone') as string);
+            if (!clientPhone) continue;
+
+            // Check opt-out
+            const contact = await base('Contacts').select({
+                filterByFormula: `{phone}='${clientPhone}'`, maxRecords: 1
+            }).firstPage();
+            if (contact.length > 0 && contact[0].get('opted_out_notifications')) continue;
+            await delay(100);
+
+            const clientName = (appt.get('ClientName') as string) || 'cliente';
+            const originId = (contact.length > 0 && contact[0].get('origin_phone_id') as string) || waPhoneId || 'default';
+            const dateStr = apptDate.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Madrid' });
+            const timeStr = apptDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
+
+            // T-24h: entre 22 y 26 horas antes (ventana amplia para el intervalo de 15min)
+            if (hoursUntil >= 22 && hoursUntil <= 26) {
+                await scheduleNotification({
+                    type: 'cita_24h', phone: clientPhone, appointmentId: appt.id,
+                    templateName: 'cita_recordatorio_24h',
+                    variables: JSON.stringify([clientName, dateStr, timeStr]),
+                    scheduledFor: now.toISOString(), originPhoneId: originId
+                });
+                await delay(200);
+            }
+
+            // T-1h: entre 45 y 75 minutos antes
+            if (minutesUntil >= 45 && minutesUntil <= 75) {
+                await scheduleNotification({
+                    type: 'cita_1h', phone: clientPhone, appointmentId: appt.id,
+                    templateName: 'cita_recordatorio_1h',
+                    variables: JSON.stringify([clientName, timeStr]),
+                    scheduledFor: now.toISOString(), originPhoneId: originId
+                });
+                await delay(200);
+            }
+        }
+
+        // ============================================
+        // FASE 2: Enviar notificaciones pendientes
+        // ============================================
+        const allPending = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `{status}='pending'`, maxRecords: 50
+        }).firstPage();
+
+        // Filtrar las que ya son "due" (scheduledFor <= ahora)
+        const duePending = allPending.filter(n => {
+            const sf = n.get('scheduledFor') as string;
+            return sf && new Date(sf).getTime() <= now.getTime();
+        });
+
+        for (const notif of duePending) {
+            const phone = cleanNumber(notif.get('phone') as string);
+            const templateName = notif.get('templateName') as string;
+            const variables: string[] = JSON.parse((notif.get('variables') as string) || '[]');
+            const originId = (notif.get('origin_phone_id') as string) || waPhoneId || 'default';
+            const retryCount = (notif.get('retryCount') as number) || 0;
+
+            // Verificar opt-out antes de enviar
+            const contactCheck = await base('Contacts').select({
+                filterByFormula: `{phone}='${phone}'`, maxRecords: 1
+            }).firstPage();
+            if (contactCheck.length > 0 && contactCheck[0].get('opted_out_notifications')) {
+                await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
+                    id: notif.id, fields: { status: 'cancelled' }
+                }]);
+                await delay(200);
+                continue;
+            }
+
+            const success = await sendTemplateMessage(phone, templateName, variables, originId);
+
+            if (success) {
+                await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
+                    id: notif.id, fields: { status: 'sent', sentAt: new Date().toISOString() }
+                }]);
+            } else {
+                if (retryCount < 3) {
+                    const backoffMin = 5 * Math.pow(3, retryCount); // 5min, 15min, 45min
+                    const retryAt = new Date(now.getTime() + backoffMin * 60 * 1000);
+                    await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
+                        id: notif.id, fields: {
+                            retryCount: retryCount + 1,
+                            scheduledFor: retryAt.toISOString(),
+                            error: `Reintento ${retryCount + 1}/3 a las ${retryAt.toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid' })}`
+                        }
+                    }]);
+                } else {
+                    await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
+                        id: notif.id, fields: { status: 'failed', error: 'Máximo de reintentos (3/3)' }
+                    }]);
+                }
+            }
+            await delay(300);
+        }
+
+        console.log(`✅ [Notif] Scheduler completado. Citas escaneadas: ${bookedAppts.length}, enviadas: ${duePending.length}`);
+    } catch (e: any) {
+        console.error(`❌ [Notif] Error en scheduler:`, e.message);
+    }
 }
 
 // --- PROMPT DEFAULT (MEJORADO: FLUJO COMPLETO + DATOS VEHÍCULO + PROFESIONAL) ---
@@ -2079,6 +2342,13 @@ app.post('/webhook', async (req, res) => {
             });
             console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
 
+            // --- Detección opt-out de notificaciones ---
+            if (msg.type === 'text' && text.trim().toUpperCase() === 'BAJA') {
+                console.log(`🚫 [WEBHOOK] Opt-out detectado de ${from}`);
+                await handleNotificationOptOut(from, originPhoneId);
+                return res.sendStatus(200);
+            }
+
             // Comprobar si hay sesión de reserva activa en Airtable (sobrevive reinicios)
             const hasPendingBooking = !activeAiChats.has(from) && !!(await getAppointmentCache(from));
 
@@ -2183,7 +2453,48 @@ io.on('connection', (socket) => {
         }
     });
 
-    socket.on('update_contact_info', async (data) => { if (base) { const clean = cleanNumber(data.phone); const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'` }).firstPage(); if (r.length > 0) { await base('Contacts').update([{ id: r[0].id, fields: data.updates }], { typecast: true }); io.emit('contact_updated_notification'); } } });
+    socket.on('update_contact_info', async (data) => {
+        if (!base) return;
+        const clean = cleanNumber(data.phone);
+        const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'` }).firstPage();
+        if (r.length > 0) {
+            const oldStatus = r[0].get('status') as string;
+            await base('Contacts').update([{ id: r[0].id, fields: data.updates }], { typecast: true });
+            io.emit('contact_updated_notification');
+
+            // --- Trigger post-venta: al cambiar a "Vehículo Entregado" ---
+            if (data.updates.status === 'Vehículo Entregado' && oldStatus !== 'Vehículo Entregado') {
+                console.log(`🚗 [PostVenta] Trigger: ${clean} cambió a "Vehículo Entregado"`);
+                const clientName = (r[0].get('name') as string) || 'cliente';
+                const originId = (r[0].get('origin_phone_id') as string) || waPhoneId || 'default';
+
+                // Guardar fecha de entrega
+                try {
+                    await base('Contacts').update([{ id: r[0].id, fields: { delivery_date: new Date().toISOString() } }]);
+                } catch (e) { console.error('Error guardando delivery_date:', e); }
+
+                // Buscar datos del vehículo en la última cita
+                let vehicleDesc = 'vehículo';
+                try {
+                    const appts = await base('Appointments').select({
+                        filterByFormula: `AND({ClientPhone}='${clean}', {Status}='Booked')`,
+                        sort: [{ field: 'Date', direction: 'desc' }], maxRecords: 1
+                    }).firstPage();
+                    if (appts.length > 0) {
+                        const marca = appts[0].get('Marca') as string;
+                        const modelo = appts[0].get('Modelo') as string;
+                        if (marca && modelo) vehicleDesc = `${marca} ${modelo}`;
+                        else if (marca) vehicleDesc = marca;
+                    }
+                } catch (e) { /* usar default */ }
+
+                // Programar las 4 notificaciones de post-venta
+                schedulePostSaleSequence(clean, clientName, vehicleDesc, originId).catch(e =>
+                    console.error('❌ [PostVenta] Error programando secuencia:', e)
+                );
+            }
+        }
+    });
 
     // CHAT MESSAGE (CORREGIDO PARA SYNC)
     socket.on('chatMessage', async (msg) => {
@@ -2369,6 +2680,9 @@ io.on('connection', (socket) => {
 });
 
 setInterval(runScheduleMaintenance, 3600000);
+setInterval(runNotificationScheduler, 900000); // Cada 15 minutos
+// Ejecutar una vez al arrancar (con delay para no saturar el inicio)
+setTimeout(() => runNotificationScheduler().catch(e => console.error('Error en notification scheduler inicial:', e)), 30000);
 
 // --- FCM TOKEN REGISTRATION ENDPOINT ---
 // El móvil llama a este endpoint para registrar su token FCM
