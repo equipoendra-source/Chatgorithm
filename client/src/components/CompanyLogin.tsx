@@ -5,6 +5,7 @@ interface CompanyConfig {
     companyId: string;
     companyName: string;
     backendUrl: string;
+    logoUrl?: string;
 }
 
 interface CompanyLoginProps {
@@ -37,7 +38,8 @@ export function CompanyLogin({ onSuccess, authServerUrl }: CompanyLoginProps) {
                 const config: CompanyConfig = {
                     companyId: data.companyId,
                     companyName: data.companyName,
-                    backendUrl: data.backendUrl
+                    backendUrl: data.backendUrl,
+                    logoUrl: data.logoUrl || undefined
                 };
                 localStorage.setItem('company_config', JSON.stringify(config));
                 onSuccess(config);

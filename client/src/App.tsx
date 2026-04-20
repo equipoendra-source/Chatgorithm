@@ -27,6 +27,7 @@ interface CompanyConfig {
     companyId: string;
     companyName: string;
     backendUrl: string;
+    logoUrl?: string;
 }
 
 export interface QuickReply {
@@ -370,9 +371,18 @@ function App() {
 
                     {/* Company indicator */}
                     <div className={`px-5 py-4 flex items-center gap-3 border-b backdrop-blur-sm ${isDark ? 'border-white/5 bg-white/5' : 'border-slate-200 bg-white'}`} id="tour-company-info">
-                        <div className="p-2 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg shadow-indigo-500/20">
-                            <Building2 className="w-4 h-4 text-white" />
-                        </div>
+                        {companyConfig.logoUrl ? (
+                            <img
+                                src={companyConfig.logoUrl}
+                                alt={companyConfig.companyName}
+                                className="w-8 h-8 rounded-xl object-cover shadow-lg shadow-indigo-500/20"
+                                onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                            />
+                        ) : (
+                            <div className="p-2 rounded-xl bg-gradient-to-br from-indigo-500 to-purple-600 shadow-lg shadow-indigo-500/20">
+                                <Building2 className="w-4 h-4 text-white" />
+                            </div>
+                        )}
                         <span className={`font-semibold text-sm tracking-wide ${isDark ? 'text-slate-100' : 'text-slate-700'}`}>{companyConfig.companyName}</span>
                     </div>
 

@@ -1679,6 +1679,8 @@ app.post('/api/company-auth', async (req, res) => {
         const storedPassword = company.get('Password') as string;
         const backendUrl = company.get('BackendUrl') as string;
         const companyName = company.get('CompanyName') as string;
+        const logoAttachments = company.get('Logo') as Array<{ url: string }> | undefined;
+        const logoUrl = Array.isArray(logoAttachments) && logoAttachments.length > 0 ? logoAttachments[0].url : null;
 
         let passwordMatch = false;
         if (storedPassword) {
@@ -1705,7 +1707,8 @@ app.post('/api/company-auth', async (req, res) => {
             success: true,
             companyId,
             companyName: companyName || companyId,
-            backendUrl: backendUrl || 'https://chatgorithm.onrender.com'
+            backendUrl: backendUrl || 'https://chatgorithm.onrender.com',
+            logoUrl: logoUrl || null
         });
 
     } catch (error: any) {
