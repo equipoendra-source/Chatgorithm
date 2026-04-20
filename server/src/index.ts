@@ -680,8 +680,8 @@ async function scheduleNotification(params: {
 async function schedulePostSaleSequence(phone: string, clientName: string, vehicleDesc: string, originPhoneId: string): Promise<void> {
     const now = new Date();
     const milestones = [
-        { type: 'postventa_7d',  days: 7,   template: 'postventa_dia7' },
-        { type: 'postventa_30d', days: 30,  template: 'postventa_dia30' },
+        { type: 'postventa_7d',  days: 7,   template: 'postventa_dia7_v2' },
+        { type: 'postventa_30d', days: 30,  template: 'postventa_dia30_v2' },
         { type: 'postventa_6m',  days: 180, template: 'postventa_revision_6m' },
         { type: 'postventa_12m', days: 365, template: 'postventa_revision_12m' },
     ];
