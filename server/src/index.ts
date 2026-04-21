@@ -570,7 +570,7 @@ async function runScheduleMaintenance() {
         }
 
         const endDate = new Date();
-        endDate.setDate(now.getDate() + 30);
+        endDate.setDate(now.getDate() + 90);
         const futureSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} > '${nowISO}')`, fields: ['Date'] }).all();
         const existingDates = new Set(futureSlots.map(r => new Date(r.get('Date') as string).toISOString()));
         const newSlotsToCreate = [];
