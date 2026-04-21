@@ -2686,6 +2686,7 @@ setInterval(runScheduleMaintenance, 3600000);
 setInterval(runNotificationScheduler, 900000); // Cada 15 minutos
 // Ejecutar una vez al arrancar (con delay para no saturar el inicio)
 setTimeout(() => runNotificationScheduler().catch(e => console.error('Error en notification scheduler inicial:', e)), 30000);
+setTimeout(() => runScheduleMaintenance().catch(e => console.error('Error en schedule maintenance inicial:', e)), 15000);
 
 // --- FCM TOKEN REGISTRATION ENDPOINT ---
 // El móvil llama a este endpoint para registrar su token FCM
