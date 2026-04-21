@@ -375,7 +375,7 @@ function App() {
                             <img
                                 src={companyConfig.logoUrl}
                                 alt={companyConfig.companyName}
-                                className="w-8 h-8 rounded-xl object-cover shadow-lg shadow-indigo-500/20"
+                                className="h-8 max-w-[120px] object-contain rounded-lg"
                                 onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
                             />
                         ) : (
