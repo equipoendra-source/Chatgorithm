@@ -45,6 +45,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const [newDate, setNewDate] = useState('');
     const [newTime, setNewTime] = useState('');
     const [isCreating, setIsCreating] = useState(false);
+    const timeInputRef = React.useRef<HTMLInputElement>(null);
+    const createFormRef = React.useRef<HTMLDivElement>(null);
+
+    const handleQuickAddDate = (isoDate: string) => {
+        setNewDate(isoDate);
+        setTimeout(() => {
+            createFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            timeInputRef.current?.focus();
+        }, 100);
+    };
 
     useEffect(() => {
         fetchData();
@@ -207,7 +217,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
 
                 {/* CREAR MANUAL (Oculto en ReadOnly) */}
                 {!readOnly && (
-                    <div className={`p-4 rounded-2xl border shadow-sm flex flex-col md:flex-row items-end gap-4 animate-in slide-in-from-top-2 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+                    <div ref={createFormRef} className={`p-4 rounded-2xl border shadow-sm flex flex-col md:flex-row items-end gap-4 animate-in slide-in-from-top-2 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
                         <div className="w-full md:flex-1">
                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Fecha</label>
                             <input
@@ -223,6 +233,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                         <div className="w-full md:flex-1">
                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Hora Inicio</label>
                             <input
+                                ref={timeInputRef}
                                 type="time"
                                 value={newTime}
                                 onChange={e => setNewTime(e.target.value)}
@@ -330,13 +341,14 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                         ))}
                                     </div>
 
-                                    {/* Botón rápido + (Solo Desktop Hover) */}
+                                    {/* Botón rápido + */}
                                     {!readOnly && (
                                         <button
-                                            onClick={() => {
-                                                setNewDate(`${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
+                                            onClick={(e) => {
+                                                e.stopPropagation();
+                                                handleQuickAddDate(`${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`);
                                             }}
-                                            className={`hidden md:block absolute bottom-2 right-2 opacity-0 group-hover:opacity-100 border p-1.5 rounded-lg shadow-sm transition ${isDark
+                                            className={`absolute bottom-2 right-2 md:opacity-0 md:group-hover:opacity-100 border p-1.5 rounded-lg shadow-sm transition ${isDark
                                                 ? 'bg-slate-700 border-slate-600 text-purple-400 hover:bg-slate-600'
                                                 : 'bg-white border-slate-200 text-purple-600 hover:bg-purple-50'
                                                 }`}
