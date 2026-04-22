@@ -607,9 +607,10 @@ async function runScheduleMaintenance() {
 // ==========================================
 
 // --- Enviar plantilla WhatsApp (reutilizable) ---
-async function sendTemplateMessage(phone: string, templateName: string, variables: string[], originPhoneId: string): Promise<boolean> {
+// Devuelve true si OK, o un string con el mensaje de error si falla.
+async function sendTemplateMessage(phone: string, templateName: string, variables: string[], originPhoneId: string): Promise<true | string> {
     const token = getToken(originPhoneId);
-    if (!token) { console.error(`❌ [Notif] Token no encontrado para ${originPhoneId}`); return false; }
+    if (!token) { const msg = `Token no encontrado para ${originPhoneId}`; console.error(`❌ [Notif] ${msg}`); return msg; }
     const cleanTo = cleanNumber(phone);
     try {
         const parameters = variables.map(val => ({ type: "text", text: val }));
@@ -632,8 +633,12 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
         });
         return true;
     } catch (e: any) {
-        console.error(`❌ [Notif] Error enviando plantilla ${templateName} a ${cleanTo}:`, e.response?.data?.error?.message || e.message);
-        return false;
+        const metaErr = e.response?.data?.error;
+        const errorMsg = metaErr
+            ? `Meta ${metaErr.code || ''} ${metaErr.error_subcode || ''}: ${metaErr.message || ''} ${metaErr.error_data?.details || ''}`.trim()
+            : (e.message || 'unknown');
+        console.error(`❌ [Notif] Error enviando plantilla ${templateName} a ${cleanTo}:`, errorMsg);
+        return errorMsg;
     }
 }
 
@@ -832,7 +837,9 @@ async function runNotificationScheduler() {
                 continue;
             }
 
-            const success = await sendTemplateMessage(phone, templateName, variables, originId);
+            const sendResult = await sendTemplateMessage(phone, templateName, variables, originId);
+            const success = sendResult === true;
+            const lastError = typeof sendResult === 'string' ? sendResult : '';
 
             if (success) {
                 await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
@@ -846,12 +853,12 @@ async function runNotificationScheduler() {
                         id: notif.id, fields: {
                             retryCount: retryCount + 1,
                             scheduledFor: retryAt.toISOString(),
-                            error: `Reintento ${retryCount + 1}/3 a las ${retryAt.toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid' })}`
+                            error: `Reintento ${retryCount + 1}/3. Último error: ${lastError}`.slice(0, 500)
                         }
                     }]);
                 } else {
                     await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
-                        id: notif.id, fields: { status: 'failed', error: 'Máximo de reintentos (3/3)' }
+                        id: notif.id, fields: { status: 'failed', error: `Máximo reintentos. Último error: ${lastError}`.slice(0, 500) }
                     }]);
                 }
             }
@@ -2767,6 +2774,43 @@ app.post('/api/debug/run-scheduler', async (_req, res) => {
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
+});
+
+// --- DEBUG: reintentar notificaciones failed (las resetea a pending) ---
+app.post('/api/debug/retry-failed-notifs', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'No base' });
+    try {
+        const failed = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `{status}='failed'`
+        }).all();
+
+        for (let i = 0; i < failed.length; i += 10) {
+            const batch = failed.slice(i, i + 10).map(r => ({
+                id: r.id,
+                fields: {
+                    status: 'pending' as const,
+                    retryCount: 0,
+                    scheduledFor: new Date().toISOString(),
+                    error: ''
+                }
+            }));
+            await base(TABLE_SCHEDULED_NOTIFICATIONS).update(batch);
+            await delay(200);
+        }
+        res.json({ success: true, reset: failed.length });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- DEBUG: probar envío de plantilla directamente ---
+app.post('/api/debug/test-template', async (req, res) => {
+    const { phone, templateName, variables, originPhoneId } = req.body;
+    if (!phone || !templateName) return res.status(400).json({ error: 'phone y templateName requeridos' });
+    const origin = originPhoneId || waPhoneId || '';
+    const vars = Array.isArray(variables) ? variables : [];
+    const result = await sendTemplateMessage(phone, templateName, vars, origin);
+    res.json({ phone, templateName, variables: vars, originPhoneId: origin, result });
 });
 // Ejecutar una vez al arrancar (con delay para no saturar el inicio)
 setTimeout(() => runNotificationScheduler().catch(e => console.error('Error en notification scheduler inicial:', e)), 30000);
