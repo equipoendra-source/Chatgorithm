@@ -2684,6 +2684,90 @@ io.on('connection', (socket) => {
 
 setInterval(runScheduleMaintenance, 3600000);
 setInterval(runNotificationScheduler, 900000); // Cada 15 minutos
+
+// --- DEBUG: endpoint para diagnosticar el scheduler de notificaciones ---
+app.get('/api/debug/notif-scheduler', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'No base' });
+    const now = new Date();
+    const diagnostic: any = {
+        now: now.toISOString(),
+        nowMadrid: now.toLocaleString('es-ES', { timeZone: 'Europe/Madrid' }),
+        waPhoneIdEnv: waPhoneId || null,
+        appointments: [],
+        scheduledNotifications: [],
+        tableCheck: null
+    };
+
+    try {
+        // 1. Check if ScheduledNotifications table exists
+        try {
+            const test = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({ maxRecords: 1 }).firstPage();
+            diagnostic.tableCheck = { exists: true, sampleCount: test.length };
+        } catch (e: any) {
+            diagnostic.tableCheck = { exists: false, error: e.message };
+        }
+
+        // 2. List booked appointments and their window status
+        const bookedAppts = await base('Appointments').select({
+            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='')`
+        }).all();
+
+        for (const appt of bookedAppts) {
+            const rawDate = appt.get('Date') as string;
+            const apptDate = new Date(rawDate);
+            const msUntil = apptDate.getTime() - now.getTime();
+            const hoursUntil = msUntil / (1000 * 60 * 60);
+            const minutesUntil = msUntil / (1000 * 60);
+            diagnostic.appointments.push({
+                id: appt.id,
+                clientName: appt.get('ClientName'),
+                clientPhone: appt.get('ClientPhone'),
+                rawDate,
+                parsedDate: isNaN(apptDate.getTime()) ? 'INVALID' : apptDate.toISOString(),
+                hoursUntil: Math.round(hoursUntil * 100) / 100,
+                minutesUntil: Math.round(minutesUntil),
+                inWindow24h: hoursUntil >= 22 && hoursUntil <= 26,
+                inWindow1h: minutesUntil >= 45 && minutesUntil <= 75,
+                windowAlreadyPassed24h: hoursUntil < 22 && hoursUntil > 0,
+                origin_phone_id_from_appt: appt.get('origin_phone_id') || null
+            });
+        }
+
+        // 3. List scheduled notifications
+        try {
+            const notifs = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({ maxRecords: 50 }).all();
+            diagnostic.scheduledNotifications = notifs.map(n => ({
+                id: n.id,
+                type: n.get('type'),
+                phone: n.get('phone'),
+                appointmentId: n.get('appointmentId'),
+                templateName: n.get('templateName'),
+                status: n.get('status'),
+                scheduledFor: n.get('scheduledFor'),
+                retryCount: n.get('retryCount'),
+                origin_phone_id: n.get('origin_phone_id'),
+                createdAt: n.get('createdAt'),
+                error: n.get('error')
+            }));
+        } catch (e: any) {
+            diagnostic.scheduledNotifications = { error: e.message };
+        }
+
+        res.json(diagnostic);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message, diagnostic });
+    }
+});
+
+// --- DEBUG: ejecutar scheduler manualmente ---
+app.post('/api/debug/run-scheduler', async (_req, res) => {
+    try {
+        await runNotificationScheduler();
+        res.json({ success: true, message: 'Scheduler ejecutado, mira los logs' });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
 // Ejecutar una vez al arrancar (con delay para no saturar el inicio)
 setTimeout(() => runNotificationScheduler().catch(e => console.error('Error en notification scheduler inicial:', e)), 30000);
 setTimeout(() => runScheduleMaintenance().catch(e => console.error('Error en schedule maintenance inicial:', e)), 15000);
