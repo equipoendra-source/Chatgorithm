@@ -1736,7 +1736,25 @@ app.post('/api/company-auth', async (req, res) => {
         const backendUrl = company.get('BackendUrl') as string;
         const companyName = company.get('CompanyName') as string;
         const logoAttachments = company.get('Logo') as Array<{ url: string }> | undefined;
-        const logoUrl = Array.isArray(logoAttachments) && logoAttachments.length > 0 ? logoAttachments[0].url : null;
+        const airtableLogoUrl = Array.isArray(logoAttachments) && logoAttachments.length > 0 ? logoAttachments[0].url : null;
+
+        // Subir el logo a Cloudinary para tener URL permanente (las URLs de Airtable caducan en horas)
+        let logoUrl: string | null = null;
+        if (airtableLogoUrl) {
+            try {
+                const uploadResult: any = await cloudinary.uploader.upload(airtableLogoUrl, {
+                    folder: 'company-logos',
+                    public_id: `logo-${companyId}`,
+                    overwrite: true,
+                    resource_type: 'image'
+                });
+                logoUrl = uploadResult.secure_url;
+                console.log(`🖼️ [Company Auth] Logo subido a Cloudinary para ${companyId}: ${logoUrl}`);
+            } catch (e: any) {
+                console.error(`⚠️ [Company Auth] Error subiendo logo a Cloudinary, usando URL de Airtable:`, e.message);
+                logoUrl = airtableLogoUrl; // fallback a Airtable si Cloudinary falla
+            }
+        }
 
         let passwordMatch = false;
         if (storedPassword) {
