@@ -1106,44 +1106,73 @@ async function handleContactUpdate(phone: string, text: string, name: string = "
 //  TARJETA DE AGENTE — Imagen automática
 // ==========================================
 async function generateAgentCard(agentName: string): Promise<string> {
+    const companyName = (process.env.COMPANY_NAME || 'TALLER').toUpperCase();
+    const cacheKey = `${agentName}|${companyName}`;
     // Devolver URL cacheada si ya existe
-    const cached = agentCardUrlCache.get(agentName);
+    const cached = agentCardUrlCache.get(cacheKey);
     if (cached) return cached;
 
     const initial = agentName.charAt(0).toUpperCase();
     // Escapar caracteres especiales para SVG
-    const safeName = agentName.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const safeName = esc(agentName);
+    const safeCompany = esc(companyName);
 
     const svg = `<svg width="600" height="200" xmlns="http://www.w3.org/2000/svg">
   <defs>
     <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" style="stop-color:#4f46e5"/>
-      <stop offset="100%" style="stop-color:#7c3aed"/>
+      <stop offset="0%" style="stop-color:#f8fafc"/>
+      <stop offset="100%" style="stop-color:#e0f2fe"/>
     </linearGradient>
   </defs>
-  <rect width="600" height="200" rx="20" fill="url(#bg)"/>
-  <rect x="12" y="12" width="576" height="176" rx="14" fill="none" stroke="rgba(255,255,255,0.15)" stroke-width="1"/>
-  <circle cx="90" cy="100" r="45" fill="rgba(255,255,255,0.2)"/>
-  <text x="90" y="116" text-anchor="middle" font-size="42" fill="white" font-family="Arial, Helvetica, sans-serif" font-weight="bold">${initial}</text>
-  <text x="170" y="72" font-size="13" fill="rgba(255,255,255,0.7)" font-family="Arial, Helvetica, sans-serif" letter-spacing="3">LE ATIENDE</text>
-  <text x="170" y="115" font-size="32" font-weight="bold" fill="white" font-family="Arial, Helvetica, sans-serif">${safeName}</text>
-  <line x1="170" y1="132" x2="380" y2="132" stroke="rgba(255,255,255,0.25)" stroke-width="2"/>
-  <text x="170" y="158" font-size="13" fill="rgba(255,255,255,0.45)" font-family="Arial, Helvetica, sans-serif">Chatgorithm</text>
+
+  <!-- Fondo claro -->
+  <rect width="600" height="200" fill="url(#bg)"/>
+
+  <!-- Decoración izquierda (triángulos azules) -->
+  <polygon points="0,0 110,0 0,110" fill="#0891b2" opacity="0.95"/>
+  <polygon points="0,0 55,110 0,150" fill="#164e63" opacity="0.85"/>
+  <polygon points="0,200 110,200 0,110" fill="#0e7490" opacity="0.55"/>
+  <polygon points="0,150 90,200 45,200" fill="#155e75" opacity="0.9"/>
+
+  <!-- Decoración derecha (triángulos cyan) -->
+  <polygon points="600,0 490,0 600,110" fill="#67e8f9" opacity="0.55"/>
+  <polygon points="600,0 600,85 545,0" fill="#06b6d4" opacity="0.35"/>
+  <polygon points="600,200 475,200 600,125" fill="#0891b2" opacity="0.5"/>
+  <polygon points="600,105 600,200 540,200" fill="#164e63" opacity="0.4"/>
+
+  <!-- Etiqueta LE ATIENDE -->
+  <text x="240" y="60" font-size="13" fill="#1e3a8a" font-family="Arial, Helvetica, sans-serif" letter-spacing="4" font-weight="600">LE ATIENDE</text>
+
+  <!-- Avatar circular -->
+  <circle cx="175" cy="100" r="42" fill="#1e3a8a"/>
+  <text x="175" y="116" text-anchor="middle" font-size="42" fill="white" font-family="Arial, Helvetica, sans-serif" font-weight="bold">${initial}</text>
+
+  <!-- Nombre del agente -->
+  <text x="240" y="110" font-size="38" font-weight="bold" fill="#1e3a8a" font-family="Arial, Helvetica, sans-serif">${safeName}</text>
+
+  <!-- Separador -->
+  <line x1="240" y1="130" x2="475" y2="130" stroke="#94a3b8" stroke-width="1.5"/>
+
+  <!-- Nombre de la empresa -->
+  <text x="240" y="158" font-size="13" fill="#475569" font-family="Arial, Helvetica, sans-serif" letter-spacing="4" font-weight="600">${safeCompany}</text>
 </svg>`;
 
     const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
 
+    const publicIdSlug = `${agentName}-${companyName}`.replace(/\s+/g, '-').toLowerCase().replace(/[^a-z0-9\-]/g, '');
+
     const result: any = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
-            { folder: 'agent-cards', public_id: `agent-card-${agentName.replace(/\s+/g, '-').toLowerCase()}`, overwrite: true, resource_type: 'image' },
+            { folder: 'agent-cards', public_id: `agent-card-${publicIdSlug}`, overwrite: true, resource_type: 'image' },
             (error: any, res: any) => { if (error) reject(error); else resolve(res); }
         );
         stream.end(pngBuffer);
     });
 
     const url = result.secure_url;
-    agentCardUrlCache.set(agentName, url);
-    console.log(`🪪 [AgentCard] Tarjeta generada para "${agentName}": ${url}`);
+    agentCardUrlCache.set(cacheKey, url);
+    console.log(`🪪 [AgentCard] Tarjeta generada para "${agentName}" (${companyName}): ${url}`);
     return url;
 }
 
@@ -2798,6 +2827,17 @@ app.post('/api/debug/retry-failed-notifs', async (_req, res) => {
             await delay(200);
         }
         res.json({ success: true, reset: failed.length });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- DEBUG: previsualizar tarjeta de agente ---
+app.get('/api/debug/agent-card-preview', async (req, res) => {
+    try {
+        const name = (req.query.name as string) || 'Paco';
+        const url = await generateAgentCard(name);
+        res.redirect(url);
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
