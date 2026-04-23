@@ -1105,9 +1105,29 @@ async function handleContactUpdate(phone: string, text: string, name: string = "
 // ==========================================
 //  TARJETA DE AGENTE — Imagen automática
 // ==========================================
+// Mapa de departamentos por trabajador.
+// Se configura en Render con la variable AGENT_DEPARTMENTS con formato:
+//   Paco=TALLER,Maria=VENTAS,Luis=RECAMBIOS
+// Si un trabajador no está en el mapa, se usa DEPARTMENT_DEFAULT (o "TALLER").
+function getDepartmentForAgent(agentName: string): string {
+    const raw = process.env.AGENT_DEPARTMENTS || '';
+    const fallback = (process.env.DEPARTMENT_DEFAULT || 'TALLER').toUpperCase();
+    if (!raw) return fallback;
+    try {
+        const map: Record<string, string> = {};
+        raw.split(',').forEach(pair => {
+            const [k, v] = pair.split('=').map(s => (s || '').trim());
+            if (k && v) map[k.toLowerCase()] = v.toUpperCase();
+        });
+        return map[agentName.trim().toLowerCase()] || fallback;
+    } catch {
+        return fallback;
+    }
+}
+
 async function generateAgentCard(agentName: string): Promise<string> {
-    const companyName = (process.env.COMPANY_NAME || 'TALLER').toUpperCase();
-    const cacheKey = `${agentName}|${companyName}`;
+    const department = getDepartmentForAgent(agentName);
+    const cacheKey = `${agentName}|${department}`;
     // Devolver URL cacheada si ya existe
     const cached = agentCardUrlCache.get(cacheKey);
     if (cached) return cached;
@@ -1116,7 +1136,7 @@ async function generateAgentCard(agentName: string): Promise<string> {
     // Escapar caracteres especiales para SVG
     const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     const safeName = esc(agentName);
-    const safeCompany = esc(companyName);
+    const safeCompany = esc(department);
 
     const svg = `<svg width="600" height="200" xmlns="http://www.w3.org/2000/svg">
   <defs>
@@ -1154,13 +1174,13 @@ async function generateAgentCard(agentName: string): Promise<string> {
   <!-- Separador -->
   <line x1="240" y1="130" x2="475" y2="130" stroke="#94a3b8" stroke-width="1.5"/>
 
-  <!-- Nombre de la empresa -->
+  <!-- Departamento del trabajador -->
   <text x="240" y="158" font-size="13" fill="#475569" font-family="Arial, Helvetica, sans-serif" letter-spacing="4" font-weight="600">${safeCompany}</text>
 </svg>`;
 
     const pngBuffer = await sharp(Buffer.from(svg)).png().toBuffer();
 
-    const publicIdSlug = `${agentName}-${companyName}`.replace(/\s+/g, '-').toLowerCase().replace(/[^a-z0-9\-]/g, '');
+    const publicIdSlug = `${agentName}-${department}`.replace(/\s+/g, '-').toLowerCase().replace(/[^a-z0-9\-]/g, '');
 
     const result: any = await new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
@@ -1172,7 +1192,7 @@ async function generateAgentCard(agentName: string): Promise<string> {
 
     const url = result.secure_url;
     agentCardUrlCache.set(cacheKey, url);
-    console.log(`🪪 [AgentCard] Tarjeta generada para "${agentName}" (${companyName}): ${url}`);
+    console.log(`🪪 [AgentCard] Tarjeta generada para "${agentName}" (${department}): ${url}`);
     return url;
 }
 
