@@ -614,7 +614,7 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
     const cleanTo = cleanNumber(phone);
     try {
         const parameters = variables.map(val => ({ type: "text", text: val }));
-        const templateObj: any = { name: templateName, language: { code: "es" } };
+        const templateObj: any = { name: templateName, language: { code: "es_ES" } };
         if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
 
         await axios.post(
