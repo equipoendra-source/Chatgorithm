@@ -90,6 +90,8 @@ const twilioCallerId = process.env.TWILIO_CALLER_ID;
 const TABLE_TEMPLATES = 'Templates';
 const TABLE_TEAM_MESSAGES = 'TeamMessages';
 const TABLE_SCHEDULED_NOTIFICATIONS = 'ScheduledNotifications';
+const TABLE_CAMPAIGNS = 'Campaigns';
+const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 const BUSINESS_ACCOUNTS: Record<string, string> = {
@@ -2419,11 +2421,22 @@ app.post('/webhook', async (req, res) => {
             });
             console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
 
-            // --- Detección opt-out de notificaciones ---
-            if (msg.type === 'text' && text.trim().toUpperCase() === 'BAJA') {
-                console.log(`🚫 [WEBHOOK] Opt-out detectado de ${from}`);
+            // --- Detección opt-out de notificaciones y marketing ---
+            const upperText = (msg.type === 'text' && text) ? text.trim().toUpperCase() : '';
+            const optOutKeywords = ['BAJA', 'STOP', 'CANCELAR', 'NO PROMOCIONES', 'NO MARKETING', 'UNSUBSCRIBE'];
+            if (optOutKeywords.some(k => upperText === k || upperText === `RESPONDE ${k}`)) {
+                console.log(`🚫 [WEBHOOK] Opt-out detectado de ${from} (palabra: ${upperText})`);
                 await handleNotificationOptOut(from, originPhoneId);
+                // Desactivar también opt-in marketing
+                try { await setContactMarketingOptIn(from, false, 'whatsapp_baja'); } catch (e: any) { console.error('[Campaigns] Error opt-out marketing:', e.message); }
                 return res.sendStatus(200);
+            }
+            // --- Detección opt-in marketing por respuesta explícita ---
+            const optInKeywords = ['SI PROMOCIONES', 'SÍ PROMOCIONES', 'ACEPTO PROMOCIONES', 'ALTA PROMOCIONES', 'ALTA MARKETING', 'YES PROMO'];
+            if (optInKeywords.some(k => upperText === k)) {
+                console.log(`✅ [WEBHOOK] Opt-in marketing detectado de ${from}`);
+                try { await setContactMarketingOptIn(from, true, 'whatsapp_reply'); } catch (e: any) { console.error('[Campaigns] Error opt-in marketing:', e.message); }
+                // No retornamos: dejamos que siga el flujo normal para que la IA o el agente le confirme
             }
 
             // Comprobar si hay sesión de reserva activa en Airtable (sobrevive reinicios)
@@ -2946,5 +2959,541 @@ app.post('/api/webpush/subscribe', (req, res) => {
     console.log(`🌐 [WebPush] Suscripción registrada para: ${user}`);
     res.status(201).json({ success: true });
 });
+
+// ==========================================
+//  CAMPAÑAS DE MARKETING — Sistema completo
+// ==========================================
+
+// Coste estimado por mensaje de marketing en España (céntimos)
+const MARKETING_COST_PER_MSG = Number(process.env.MARKETING_COST_PER_MSG || 0.06);
+// Espaciar envíos para no saturar Meta (200ms = 5 mensajes/segundo)
+const CAMPAIGN_SEND_DELAY_MS = Number(process.env.CAMPAIGN_SEND_DELAY_MS || 200);
+
+// Helper: parsear JSON de campos Airtable de forma segura
+function safeJsonParse<T>(raw: any, fallback: T): T {
+    if (raw === undefined || raw === null || raw === '') return fallback;
+    if (typeof raw === 'object') return raw as T;
+    try { return JSON.parse(String(raw)) as T; } catch { return fallback; }
+}
+
+// Helper: limpiar variables (Meta no acepta saltos de línea/tabs en variables de plantilla)
+function sanitizeTemplateVariable(text: string): string {
+    return String(text || '').replace(/[\n\r\t]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+}
+
+// Helper: expandir placeholders {nombre}, {producto}, etc. en variables
+function expandCampaignVariables(rawVariables: string[], contactData: Record<string, string>): string[] {
+    return rawVariables.map(v => {
+        const expanded = String(v).replace(/\{(\w+)\}/g, (_match, key) => {
+            const val = contactData[key];
+            return (val !== undefined && val !== null && val !== '') ? String(val) : `{${key}}`;
+        });
+        return sanitizeTemplateVariable(expanded);
+    });
+}
+
+// --- Verificar si un contacto tiene opt-in marketing ---
+async function isContactOptedInForMarketing(phone: string): Promise<boolean> {
+    if (!base) return false;
+    try {
+        const cleanPhone = cleanNumber(phone);
+        if (!cleanPhone) return false;
+        const records = await base('Contacts').select({
+            filterByFormula: `{phone} = '${cleanPhone}'`,
+            maxRecords: 1
+        }).firstPage();
+        if (records.length === 0) return false;
+        const optIn = records[0].get('optInMarketing');
+        if (optIn === true || optIn === 1) return true;
+        if (typeof optIn === 'string') {
+            const v = optIn.toLowerCase().trim();
+            return v === 'yes' || v === 'true' || v === 'sí' || v === 'si' || v === '1';
+        }
+        return false;
+    } catch (e: any) {
+        console.error('[Campaigns] Error verificando opt-in:', e.message);
+        return false;
+    }
+}
+
+// --- Marcar opt-in/opt-out marketing en un contacto ---
+async function setContactMarketingOptIn(phone: string, optedIn: boolean, source: string = 'manual'): Promise<boolean> {
+    if (!base) return false;
+    try {
+        const cleanPhone = cleanNumber(phone);
+        if (!cleanPhone) return false;
+        const records = await base('Contacts').select({
+            filterByFormula: `{phone} = '${cleanPhone}'`,
+            maxRecords: 1
+        }).firstPage();
+        if (records.length === 0) return false;
+        const fields: any = { 'optInMarketing': optedIn };
+        if (optedIn) {
+            fields.optInDate = new Date().toISOString();
+            fields.optInSource = source;
+        } else {
+            fields.optInSource = 'opt_out_' + source;
+        }
+        await base('Contacts').update([{ id: records[0].id, fields }]);
+        console.log(`📧 [Campaigns] Opt-in marketing ${optedIn ? 'activado' : 'desactivado'} para ${cleanPhone} (${source})`);
+        return true;
+    } catch (e: any) {
+        console.error('[Campaigns] Error actualizando opt-in:', e.message);
+        return false;
+    }
+}
+
+// --- Helper: obtener datos de un contacto para personalizar variables ---
+async function getContactDataForPersonalization(phone: string): Promise<Record<string, string>> {
+    if (!base) return {};
+    try {
+        const cleanPhone = cleanNumber(phone);
+        const records = await base('Contacts').select({
+            filterByFormula: `{phone} = '${cleanPhone}'`,
+            maxRecords: 1
+        }).firstPage();
+        if (records.length === 0) return { phone: cleanPhone, nombre: 'Cliente', name: 'Cliente' };
+        const r = records[0];
+        const name = (r.get('name') as string) || 'Cliente';
+        return {
+            phone: cleanPhone,
+            nombre: name,
+            name: name,
+            email: (r.get('email') as string) || '',
+            departamento: (r.get('department') as string) || '',
+            department: (r.get('department') as string) || ''
+        };
+    } catch {
+        return { phone: cleanNumber(phone), nombre: 'Cliente', name: 'Cliente' };
+    }
+}
+
+// --- Ejecutar UNA campaña (envío con rate limiting y registro) ---
+async function executeCampaign(campaignId: string): Promise<void> {
+    if (!base) { console.error('[Campaigns] DB no disponible'); return; }
+
+    let campaign: any;
+    try {
+        campaign = await base(TABLE_CAMPAIGNS).find(campaignId);
+    } catch {
+        console.error(`[Campaigns] Campaña no encontrada: ${campaignId}`);
+        return;
+    }
+
+    const status = campaign.get('status');
+    if (status === 'running' || status === 'completed') {
+        console.log(`[Campaigns] La campaña ${campaignId} ya está ${status}, ignorando`);
+        return;
+    }
+
+    // Marcar como running
+    try {
+        await base(TABLE_CAMPAIGNS).update([{
+            id: campaignId,
+            fields: { status: 'running', startedAt: new Date().toISOString() }
+        }]);
+    } catch (e: any) {
+        console.error('[Campaigns] Error marcando running:', e.message);
+        return;
+    }
+
+    const recipients = safeJsonParse<string[]>(campaign.get('recipients'), []);
+    const variables = safeJsonParse<string[]>(campaign.get('variables'), []);
+    const templateName = (campaign.get('templateName') as string) || '';
+    const originPhoneId = (campaign.get('originPhoneId') as string) || waPhoneId || 'default';
+    const respectOptIn = campaign.get('respectOptIn') !== false; // por defecto true
+
+    let sentCount = 0;
+    let failedCount = 0;
+    let skippedCount = 0;
+    const errorSummary: string[] = [];
+
+    console.log(`📢 [Campaigns] Iniciando "${campaign.get('name')}" — ${recipients.length} destinatarios, plantilla "${templateName}"`);
+
+    for (const phone of recipients) {
+        const cleanPhone = cleanNumber(phone);
+        if (!cleanPhone) { skippedCount++; continue; }
+
+        // Comprobar opt-in marketing
+        if (respectOptIn) {
+            const optedIn = await isContactOptedInForMarketing(cleanPhone);
+            if (!optedIn) {
+                skippedCount++;
+                try {
+                    await base(TABLE_CAMPAIGN_SENDS).create([{
+                        fields: {
+                            campaignId, phone: cleanPhone, status: 'skipped',
+                            error: 'Sin opt-in marketing', sentAt: new Date().toISOString()
+                        }
+                    }]);
+                } catch {}
+                continue;
+            }
+        }
+
+        // Comprobar opt-out global de notificaciones (campo opted_out_notifications en Contacts)
+        try {
+            const contactCheck = await base('Contacts').select({
+                filterByFormula: `{phone}='${cleanPhone}'`, maxRecords: 1
+            }).firstPage();
+            if (contactCheck.length > 0 && contactCheck[0].get('opted_out_notifications')) {
+                skippedCount++;
+                try {
+                    await base(TABLE_CAMPAIGN_SENDS).create([{
+                        fields: {
+                            campaignId, phone: cleanPhone, status: 'skipped',
+                            error: 'Opt-out global de notificaciones', sentAt: new Date().toISOString()
+                        }
+                    }]);
+                } catch {}
+                continue;
+            }
+        } catch {}
+
+        // Personalizar variables con datos del contacto
+        const contactData = await getContactDataForPersonalization(cleanPhone);
+        const personalizedVars = expandCampaignVariables(variables, contactData);
+
+        // Enviar
+        const result = await sendTemplateMessage(cleanPhone, templateName, personalizedVars, originPhoneId);
+
+        if (result === true) {
+            sentCount++;
+            try {
+                await base(TABLE_CAMPAIGN_SENDS).create([{
+                    fields: {
+                        campaignId, phone: cleanPhone, status: 'sent',
+                        sentAt: new Date().toISOString()
+                    }
+                }]);
+            } catch {}
+        } else {
+            failedCount++;
+            const errMsg = String(result).substring(0, 500);
+            if (errorSummary.length < 5) errorSummary.push(`${cleanPhone}: ${errMsg}`);
+            try {
+                await base(TABLE_CAMPAIGN_SENDS).create([{
+                    fields: {
+                        campaignId, phone: cleanPhone, status: 'failed',
+                        error: errMsg, sentAt: new Date().toISOString()
+                    }
+                }]);
+            } catch {}
+        }
+
+        // Espaciar envíos (rate limiting Meta)
+        await delay(CAMPAIGN_SEND_DELAY_MS);
+    }
+
+    // Estado final
+    const finalStatus = (sentCount === 0 && failedCount > 0) ? 'failed' : 'completed';
+    const totalCost = sentCount * MARKETING_COST_PER_MSG;
+    try {
+        await base(TABLE_CAMPAIGNS).update([{
+            id: campaignId,
+            fields: {
+                status: finalStatus,
+                completedAt: new Date().toISOString(),
+                sentCount, failedCount, skippedCount,
+                estimatedCost: Number(totalCost.toFixed(2)),
+                notes: errorSummary.join(' | ').substring(0, 1000)
+            }
+        }]);
+    } catch (e: any) {
+        console.error('[Campaigns] Error guardando estado final:', e.message);
+    }
+
+    console.log(`✅ [Campaigns] "${campaign.get('name')}" terminada — Enviados: ${sentCount}, Fallidos: ${failedCount}, Saltados: ${skippedCount}, Coste: ${totalCost.toFixed(2)}€`);
+}
+
+// --- Scheduler de campañas programadas ---
+async function runCampaignScheduler(): Promise<void> {
+    if (!base) return;
+    try {
+        const now = new Date().toISOString();
+        const records = await base(TABLE_CAMPAIGNS).select({
+            filterByFormula: `AND({status}='scheduled', IS_BEFORE({scheduledFor}, '${now}'))`,
+            maxRecords: 5,
+            sort: [{ field: 'scheduledFor', direction: 'asc' }]
+        }).firstPage();
+
+        if (records.length === 0) return;
+
+        console.log(`📢 [CampaignScheduler] ${records.length} campañas programadas listas para ejecutar`);
+        for (const r of records) {
+            await executeCampaign(r.id).catch(e => console.error('[CampaignScheduler] Error en campaña:', e.message));
+        }
+    } catch (e: any) {
+        console.error('[CampaignScheduler] Error general:', e.message);
+    }
+}
+
+// --- ENDPOINTS REST DE CAMPAÑAS ---
+
+// Listar todas las campañas
+app.get('/api/campaigns', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const records = await base(TABLE_CAMPAIGNS).select({
+            sort: [{ field: 'createdAt', direction: 'desc' }],
+            maxRecords: 100
+        }).all();
+        const list = records.map(r => ({
+            id: r.id,
+            name: (r.get('name') as string) || '',
+            templateName: (r.get('templateName') as string) || '',
+            status: (r.get('status') as string) || 'draft',
+            scheduledFor: (r.get('scheduledFor') as string) || null,
+            createdAt: (r.get('createdAt') as string) || '',
+            createdBy: (r.get('createdBy') as string) || '',
+            totalRecipients: Number(r.get('totalRecipients') || 0),
+            sentCount: Number(r.get('sentCount') || 0),
+            failedCount: Number(r.get('failedCount') || 0),
+            skippedCount: Number(r.get('skippedCount') || 0),
+            estimatedCost: Number(r.get('estimatedCost') || 0),
+            startedAt: (r.get('startedAt') as string) || null,
+            completedAt: (r.get('completedAt') as string) || null
+        }));
+        res.json(list);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Obtener una campaña con todos los detalles
+app.get('/api/campaigns/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const recipients = safeJsonParse<string[]>(r.get('recipients'), []);
+        const variables = safeJsonParse<string[]>(r.get('variables'), []);
+        res.json({
+            id: r.id,
+            name: r.get('name'),
+            templateName: r.get('templateName'),
+            templateLanguage: r.get('templateLanguage') || 'es_ES',
+            variables,
+            recipients,
+            status: r.get('status') || 'draft',
+            scheduledFor: r.get('scheduledFor') || null,
+            originPhoneId: r.get('originPhoneId') || null,
+            respectOptIn: r.get('respectOptIn') !== false,
+            createdAt: r.get('createdAt'),
+            createdBy: r.get('createdBy'),
+            totalRecipients: Number(r.get('totalRecipients') || recipients.length),
+            sentCount: Number(r.get('sentCount') || 0),
+            failedCount: Number(r.get('failedCount') || 0),
+            skippedCount: Number(r.get('skippedCount') || 0),
+            estimatedCost: Number(r.get('estimatedCost') || 0),
+            startedAt: r.get('startedAt'),
+            completedAt: r.get('completedAt'),
+            notes: r.get('notes') || ''
+        });
+    } catch {
+        res.status(404).json({ error: 'Campaña no encontrada' });
+    }
+});
+
+// Crear nueva campaña (estado 'draft' por defecto)
+app.post('/api/campaigns', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { name, templateName, templateLanguage, variables, recipients, status, scheduledFor, originPhoneId, createdBy, respectOptIn } = req.body;
+
+    if (!name || !templateName) return res.status(400).json({ error: 'name y templateName son obligatorios' });
+    if (!Array.isArray(recipients) || recipients.length === 0) return res.status(400).json({ error: 'recipients debe ser un array no vacío' });
+
+    const cleanRecipients = (recipients as string[]).map(p => cleanNumber(p)).filter(Boolean);
+    const totalRecipients = cleanRecipients.length;
+    const estimatedCost = Number((totalRecipients * MARKETING_COST_PER_MSG).toFixed(2));
+
+    try {
+        const fields: any = {
+            name, templateName,
+            templateLanguage: templateLanguage || 'es_ES',
+            variables: JSON.stringify(variables || []),
+            recipients: JSON.stringify(cleanRecipients),
+            status: status || 'draft',
+            originPhoneId: originPhoneId || waPhoneId || '',
+            respectOptIn: respectOptIn !== false,
+            createdAt: new Date().toISOString(),
+            createdBy: createdBy || 'unknown',
+            totalRecipients, sentCount: 0, failedCount: 0, skippedCount: 0,
+            estimatedCost
+        };
+        if (scheduledFor) fields.scheduledFor = scheduledFor;
+        const created = await base(TABLE_CAMPAIGNS).create([{ fields }]);
+        res.json({ success: true, id: created[0].id, totalRecipients, estimatedCost });
+    } catch (e: any) {
+        console.error('[Campaigns] Error creando:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Actualizar campaña (solo borradores y programadas)
+app.put('/api/campaigns/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const currentStatus = r.get('status');
+        if (currentStatus === 'running' || currentStatus === 'completed') {
+            return res.status(400).json({ error: 'No se puede editar una campaña en curso o terminada' });
+        }
+        const { name, templateName, templateLanguage, variables, recipients, status, scheduledFor, originPhoneId, respectOptIn } = req.body;
+        const fields: any = {};
+        if (name !== undefined) fields.name = name;
+        if (templateName !== undefined) fields.templateName = templateName;
+        if (templateLanguage !== undefined) fields.templateLanguage = templateLanguage;
+        if (variables !== undefined) fields.variables = JSON.stringify(variables);
+        if (recipients !== undefined) {
+            const cleanRecipients = (recipients as string[]).map(p => cleanNumber(p)).filter(Boolean);
+            fields.recipients = JSON.stringify(cleanRecipients);
+            fields.totalRecipients = cleanRecipients.length;
+            fields.estimatedCost = Number((cleanRecipients.length * MARKETING_COST_PER_MSG).toFixed(2));
+        }
+        if (status !== undefined) fields.status = status;
+        if (scheduledFor !== undefined) fields.scheduledFor = scheduledFor;
+        if (originPhoneId !== undefined) fields.originPhoneId = originPhoneId;
+        if (respectOptIn !== undefined) fields.respectOptIn = respectOptIn;
+
+        await base(TABLE_CAMPAIGNS).update([{ id: req.params.id, fields }]);
+        res.json({ success: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Eliminar campaña (no permitido si está en ejecución)
+app.delete('/api/campaigns/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const currentStatus = r.get('status');
+        if (currentStatus === 'running') return res.status(400).json({ error: 'No se puede eliminar una campaña en ejecución' });
+        await base(TABLE_CAMPAIGNS).destroy([req.params.id]);
+        res.json({ success: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Lanzar campaña inmediatamente (envío en background)
+app.post('/api/campaigns/:id/send', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const status = r.get('status');
+        if (status === 'running') return res.status(400).json({ error: 'La campaña ya está en ejecución' });
+        if (status === 'completed') return res.status(400).json({ error: 'La campaña ya se ha enviado' });
+
+        // Ejecutar en background, responder rápido al frontend
+        executeCampaign(req.params.id).catch(e => console.error('[Campaigns] Error en envío async:', e.message));
+        res.json({ success: true, message: 'Campaña iniciada. Los envíos se hacen en segundo plano.' });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Cancelar una campaña programada (vuelve a borrador)
+app.post('/api/campaigns/:id/cancel', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const status = r.get('status');
+        if (status === 'running' || status === 'completed') {
+            return res.status(400).json({ error: 'No se puede cancelar una campaña en curso o terminada' });
+        }
+        await base(TABLE_CAMPAIGNS).update([{ id: req.params.id, fields: { status: 'cancelled' } }]);
+        res.json({ success: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Logs de envíos de una campaña (para mostrar quién recibió, quién falló)
+app.get('/api/campaigns/:id/sends', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const records = await base(TABLE_CAMPAIGN_SENDS).select({
+            filterByFormula: `{campaignId} = '${req.params.id}'`,
+            sort: [{ field: 'sentAt', direction: 'desc' }],
+            maxRecords: 1000
+        }).all();
+        const sends = records.map(r => ({
+            phone: r.get('phone') as string,
+            status: r.get('status') as string,
+            sentAt: r.get('sentAt') as string,
+            error: (r.get('error') as string) || null
+        }));
+        res.json(sends);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Listar contactos disponibles para una campaña (con info de opt-in)
+app.get('/api/campaigns-contacts', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const onlyOptedIn = req.query.onlyOptedIn === 'true';
+        const records = await base('Contacts').select({ maxRecords: 5000 }).all();
+        const list = records.map(r => ({
+            id: r.id,
+            phone: (r.get('phone') as string) || '',
+            name: (r.get('name') as string) || '',
+            tags: (r.get('tags') as string[]) || [],
+            department: (r.get('department') as string) || '',
+            status: (r.get('status') as string) || '',
+            assigned_to: (r.get('assigned_to') as string) || '',
+            optInMarketing: !!r.get('optInMarketing'),
+            optedOut: !!r.get('opted_out_notifications'),
+            lastMessageTime: (r.get('last_message_time') as string) || null
+        })).filter(c => c.phone);
+        const filtered = onlyOptedIn ? list.filter(c => c.optInMarketing && !c.optedOut) : list;
+        res.json(filtered);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Cambiar opt-in marketing de un contacto (uso desde la ficha)
+app.post('/api/contacts/:phone/marketing-opt-in', async (req, res) => {
+    const { optedIn, source } = req.body;
+    const ok = await setContactMarketingOptIn(req.params.phone, !!optedIn, source || 'manual');
+    if (!ok) return res.status(400).json({ error: 'No se pudo actualizar el opt-in (¿existe el contacto?)' });
+    res.json({ success: true });
+});
+
+// Resumen estadístico global de campañas (para el dashboard)
+app.get('/api/campaigns-stats', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const records = await base(TABLE_CAMPAIGNS).select({ maxRecords: 500 }).all();
+        let totalSent = 0, totalFailed = 0, totalSkipped = 0, totalCost = 0;
+        let totalCampaigns = records.length;
+        let completed = 0, scheduled = 0, drafts = 0, running = 0;
+        records.forEach(r => {
+            totalSent += Number(r.get('sentCount') || 0);
+            totalFailed += Number(r.get('failedCount') || 0);
+            totalSkipped += Number(r.get('skippedCount') || 0);
+            totalCost += Number(r.get('estimatedCost') || 0);
+            const s = r.get('status');
+            if (s === 'completed') completed++;
+            else if (s === 'scheduled') scheduled++;
+            else if (s === 'draft') drafts++;
+            else if (s === 'running') running++;
+        });
+        res.json({
+            totalCampaigns, completed, scheduled, drafts, running,
+            totalSent, totalFailed, totalSkipped,
+            totalCost: Number(totalCost.toFixed(2))
+        });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Lanzar el scheduler de campañas en intervalos y al arrancar
+setInterval(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error periódico:', e.message)), 300000); // cada 5 min
+setTimeout(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error inicial:', e.message)), 45000); // a los 45s del arranque
 
 httpServer.listen(PORT, () => { console.log(`🚀 Servidor Listo ${PORT}`); });

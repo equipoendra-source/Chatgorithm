@@ -4,11 +4,11 @@ import {
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
-    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera
+    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
-import { API_BASE_URL } from '../config/api';
+import { API_BASE_URL, API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
 import { shouldShowTour, markTourAsComplete, startChatTour } from './ProductTour';
 
@@ -88,6 +88,8 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const [crmAddress, setCrmAddress] = useState('');
     const [crmNotes, setCrmNotes] = useState('');
     const [crmSignupDate, setCrmSignupDate] = useState('');
+    const [optInMarketing, setOptInMarketing] = useState<boolean>(!!(contact as any).optInMarketing);
+    const [savingOptIn, setSavingOptIn] = useState(false);
 
     const [contactTags, setContactTags] = useState<string[]>(contact.tags || []);
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -171,6 +173,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         setCrmNotes(contact.notes || '');
         setCrmSignupDate(contact.signup_date || '');
         setContactTags(contact.tags || []);
+        setOptInMarketing(!!(contact as any).optInMarketing);
 
         setMessages([]);
         setShowEmojiPicker(false);
@@ -243,7 +246,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const handleNextMatch = () => { if (searchMatches.length === 0) return; setCurrentMatchIdx((prev) => (prev + 1) % searchMatches.length); };
     const handlePrevMatch = () => { if (searchMatches.length === 0) return; setCurrentMatchIdx((prev) => (prev - 1 + searchMatches.length) % searchMatches.length); };
 
-    useEffect(() => { if (contact.name) setName(contact.name); if (contact.department) setDepartment(contact.department); if (contact.status) setStatus(contact.status); if (contact.assigned_to) setAssignedTo(contact.assigned_to); if (contact.signup_date) setCrmSignupDate(contact.signup_date); if (contact.tags) setContactTags(contact.tags); }, [contact]);
+    useEffect(() => { if (contact.name) setName(contact.name); if (contact.department) setDepartment(contact.department); if (contact.status) setStatus(contact.status); if (contact.assigned_to) setAssignedTo(contact.assigned_to); if (contact.signup_date) setCrmSignupDate(contact.signup_date); if (contact.tags) setContactTags(contact.tags); if ((contact as any).optInMarketing !== undefined) setOptInMarketing(!!(contact as any).optInMarketing); }, [contact]);
     useEffect(() => { if (socket) { socket.emit('request_agents'); const handleAgentsList = (list: Agent[]) => setAgents(list); socket.on('agents_list', handleAgentsList); return () => { socket.off('agents_list', handleAgentsList); }; } }, [socket]);
     useEffect(() => { const handleHistory = (history: Message[]) => setMessages(history); const handleNewMessage = (msg: any) => { if (msg.sender === contact.phone || msg.sender === 'Agente' || msg.sender === 'Bot IA' || msg.recipient === contact.phone) { setMessages((prev) => [...prev, msg]); } }; if (socket) { socket.on('conversation_history', handleHistory); socket.on('message', handleNewMessage); return () => { socket.off('conversation_history', handleHistory); socket.off('message', handleNewMessage); }; } }, [socket, contact.phone]);
 
@@ -295,6 +298,27 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const updateCRM = (field: string, value: any) => { if (socket) { const updates: any = {}; updates[field] = value; if (field === 'assigned_to' && value && status === 'Nuevo') { updates.status = 'Abierto'; setStatus('Abierto'); } socket.emit('update_contact_info', { phone: contact.phone, updates: updates }); } };
     const toggleTag = (tag: string) => { let newTags = [...contactTags]; if (newTags.includes(tag)) { newTags = newTags.filter(t => t !== tag); } else { newTags.push(tag); } setContactTags(newTags); updateCRM('tags', newTags); };
     const saveNotes = () => { updateCRM('notes', crmNotes); setIsSaving(true); setTimeout(() => setIsSaving(false), 2000); };
+    const handleToggleOptIn = async () => {
+        const newValue = !optInMarketing;
+        setOptInMarketing(newValue);
+        setSavingOptIn(true);
+        try {
+            const r = await fetch(`${API_URL}/contacts/${contact.phone}/marketing-opt-in`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ optedIn: newValue, source: 'manual_dashboard' })
+            });
+            if (!r.ok) {
+                const err = await r.json().catch(() => ({}));
+                alert('No se pudo actualizar opt-in: ' + (err.error || r.statusText));
+                setOptInMarketing(!newValue); // revertir
+            }
+        } catch (e: any) {
+            alert('Error de red: ' + e.message);
+            setOptInMarketing(!newValue);
+        } finally {
+            setSavingOptIn(false);
+        }
+    };
     const handleAssign = (target: 'me' | string) => { if (!socket) return; const updates: any = { status: 'Abierto' }; if (target === 'me') { updates.assigned_to = user.username; setAssignedTo(user.username); } else { updates.department = target; updates.assigned_to = null; setAssignedTo(''); setDepartment(target); } socket.emit('update_contact_info', { phone: contact.phone, updates }); setStatus('Abierto'); setShowAssignMenu(false); };
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => { if (e.target.files && e.target.files[0]) setPendingFile(e.target.files[0]); };
@@ -770,6 +794,31 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                             <div><label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Email</label><div className={`flex items-center gap-2 p-2 rounded-lg border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><Mail className="w-4 h-4 text-slate-400" /><input className={`bg-transparent w-full text-sm outline-none ${isDark ? 'text-white placeholder-slate-500' : 'text-slate-700 placeholder-slate-400'}`} placeholder="cliente@email.com" value={crmEmail} onChange={(e) => setCrmEmail(e.target.value)} onBlur={() => updateCRM('email', crmEmail)} /></div></div>
                             <div><label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Dirección</label><div className={`flex items-center gap-2 p-2 rounded-lg border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><MapPin className="w-4 h-4 text-slate-400" /><input className={`bg-transparent w-full text-sm outline-none ${isDark ? 'text-white placeholder-slate-500' : 'text-slate-700 placeholder-slate-400'}`} placeholder="Calle Ejemplo 123" value={crmAddress} onChange={(e) => setCrmAddress(e.target.value)} onBlur={() => updateCRM('address', crmAddress)} /></div></div>
                             <div><label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Fecha Alta</label><div className={`flex items-center gap-2 p-2 rounded-lg border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><Calendar className="w-4 h-4 text-slate-400" /><input type="date" className={`bg-transparent w-full text-sm outline-none cursor-pointer ${isDark ? 'text-white scheme-dark' : 'text-slate-700'}`} value={crmSignupDate} onChange={(e) => setCrmSignupDate(e.target.value)} onBlur={() => updateCRM('signup_date', crmSignupDate)} /></div></div>
+
+                            {/* Opt-in marketing (RGPD) */}
+                            <div className={`rounded-xl p-3 border-2 ${optInMarketing ? (isDark ? 'bg-orange-900/10 border-orange-800/40' : 'bg-orange-50 border-orange-200') : (isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-slate-50 border-slate-200')}`}>
+                                <div className="flex items-start gap-3">
+                                    <button
+                                        type="button"
+                                        onClick={handleToggleOptIn}
+                                        disabled={savingOptIn}
+                                        className={`relative inline-flex h-6 w-11 flex-shrink-0 mt-0.5 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${optInMarketing ? 'bg-gradient-to-r from-orange-500 to-pink-600' : isDark ? 'bg-slate-600' : 'bg-slate-300'}`}>
+                                        <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${optInMarketing ? 'translate-x-5' : 'translate-x-0'}`} />
+                                    </button>
+                                    <div className="flex-1 min-w-0">
+                                        <div className={`flex items-center gap-1.5 font-bold text-xs uppercase ${optInMarketing ? (isDark ? 'text-orange-400' : 'text-orange-700') : (isDark ? 'text-slate-400' : 'text-slate-500')}`}>
+                                            <Megaphone className="w-3.5 h-3.5" />
+                                            Acepta promociones
+                                            {savingOptIn && <Loader2 className="w-3 h-3 animate-spin" />}
+                                        </div>
+                                        <p className={`mt-0.5 text-[11px] leading-snug ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                                            {optInMarketing
+                                                ? 'Este cliente recibirá tus campañas de marketing por WhatsApp.'
+                                                : 'Sin opt-in: NO se le enviarán campañas. Actívalo solo si tienes consentimiento explícito (RGPD).'}
+                                        </p>
+                                    </div>
+                                </div>
+                            </div>
                         </div>
                         <div className={`rounded-xl p-4 border ${isDark ? 'bg-yellow-900/10 border-yellow-800' : 'bg-yellow-50 border-yellow-100'}`}><div className="flex items-center justify-between mb-2"><div className={`flex items-center gap-2 font-bold text-xs uppercase ${isDark ? 'text-yellow-500' : 'text-yellow-700'}`}><StickyNote className="w-4 h-4" /> Notas Privadas</div>{isSaving && <span className="text-[10px] text-green-600 font-bold animate-pulse">Guardado</span>}</div><textarea className={`w-full border rounded-lg p-2 text-sm outline-none transition-colors resize-none h-32 ${isDark ? 'bg-slate-800/50 border-yellow-900 text-slate-200 focus:bg-slate-800' : 'bg-white/50 border-yellow-200 text-slate-700 focus:bg-white'}`} placeholder="Escribe notas sobre el cliente..." value={crmNotes} onChange={(e) => setCrmNotes(e.target.value)} /><button onClick={saveNotes} className={`mt-2 w-full text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-1 transition-colors ${isDark ? 'bg-yellow-800 hover:bg-yellow-700 text-yellow-100' : 'bg-yellow-200 hover:bg-yellow-300 text-yellow-800'}`}><Save className="w-3 h-3" /> Guardar Notas</button></div>
                     </div>

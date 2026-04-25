@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
     Users, Search, RefreshCw, UserCheck, Briefcase, Filter as FilterIcon,
     Smartphone, UserPlus, Upload, FileSpreadsheet, Phone, MessageSquare,
-    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X
+    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone
 } from 'lucide-react';
 import { PhoneDialer } from './PhoneDialer';
 import { API_URL } from '../config/api';
@@ -38,7 +38,7 @@ interface SidebarProps {
     isConnected?: boolean;
     onlineUsers: string[];
     typingStatus: { [chatId: string]: string };
-    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat') => void;
+    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns') => void;
     currentView?: string;
 
     selectedAccountId: string | null;
@@ -685,9 +685,14 @@ export function Sidebar({
                             <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
                             Online ({onlineUsers.length})
                         </h3>
-                        <button id="tour-calendar-btn" onClick={() => setView('calendar')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-purple-400 hover:border-purple-500' : 'bg-white border-slate-200 text-slate-400 hover:text-purple-600 hover:border-purple-200'}`} title="Ver Agenda">
-                            <CalendarIcon className="w-4 h-4" />
-                        </button>
+                        <div className="flex items-center gap-1.5">
+                            <button onClick={() => setView('campaigns')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-orange-400 hover:border-orange-500' : 'bg-white border-slate-200 text-slate-400 hover:text-orange-600 hover:border-orange-200'}`} title="Campañas de marketing">
+                                <Megaphone className="w-4 h-4" />
+                            </button>
+                            <button id="tour-calendar-btn" onClick={() => setView('calendar')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-purple-400 hover:border-purple-500' : 'bg-white border-slate-200 text-slate-400 hover:text-purple-600 hover:border-purple-200'}`} title="Ver Agenda">
+                                <CalendarIcon className="w-4 h-4" />
+                            </button>
+                        </div>
                     </div>
 
                     <div className="flex flex-wrap gap-2 mb-2">
