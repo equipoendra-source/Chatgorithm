@@ -2,7 +2,8 @@ import { useState, useEffect, useRef } from 'react';
 import {
     User, Plus, Briefcase, ArrowLeft, Trash2, ShieldAlert, CheckCircle,
     LayoutList, RefreshCw, Pencil, X, MessageSquare, Tag, Zap, BarChart3,
-    Calendar, Bot, Save, Bell, UserPlus, Database, Upload, Clock, Palette, Sun, Moon, Lock
+    Calendar, Bot, Save, Bell, UserPlus, Database, Upload, Clock, Palette, Sun, Moon, Lock,
+    ChevronDown, ChevronUp, Wrench
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -82,6 +83,9 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [isUpdatingSchedule, setIsUpdatingSchedule] = useState(false);
 
     // Importación: ahora gestionada por <ContactImportWizard />
+
+    // Diagnóstico avanzado de notificaciones (colapsable)
+    const [showDiagnostic, setShowDiagnostic] = useState(false);
 
     // --- EFECTOS DE CARGA ---
     useEffect(() => {
@@ -410,8 +414,28 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                     ))}
                             </div>
 
+                            {/* Diagnóstico avanzado: oculto por defecto, útil para soporte técnico */}
                             <div className="mt-8">
-                                <NotificationDiagnostic />
+                                <button
+                                    onClick={() => setShowDiagnostic(!showDiagnostic)}
+                                    className={`w-full flex items-center justify-between gap-2 px-4 py-3 rounded-xl border text-sm font-semibold transition-all ${isDark ? 'bg-slate-800/40 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
+                                    title="Información técnica para soporte. Útil si las notificaciones no te llegan y el equipo te lo pide."
+                                >
+                                    <div className="flex items-center gap-2">
+                                        <Wrench size={16} className={isDark ? 'text-slate-500' : 'text-slate-400'} />
+                                        <span>Diagnóstico avanzado de notificaciones</span>
+                                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>SOPORTE</span>
+                                    </div>
+                                    {showDiagnostic ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                </button>
+                                {showDiagnostic && (
+                                    <div className="mt-3 animate-in fade-in slide-in-from-top-2 duration-200">
+                                        <div className={`px-4 py-2 mb-3 rounded-lg text-xs ${isDark ? 'bg-blue-900/20 text-blue-300 border border-blue-800/50' : 'bg-blue-50 text-blue-700 border border-blue-200'}`}>
+                                            ℹ️ Esta sección es para uso técnico. Si las notificaciones no te llegan, haz una captura de este panel y envíasela al equipo de soporte.
+                                        </div>
+                                        <NotificationDiagnostic />
+                                    </div>
+                                )}
                             </div>
                         </div>
                     )}
