@@ -15,7 +15,9 @@ import {
   AlertTriangle,
   Lightbulb,
   Phone,
-  User
+  User,
+  Bell,
+  Megaphone
 } from 'lucide-react';
 import { API_URL as API_URL_BASE } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
@@ -26,6 +28,9 @@ const WhatsAppTemplatesManager = () => {
 
   const [templates, setTemplates] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+
+  // Pestaña activa: 'reminders' (UTILITY+AUTH) o 'campaigns' (MARKETING)
+  const [activeTab, setActiveTab] = useState('reminders');
 
   // Modales
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -163,9 +168,28 @@ const WhatsAppTemplatesManager = () => {
   };
 
   const resetForm = () => {
-    setFormData({ name: '', category: 'MARKETING', language: 'es_ES', body: '', footer: '' });
+    // Categoría por defecto depende de la pestaña activa
+    const defaultCategory = activeTab === 'campaigns' ? 'MARKETING' : 'UTILITY';
+    setFormData({ name: '', category: defaultCategory, language: 'es_ES', body: '', footer: '' });
     setVariableMap({});
   };
+
+  const openCreateModal = () => {
+    // Pre-seleccionar categoría según pestaña antes de abrir el modal
+    const defaultCategory = activeTab === 'campaigns' ? 'MARKETING' : 'UTILITY';
+    setFormData({ name: '', category: defaultCategory, language: 'es_ES', body: '', footer: '' });
+    setVariableMap({});
+    setIsModalOpen(true);
+  };
+
+  // Filtrar plantillas por pestaña activa
+  const filteredTemplates = templates.filter(t => {
+    if (activeTab === 'campaigns') return t.category === 'MARKETING';
+    return t.category !== 'MARKETING';
+  });
+
+  const remindersCount = templates.filter(t => t.category !== 'MARKETING').length;
+  const campaignsCount = templates.filter(t => t.category === 'MARKETING').length;
 
   const getStatusColor = (status) => {
     switch (status) {
@@ -208,7 +232,7 @@ const WhatsAppTemplatesManager = () => {
     <div className={`rounded-xl shadow-sm border p-6 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
 
       {/* Header */}
-      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-8 gap-4">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 gap-4">
         <div>
           <h1 className={`text-2xl font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><MessageSquarePlus className="text-green-600" /> Plantillas de WhatsApp</h1>
           <p className={`text-sm mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Define y envía mensajes automáticos para iniciar conversaciones.</p>
@@ -217,16 +241,68 @@ const WhatsAppTemplatesManager = () => {
           <button onClick={() => setIsHelpOpen(true)} className={`flex items-center gap-2 border px-4 py-2.5 rounded-xl font-bold transition-all shadow-sm active:scale-95 ${isDark ? 'bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700' : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'}`}>
             <BookOpen size={18} className="text-blue-500" /> Guía de Uso
           </button>
-          <button onClick={() => setIsModalOpen(true)} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shadow-lg active:scale-95 ${isDark ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-900/20' : 'bg-slate-900 hover:bg-slate-800 text-white shadow-slate-200'}`}><Plus size={18} /> Nueva Plantilla</button>
+          <button onClick={openCreateModal} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold transition-all shadow-lg active:scale-95 ${activeTab === 'campaigns' ? (isDark ? 'bg-orange-600 text-white hover:bg-orange-700 shadow-orange-900/20' : 'bg-orange-600 hover:bg-orange-700 text-white shadow-orange-200') : (isDark ? 'bg-blue-600 text-white hover:bg-blue-700 shadow-blue-900/20' : 'bg-slate-900 hover:bg-slate-800 text-white shadow-slate-200')}`}><Plus size={18} /> {activeTab === 'campaigns' ? 'Nueva plantilla de campaña' : 'Nueva plantilla'}</button>
         </div>
       </div>
+
+      {/* Pestañas: Recordatorios vs Campañas */}
+      <div className={`flex gap-1 mb-6 p-1 rounded-xl ${isDark ? 'bg-slate-800/60 border border-slate-700' : 'bg-slate-100 border border-slate-200'}`}>
+        <button
+          onClick={() => setActiveTab('reminders')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-semibold text-sm transition-all ${
+            activeTab === 'reminders'
+              ? (isDark ? 'bg-blue-600 text-white shadow-lg shadow-blue-900/30' : 'bg-white text-slate-800 shadow-sm')
+              : (isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+          }`}
+        >
+          <Bell size={16} /> Recordatorios
+          <span className={`text-xs px-2 py-0.5 rounded-full ${activeTab === 'reminders' ? (isDark ? 'bg-blue-800 text-blue-200' : 'bg-slate-200 text-slate-600') : (isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500')}`}>
+            {remindersCount}
+          </span>
+        </button>
+        <button
+          onClick={() => setActiveTab('campaigns')}
+          className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-semibold text-sm transition-all ${
+            activeTab === 'campaigns'
+              ? (isDark ? 'bg-orange-600 text-white shadow-lg shadow-orange-900/30' : 'bg-white text-slate-800 shadow-sm')
+              : (isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+          }`}
+        >
+          <Megaphone size={16} /> Campañas
+          <span className={`text-xs px-2 py-0.5 rounded-full ${activeTab === 'campaigns' ? (isDark ? 'bg-orange-800 text-orange-200' : 'bg-orange-100 text-orange-600') : (isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500')}`}>
+            {campaignsCount}
+          </span>
+        </button>
+      </div>
+
+      {/* Aviso contextual según pestaña */}
+      {activeTab === 'campaigns' && (
+        <div className={`mb-4 p-4 rounded-xl border flex gap-3 items-start ${isDark ? 'bg-orange-900/20 border-orange-800/50' : 'bg-orange-50 border-orange-200'}`}>
+          <Megaphone className={`shrink-0 mt-0.5 ${isDark ? 'text-orange-400' : 'text-orange-600'}`} size={20} />
+          <div className={`text-sm ${isDark ? 'text-orange-200' : 'text-orange-800'}`}>
+            <strong>Plantillas para envíos masivos.</strong> Estas plantillas se usarán desde el panel de Campañas (📢) para enviar mensajes a varios contactos. Recuerda incluir siempre la frase <em>"Para no recibir más promociones responde BAJA"</em> al final del mensaje (obligatorio por RGPD).
+          </div>
+        </div>
+      )}
+      {activeTab === 'reminders' && (
+        <div className={`mb-4 p-4 rounded-xl border flex gap-3 items-start ${isDark ? 'bg-blue-900/20 border-blue-800/50' : 'bg-blue-50 border-blue-200'}`}>
+          <Bell className={`shrink-0 mt-0.5 ${isDark ? 'text-blue-400' : 'text-blue-600'}`} size={20} />
+          <div className={`text-sm ${isDark ? 'text-blue-200' : 'text-blue-800'}`}>
+            <strong>Plantillas de utilidad o autenticación.</strong> Para recordatorios individuales (cita confirmada, vehículo listo, código de verificación, etc.). Se envían persona a persona desde el chat.
+          </div>
+        </div>
+      )}
 
       {/* Lista */}
       <div className={`rounded-2xl border overflow-hidden ${isDark ? 'bg-slate-900/50 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
         {isLoading ? (
           <div className="p-12 text-center text-slate-400"><RefreshCw className="animate-spin mx-auto mb-2" /> Cargando plantillas...</div>
-        ) : templates.length === 0 ? (
-          <div className="p-12 text-center text-slate-400"><Database size={48} className="mx-auto mb-4 opacity-20" /><p className="font-medium">No hay plantillas guardadas.</p><p className="text-sm mt-1">Crea la primera para empezar.</p></div>
+        ) : filteredTemplates.length === 0 ? (
+          <div className="p-12 text-center text-slate-400">
+            {activeTab === 'campaigns' ? <Megaphone size={48} className="mx-auto mb-4 opacity-20" /> : <Bell size={48} className="mx-auto mb-4 opacity-20" />}
+            <p className="font-medium">{activeTab === 'campaigns' ? 'No hay plantillas de campaña aún.' : 'No hay plantillas de recordatorio aún.'}</p>
+            <p className="text-sm mt-1">Pulsa "{activeTab === 'campaigns' ? 'Nueva plantilla de campaña' : 'Nueva plantilla'}" para crear la primera.</p>
+          </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full text-left">
@@ -240,7 +316,7 @@ const WhatsAppTemplatesManager = () => {
                 </tr>
               </thead>
               <tbody className={`divide-y ${isDark ? 'divide-slate-700' : 'divide-slate-200'}`}>
-                {templates.map((template) => (
+                {filteredTemplates.map((template) => (
                   <tr key={template.id} className={`${isDark ? 'hover:bg-slate-800' : 'hover:bg-white'} transition-colors`}>
                     <td className="p-4"><div className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{template.name}</div><div className="text-xs text-slate-400 truncate max-w-[200px] mt-0.5 opacity-75">{template.body}</div></td>
                     <td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-600'}`}>{template.category}</span></td>
