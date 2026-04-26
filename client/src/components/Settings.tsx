@@ -9,6 +9,7 @@ import { App as CapacitorApp } from '@capacitor/app';
 
 // @ts-ignore
 import WhatsAppTemplatesManager from './WhatsAppTemplatesManager';
+import ContactImportWizard from './ContactImportWizard';
 // @ts-ignore
 import AnalyticsDashboard from './AnalyticsDashboard';
 // @ts-ignore
@@ -80,11 +81,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [scheduleDuration, setScheduleDuration] = useState(60);
     const [isUpdatingSchedule, setIsUpdatingSchedule] = useState(false);
 
-    // Importación
-    const [importFile, setImportFile] = useState<File | null>(null);
-    const [isImporting, setIsImporting] = useState(false);
-
-    const fileInputRef = useRef<HTMLInputElement>(null);
+    // Importación: ahora gestionada por <ContactImportWizard />
 
     // --- EFECTOS DE CARGA ---
     useEffect(() => {
@@ -192,27 +189,6 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const toggleDay = (day: number) => {
         if (scheduleDays.includes(day)) setScheduleDays(scheduleDays.filter(d => d !== day));
         else setScheduleDays([...scheduleDays, day]);
-    };
-
-    const handleImportContacts = async (e: React.FormEvent) => {
-        e.preventDefault();
-        if (!importFile) return;
-        setIsImporting(true);
-        const formData = new FormData();
-        formData.append('file', importFile);
-
-        try {
-            const res = await fetch(`${API_URL}/contacts/import`, { method: 'POST', body: formData });
-            const data = await res.json();
-            if (data.success) {
-                setSuccess(`¡Éxito! ${data.count} contactos importados.`);
-                setImportFile(null);
-                if (fileInputRef.current) fileInputRef.current.value = '';
-            } else {
-                setError("Error al importar: " + data.error);
-            }
-        } catch (err) { setError("Error de conexión"); }
-        finally { setIsImporting(false); }
     };
 
     const openEditNotifications = (agent: Agent) => {
@@ -439,7 +415,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                             </div>
                         </div>
                     )}
-                    {activeTab === 'data' && (<div className={`max-w-3xl mx-auto p-8 rounded-2xl border shadow-sm text-center ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="mb-8"><div className={`p-4 rounded-full w-fit mx-auto mb-4 ${isDark ? 'bg-emerald-500/10' : 'bg-emerald-50'}`}><Database size={40} className="text-emerald-600" /></div><h2 className={`text-2xl font-bold mb-2 ${isDark ? 'text-white' : 'text-slate-800'}`}>Importar Contactos</h2><p className="text-slate-500 max-w-md mx-auto">Sube un archivo CSV con tus clientes antiguos para añadirlos a la base de datos.</p></div><div className={`p-6 rounded-xl border border-dashed mb-6 ${isDark ? 'bg-slate-800/30 border-slate-600' : 'bg-slate-50 border-slate-300'}`}><p className={`text-xs text-slate-400 font-mono mb-4 p-2 rounded border w-fit mx-auto ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-white border-slate-200'}`}>Formato: Nombre, Telefono, Email, Direccion</p><form onSubmit={handleImportContacts} className="flex flex-col items-center gap-4"><input ref={fileInputRef} type="file" accept=".csv" onChange={(e) => setImportFile(e.target.files ? e.target.files[0] : null)} className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-emerald-50 file:text-emerald-700 hover:file:bg-emerald-100" /><button type="submit" disabled={!importFile || isImporting} className="px-8 py-3 bg-emerald-600 text-white font-bold rounded-xl shadow-lg hover:bg-emerald-700 disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2 transition-all">{isImporting ? <RefreshCw className="animate-spin" /> : <Upload size={20} />}{isImporting ? 'Importando...' : 'Subir y Procesar'}</button></form></div></div>)}
+                    {activeTab === 'data' && <ContactImportWizard />}
 
                     {/* APPEARANCE TAB */}
                     {activeTab === 'appearance' && (

@@ -3492,6 +3492,314 @@ app.get('/api/campaigns-stats', async (_req, res) => {
     }
 });
 
+// ==========================================
+//  IMPORTACIÓN DE CONTACTOS (CSV)
+// ==========================================
+
+// Parser CSV minimalista pero robusto: maneja comillas, separadores , y ;, BOM y CRLF
+function parseCsvText(text: string): { headers: string[]; rows: string[][]; separator: string } {
+    // Quitar BOM UTF-8 si existe
+    if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+    // Detectar separador comparando frecuencia en las primeras 5 líneas
+    const sample = text.split(/\r?\n/).slice(0, 5).join('\n');
+    const commaCount = (sample.match(/,/g) || []).length;
+    const semiCount = (sample.match(/;/g) || []).length;
+    const tabCount = (sample.match(/\t/g) || []).length;
+    let separator = ',';
+    if (semiCount > commaCount && semiCount >= tabCount) separator = ';';
+    else if (tabCount > commaCount && tabCount > semiCount) separator = '\t';
+
+    const rows: string[][] = [];
+    let current: string[] = [];
+    let field = '';
+    let inQuotes = false;
+    let i = 0;
+    while (i < text.length) {
+        const ch = text[i];
+        if (inQuotes) {
+            if (ch === '"') {
+                if (text[i + 1] === '"') { field += '"'; i += 2; continue; }
+                inQuotes = false; i++; continue;
+            }
+            field += ch; i++; continue;
+        }
+        if (ch === '"') { inQuotes = true; i++; continue; }
+        if (ch === separator) { current.push(field); field = ''; i++; continue; }
+        if (ch === '\r') { i++; continue; }
+        if (ch === '\n') {
+            current.push(field); field = '';
+            if (current.some(c => c.trim() !== '')) rows.push(current);
+            current = []; i++; continue;
+        }
+        field += ch; i++;
+    }
+    if (field !== '' || current.length > 0) {
+        current.push(field);
+        if (current.some(c => c.trim() !== '')) rows.push(current);
+    }
+    if (rows.length === 0) return { headers: [], rows: [], separator };
+    const headers = rows[0].map(h => h.trim());
+    const dataRows = rows.slice(1);
+    return { headers, rows: dataRows, separator };
+}
+
+// Sinónimos aceptados para mapear cabeceras (todas en lower y sin acentos)
+const HEADER_ALIASES: Record<string, string[]> = {
+    name: ['nombre', 'name', 'cliente', 'contacto', 'nombrecompleto', 'nombre completo', 'nombre_completo', 'fullname', 'full name'],
+    phone: ['telefono', 'teléfono', 'phone', 'movil', 'móvil', 'mobile', 'celular', 'whatsapp', 'numero', 'número', 'tel', 'tlf', 'tfno'],
+    email: ['email', 'correo', 'e-mail', 'mail', 'correo electronico', 'correo electrónico'],
+    address: ['direccion', 'dirección', 'address', 'domicilio', 'direccion postal'],
+    department: ['departamento', 'department', 'depto', 'dpto', 'area', 'área', 'seccion', 'sección'],
+    tags: ['etiquetas', 'tags', 'etiqueta', 'tag', 'categoria', 'categoría'],
+};
+
+const stripAccents = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
+const normalizeHeader = (h: string) => stripAccents(h.toLowerCase().trim());
+
+function mapHeaders(headers: string[]): { mapping: Record<string, number>; unknown: string[] } {
+    const mapping: Record<string, number> = {};
+    const unknown: string[] = [];
+    headers.forEach((h, idx) => {
+        const norm = normalizeHeader(h);
+        let matched = false;
+        for (const [canonical, aliases] of Object.entries(HEADER_ALIASES)) {
+            if (aliases.includes(norm)) {
+                if (mapping[canonical] === undefined) mapping[canonical] = idx;
+                matched = true; break;
+            }
+        }
+        if (!matched && h.trim() !== '') unknown.push(h);
+    });
+    return { mapping, unknown };
+}
+
+// Normaliza teléfono español: quita espacios/guiones/paréntesis, añade 34 si falta
+function normalizePhoneStrict(raw: string): { ok: boolean; phone: string; reason?: string } {
+    if (!raw) return { ok: false, phone: '', reason: 'vacío' };
+    let p = String(raw).replace(/[\s\-().+]/g, '').replace(/^00/, '');
+    if (!/^\d+$/.test(p)) return { ok: false, phone: p, reason: 'caracteres no numéricos' };
+    // Si tiene 9 dígitos y empieza por 6/7/8/9 asumimos España
+    if (p.length === 9 && /^[6789]/.test(p)) p = '34' + p;
+    // Si empieza por 34 y tiene 11 dígitos OK
+    if (p.length < 9) return { ok: false, phone: p, reason: 'demasiado corto' };
+    if (p.length > 15) return { ok: false, phone: p, reason: 'demasiado largo' };
+    return { ok: true, phone: p };
+}
+
+function isValidEmail(e: string): boolean {
+    if (!e) return true; // email vacío es válido (opcional)
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e.trim());
+}
+
+// GET plantilla CSV descargable
+app.get('/api/contacts/import-template', (_req, res) => {
+    const csv = 'Nombre,Telefono,Email,Direccion,Departamento,Etiquetas\nJuan Pérez,600123456,juan@ejemplo.com,Calle Mayor 1,VENTAS,vip;recurrente\nMaría López,+34611222333,maria@ejemplo.com,Av. Andalucía 25,TALLER,\n';
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', 'attachment; filename="plantilla-contactos-chatgorim.csv"');
+    res.send('﻿' + csv); // BOM para que Excel lo abra como UTF-8
+});
+
+// POST preview: recibe el CSV, lo parsea y devuelve análisis sin tocar Airtable
+app.post('/api/contacts/import-preview', upload.single('file'), async (req: any, res: any) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'No se recibió archivo' });
+        let text: string;
+        try {
+            text = req.file.buffer.toString('utf-8');
+            // Si vemos caracteres raros típicos de doble-encoding, probar latin1
+            if (/[�]/.test(text) || /Ã[¡©­³º±]/.test(text)) {
+                text = req.file.buffer.toString('latin1');
+            }
+        } catch {
+            text = req.file.buffer.toString('latin1');
+        }
+
+        const { headers, rows, separator } = parseCsvText(text);
+        if (headers.length === 0) return res.status(400).json({ error: 'CSV vacío o ilegible' });
+
+        const { mapping, unknown } = mapHeaders(headers);
+        if (mapping.phone === undefined) {
+            return res.status(400).json({
+                error: `No se encontró ninguna columna de teléfono. Cabeceras detectadas: ${headers.join(', ')}. Asegúrate de tener una columna llamada "Telefono", "Phone", "Movil" o similar.`
+            });
+        }
+
+        // Procesar todas las filas: normalizar y clasificar
+        const valid: any[] = [];
+        const invalid: any[] = [];
+        const seenPhones = new Set<string>();
+        let duplicatesInFile = 0;
+
+        rows.forEach((row, idx) => {
+            const get = (key: string) => mapping[key] !== undefined ? (row[mapping[key]] || '').trim() : '';
+            const rawPhone = get('phone');
+            const norm = normalizePhoneStrict(rawPhone);
+            const name = get('name');
+            const email = get('email');
+            const address = get('address');
+            const department = get('department');
+            const tagsRaw = get('tags');
+            const tags = tagsRaw ? tagsRaw.split(/[;,|]/).map(t => t.trim()).filter(Boolean) : [];
+
+            const lineNum = idx + 2; // +1 por header, +1 porque empezamos en 1
+            if (!norm.ok) {
+                invalid.push({ line: lineNum, name, phone: rawPhone, reason: `Teléfono inválido (${norm.reason})` });
+                return;
+            }
+            if (!isValidEmail(email)) {
+                invalid.push({ line: lineNum, name, phone: rawPhone, reason: 'Email con formato inválido' });
+                return;
+            }
+            if (seenPhones.has(norm.phone)) {
+                duplicatesInFile++;
+                return; // saltar duplicados dentro del mismo CSV
+            }
+            seenPhones.add(norm.phone);
+            valid.push({ line: lineNum, name, phone: norm.phone, email, address, department, tags });
+        });
+
+        // Comprobar cuáles ya existen en Airtable (en lotes para no saturar)
+        let alreadyExists = 0;
+        if (base && valid.length > 0) {
+            try {
+                const phones = valid.map(v => v.phone);
+                // Airtable filterByFormula limit ~16k chars: hacemos lotes de 50 teléfonos
+                const chunkSize = 50;
+                const existingSet = new Set<string>();
+                for (let i = 0; i < phones.length; i += chunkSize) {
+                    const chunk = phones.slice(i, i + chunkSize);
+                    const formula = 'OR(' + chunk.map(p => `{phone}='${p}'`).join(',') + ')';
+                    const recs = await base('Contacts').select({ filterByFormula: formula, fields: ['phone'] }).all();
+                    recs.forEach(r => { const p = (r.get('phone') as string) || ''; if (p) existingSet.add(cleanNumber(p)); });
+                }
+                alreadyExists = valid.filter(v => existingSet.has(v.phone)).length;
+                valid.forEach(v => { v.exists = existingSet.has(v.phone); });
+            } catch (e: any) {
+                console.error('[Import preview] Error consultando Airtable:', e.message);
+            }
+        }
+
+        res.json({
+            success: true,
+            separator,
+            headersDetected: headers,
+            mapping,
+            unknownColumns: unknown,
+            stats: {
+                totalRows: rows.length,
+                valid: valid.length,
+                invalid: invalid.length,
+                duplicatesInFile,
+                alreadyExists,
+                newContacts: valid.length - alreadyExists,
+            },
+            preview: valid.slice(0, 10),
+            invalidPreview: invalid.slice(0, 20),
+            allValid: valid, // el frontend lo usará para el envío posterior por chunks
+        });
+    } catch (e: any) {
+        console.error('[Import preview] Error:', e.message);
+        res.status(500).json({ error: 'Error procesando CSV: ' + e.message });
+    }
+});
+
+// POST import: procesa un chunk ya validado por el preview
+app.post('/api/contacts/import', async (req: any, res: any) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { rows, options } = req.body || {};
+    if (!Array.isArray(rows) || rows.length === 0) return res.status(400).json({ error: 'Sin filas para importar' });
+
+    const markOptIn = !!options?.markOptIn;
+    const updateExisting = !!options?.updateExisting;
+    const optInSource = options?.optInSource || 'import-csv';
+    const defaultDepartment = options?.defaultDepartment || '';
+    const defaultTags: string[] = Array.isArray(options?.defaultTags) ? options.defaultTags : [];
+
+    let created = 0, updated = 0, skipped = 0, failed = 0;
+    const errors: any[] = [];
+
+    // Buscar existentes (en lotes de 50) para esta tanda
+    const phonesInChunk = rows.map((r: any) => r.phone).filter(Boolean);
+    const existingMap = new Map<string, string>(); // phone -> recordId
+    try {
+        const chunkSize = 50;
+        for (let i = 0; i < phonesInChunk.length; i += chunkSize) {
+            const chunk = phonesInChunk.slice(i, i + chunkSize);
+            const formula = 'OR(' + chunk.map((p: string) => `{phone}='${p}'`).join(',') + ')';
+            const recs = await base('Contacts').select({ filterByFormula: formula, fields: ['phone'] }).all();
+            recs.forEach(r => { const p = (r.get('phone') as string) || ''; if (p) existingMap.set(cleanNumber(p), r.id); });
+        }
+    } catch (e: any) {
+        console.error('[Import] Error consultando existentes:', e.message);
+    }
+
+    // Separar en buckets de creación / actualización
+    const toCreate: any[] = [];
+    const toUpdate: any[] = [];
+    rows.forEach((r: any) => {
+        const phone = String(r.phone || '').trim();
+        if (!phone) { failed++; errors.push({ phone: r.phone || '(vacío)', name: r.name || '', reason: 'Teléfono vacío' }); return; }
+        const fields: any = {
+            phone,
+            name: r.name || phone,
+        };
+        if (r.email) fields.email = r.email;
+        if (r.address) fields.address = r.address;
+        const dept = r.department || defaultDepartment;
+        if (dept) fields.department = dept;
+        const allTags = [...(Array.isArray(r.tags) ? r.tags : []), ...defaultTags];
+        if (allTags.length > 0) fields.tags = allTags;
+        if (markOptIn) {
+            fields.optInMarketing = true;
+            fields.optInDate = new Date().toISOString();
+            fields.optInSource = optInSource;
+        }
+        if (existingMap.has(phone)) {
+            if (updateExisting) toUpdate.push({ id: existingMap.get(phone), fields });
+            else { skipped++; }
+        } else {
+            // Sólo en creación añadimos status por defecto
+            if (!fields.status) fields.status = 'Nuevo';
+            toCreate.push({ fields });
+        }
+    });
+
+    // Insertar en lotes de 10 (límite de Airtable) con pausa para evitar rate limit
+    const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+    const BATCH = 10;
+    const PAUSE_MS = 250;
+
+    for (let i = 0; i < toCreate.length; i += BATCH) {
+        const batch = toCreate.slice(i, i + BATCH);
+        try {
+            await base('Contacts').create(batch as any);
+            created += batch.length;
+        } catch (e: any) {
+            // Si falla el lote, intentar uno a uno para identificar la fila exacta
+            for (const item of batch) {
+                try { await base('Contacts').create([item] as any); created++; }
+                catch (e2: any) { failed++; errors.push({ phone: item.fields.phone, name: item.fields.name, reason: e2.message }); }
+            }
+        }
+        if (i + BATCH < toCreate.length) await sleep(PAUSE_MS);
+    }
+    for (let i = 0; i < toUpdate.length; i += BATCH) {
+        const batch = toUpdate.slice(i, i + BATCH);
+        try {
+            await base('Contacts').update(batch as any);
+            updated += batch.length;
+        } catch (e: any) {
+            for (const item of batch) {
+                try { await base('Contacts').update([item] as any); updated++; }
+                catch (e2: any) { failed++; errors.push({ phone: item.fields.phone, name: item.fields.name, reason: e2.message }); }
+            }
+        }
+        if (i + BATCH < toUpdate.length) await sleep(PAUSE_MS);
+    }
+
+    res.json({ success: true, created, updated, skipped, failed, errors });
+});
+
 // Lanzar el scheduler de campañas en intervalos y al arrancar
 setInterval(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error periódico:', e.message)), 300000); // cada 5 min
 setTimeout(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error inicial:', e.message)), 45000); // a los 45s del arranque
