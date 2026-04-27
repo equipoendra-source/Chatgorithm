@@ -3211,49 +3211,269 @@ async function runCampaignScheduler(): Promise<void> {
     if (!base) return;
     try {
         const now = new Date().toISOString();
-        const records = await base(TABLE_CAMPAIGNS).select({
+
+        // 1. Campañas programadas únicas (ya existentes)
+        const scheduled = await base(TABLE_CAMPAIGNS).select({
             filterByFormula: `AND({status}='scheduled', IS_BEFORE({scheduledFor}, '${now}'))`,
             maxRecords: 5,
             sort: [{ field: 'scheduledFor', direction: 'asc' }]
         }).firstPage();
 
-        if (records.length === 0) return;
+        if (scheduled.length > 0) {
+            console.log(`📢 [CampaignScheduler] ${scheduled.length} campañas programadas listas`);
+            for (const r of scheduled) {
+                await executeCampaign(r.id).catch(e => console.error('[CampaignScheduler] Error en campaña:', e.message));
+            }
+        }
 
-        console.log(`📢 [CampaignScheduler] ${records.length} campañas programadas listas para ejecutar`);
-        for (const r of records) {
-            await executeCampaign(r.id).catch(e => console.error('[CampaignScheduler] Error en campaña:', e.message));
+        // 2. Campañas recurrentes con próxima ejecución vencida
+        const recurring = await base(TABLE_CAMPAIGNS).select({
+            filterByFormula: `AND({status}='recurring', {recurringNextRun}!='', IS_BEFORE({recurringNextRun}, '${now}'))`,
+            maxRecords: 10
+        }).firstPage();
+
+        if (recurring.length > 0) {
+            console.log(`🔁 [CampaignScheduler] ${recurring.length} campañas recurrentes listas`);
+            for (const r of recurring) {
+                await executeRecurringCampaign(r.id).catch(e => console.error('[CampaignScheduler] Error en recurrente:', e.message));
+            }
         }
     } catch (e: any) {
         console.error('[CampaignScheduler] Error general:', e.message);
     }
 }
 
+// Calcula la siguiente ejecución a partir de la configuración y una fecha base
+// frequency: 'daily' | 'weekly' | 'monthly' | 'custom'
+// hour: 0-23 (siempre en punto, minuto 0)
+// dayOfWeek: 0=domingo ... 6=sábado (sólo weekly)
+// dayOfMonth: 1-28 (sólo monthly)
+// intervalDays: número (sólo custom, "cada X días")
+function computeNextRun(config: any, fromDate?: Date): Date | null {
+    if (!config || !config.frequency) return null;
+    const base = fromDate ? new Date(fromDate) : new Date();
+    const hour = Math.max(0, Math.min(23, Number(config.hour ?? 10)));
+
+    if (config.frequency === 'daily') {
+        // Próximo día con esa hora (después de "base")
+        const next = new Date(base);
+        next.setHours(hour, 0, 0, 0);
+        if (next <= base) next.setDate(next.getDate() + 1);
+        return next;
+    }
+
+    if (config.frequency === 'weekly') {
+        const dow = Math.max(0, Math.min(6, Number(config.dayOfWeek ?? 1)));
+        const next = new Date(base);
+        next.setHours(hour, 0, 0, 0);
+        // avanzar día hasta encontrar el dayOfWeek
+        let attempts = 0;
+        while ((next.getDay() !== dow || next <= base) && attempts < 14) {
+            next.setDate(next.getDate() + 1);
+            attempts++;
+        }
+        return next;
+    }
+
+    if (config.frequency === 'monthly') {
+        const dom = Math.max(1, Math.min(28, Number(config.dayOfMonth ?? 1)));
+        const next = new Date(base);
+        next.setDate(dom);
+        next.setHours(hour, 0, 0, 0);
+        // si la fecha resultante es <= base, salta al mes siguiente
+        if (next <= base) {
+            next.setMonth(next.getMonth() + 1);
+            next.setDate(dom);
+            next.setHours(hour, 0, 0, 0);
+        }
+        return next;
+    }
+
+    if (config.frequency === 'custom') {
+        const days = Math.max(1, Math.min(365, Number(config.intervalDays ?? 7)));
+        const next = new Date(base);
+        next.setHours(hour, 0, 0, 0);
+        if (next <= base) next.setDate(next.getDate() + days);
+        else {
+            // Si la hora del día actual aún no llegó, no sumar días, salta a hoy a esa hora
+            // pero solo si es la primera ejecución (no hay lastRun). En recurrente normal, sumamos days.
+            next.setDate(next.getDate() + days);
+        }
+        return next;
+    }
+
+    return null;
+}
+
+// Dado un set de filtros, calcula la lista de teléfonos de contactos que cumplen
+async function expandRecipientsFromFilters(filters: any): Promise<string[]> {
+    if (!base) return [];
+    try {
+        const records = await base('Contacts').select({ maxRecords: 5000 }).all();
+        const tagsFilter: string[] = Array.isArray(filters?.tags) ? filters.tags : [];
+        const dept: string = filters?.department || '';
+        const onlyOptedIn: boolean = !!filters?.onlyOptedIn;
+
+        const matched = records.filter(r => {
+            const phone = (r.get('phone') as string) || '';
+            if (!phone) return false;
+            const optInMarketing = !!r.get('optInMarketing');
+            const optedOut = !!r.get('opted_out_notifications');
+            const contactTags: string[] = (r.get('tags') as string[]) || [];
+            const contactDept = (r.get('department') as string) || '';
+
+            if (onlyOptedIn && (!optInMarketing || optedOut)) return false;
+            if (dept && contactDept !== dept) return false;
+            if (tagsFilter.length > 0 && !tagsFilter.some(t => contactTags.includes(t))) return false;
+            return true;
+        });
+        return matched.map(r => cleanNumber((r.get('phone') as string) || '')).filter(Boolean);
+    } catch (e: any) {
+        console.error('[expandRecipientsFromFilters] Error:', e.message);
+        return [];
+    }
+}
+
+// Ejecuta una campaña recurrente: crea una hija con destinatarios actuales y la lanza,
+// luego avanza el nextRun de la madre.
+async function executeRecurringCampaign(motherId: string): Promise<void> {
+    if (!base) return;
+    let mother: any;
+    try {
+        mother = await base(TABLE_CAMPAIGNS).find(motherId);
+    } catch {
+        console.error(`[Recurring] Madre no encontrada: ${motherId}`);
+        return;
+    }
+
+    const config = safeJsonParse<any>(mother.get('recurringConfig'), {});
+    if (!config || !config.frequency) {
+        console.error(`[Recurring] Madre ${motherId} sin recurringConfig válido`);
+        return;
+    }
+    if (config.paused) {
+        console.log(`[Recurring] Madre ${motherId} pausada, saltando`);
+        return;
+    }
+
+    // Calcular destinatarios usando los filtros guardados
+    const filters = config.filters || {};
+    const expandedPhones = await expandRecipientsFromFilters(filters);
+
+    // Variables y plantilla heredadas de la madre
+    const motherName = (mother.get('name') as string) || 'Sin nombre';
+    const templateName = (mother.get('templateName') as string) || '';
+    const templateLanguage = (mother.get('templateLanguage') as string) || 'es_ES';
+    const variables = safeJsonParse<string[]>(mother.get('variables'), []);
+    const originPhoneId = (mother.get('originPhoneId') as string) || waPhoneId || '';
+    const respectOptIn = mother.get('respectOptIn') !== false;
+
+    if (expandedPhones.length === 0) {
+        console.log(`🔁 [Recurring] "${motherName}" sin destinatarios este ciclo, avanzo nextRun`);
+        // Avanzar nextRun de todas formas
+        const nextRun = computeNextRun(config);
+        if (nextRun) {
+            await base(TABLE_CAMPAIGNS).update([{
+                id: motherId,
+                fields: {
+                    recurringLastRun: new Date().toISOString(),
+                    recurringNextRun: nextRun.toISOString()
+                }
+            }]);
+        }
+        return;
+    }
+
+    // Crear campaña hija
+    const todayStr = new Date().toLocaleDateString('es-ES', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    const childName = `${motherName} — ${todayStr}`;
+    const totalRecipients = expandedPhones.length;
+    const estimatedCost = Number((totalRecipients * MARKETING_COST_PER_MSG).toFixed(2));
+
+    let childId: string;
+    try {
+        const created = await base(TABLE_CAMPAIGNS).create([{
+            fields: {
+                name: childName,
+                templateName,
+                templateLanguage,
+                variables: JSON.stringify(variables),
+                recipients: JSON.stringify(expandedPhones),
+                status: 'draft',
+                originPhoneId,
+                respectOptIn,
+                createdAt: new Date().toISOString(),
+                createdBy: 'recurring-scheduler',
+                totalRecipients,
+                sentCount: 0, failedCount: 0, skippedCount: 0,
+                estimatedCost,
+                parentCampaignId: motherId
+            } as any
+        }]);
+        childId = created[0].id;
+    } catch (e: any) {
+        console.error(`[Recurring] Error creando hija de ${motherId}:`, e.message);
+        return;
+    }
+
+    console.log(`🔁 [Recurring] "${motherName}" → hija ${childId} con ${totalRecipients} destinatarios`);
+
+    // Ejecutar la hija (no esperamos, sigue en background)
+    executeCampaign(childId).catch(e => console.error('[Recurring] Error ejecutando hija:', e.message));
+
+    // Avanzar nextRun de la madre
+    const nextRun = computeNextRun(config);
+    try {
+        await base(TABLE_CAMPAIGNS).update([{
+            id: motherId,
+            fields: {
+                recurringLastRun: new Date().toISOString(),
+                recurringNextRun: nextRun ? nextRun.toISOString() : ''
+            }
+        }]);
+    } catch (e: any) {
+        console.error('[Recurring] Error actualizando nextRun:', e.message);
+    }
+}
+
 // --- ENDPOINTS REST DE CAMPAÑAS ---
 
-// Listar todas las campañas
-app.get('/api/campaigns', async (_req, res) => {
+// Listar todas las campañas (oculta las "hijas" de campañas recurrentes por defecto)
+app.get('/api/campaigns', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const includeChildren = req.query.includeChildren === 'true';
     try {
         const records = await base(TABLE_CAMPAIGNS).select({
             sort: [{ field: 'createdAt', direction: 'desc' }],
-            maxRecords: 100
+            maxRecords: 200
         }).all();
-        const list = records.map(r => ({
-            id: r.id,
-            name: (r.get('name') as string) || '',
-            templateName: (r.get('templateName') as string) || '',
-            status: (r.get('status') as string) || 'draft',
-            scheduledFor: (r.get('scheduledFor') as string) || null,
-            createdAt: (r.get('createdAt') as string) || '',
-            createdBy: (r.get('createdBy') as string) || '',
-            totalRecipients: Number(r.get('totalRecipients') || 0),
-            sentCount: Number(r.get('sentCount') || 0),
-            failedCount: Number(r.get('failedCount') || 0),
-            skippedCount: Number(r.get('skippedCount') || 0),
-            estimatedCost: Number(r.get('estimatedCost') || 0),
-            startedAt: (r.get('startedAt') as string) || null,
-            completedAt: (r.get('completedAt') as string) || null
-        }));
+        const list = records
+            .filter(r => includeChildren || !((r.get('parentCampaignId') as string) || '').trim())
+            .map(r => {
+                const recurringConfig = safeJsonParse<any>(r.get('recurringConfig'), null);
+                return {
+                    id: r.id,
+                    name: (r.get('name') as string) || '',
+                    templateName: (r.get('templateName') as string) || '',
+                    status: (r.get('status') as string) || 'draft',
+                    scheduledFor: (r.get('scheduledFor') as string) || null,
+                    createdAt: (r.get('createdAt') as string) || '',
+                    createdBy: (r.get('createdBy') as string) || '',
+                    totalRecipients: Number(r.get('totalRecipients') || 0),
+                    sentCount: Number(r.get('sentCount') || 0),
+                    failedCount: Number(r.get('failedCount') || 0),
+                    skippedCount: Number(r.get('skippedCount') || 0),
+                    estimatedCost: Number(r.get('estimatedCost') || 0),
+                    startedAt: (r.get('startedAt') as string) || null,
+                    completedAt: (r.get('completedAt') as string) || null,
+                    parentCampaignId: (r.get('parentCampaignId') as string) || null,
+                    isRecurring: !!recurringConfig && !!recurringConfig.frequency,
+                    recurringPaused: recurringConfig ? !!recurringConfig.paused : false,
+                    recurringNextRun: (r.get('recurringNextRun') as string) || null,
+                    recurringLastRun: (r.get('recurringLastRun') as string) || null,
+                    recurringFrequency: recurringConfig?.frequency || null
+                };
+            });
         res.json(list);
     } catch (e: any) {
         res.status(500).json({ error: e.message });
@@ -3267,6 +3487,7 @@ app.get('/api/campaigns/:id', async (req, res) => {
         const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
         const recipients = safeJsonParse<string[]>(r.get('recipients'), []);
         const variables = safeJsonParse<string[]>(r.get('variables'), []);
+        const recurringConfig = safeJsonParse<any>(r.get('recurringConfig'), null);
         res.json({
             id: r.id,
             name: r.get('name'),
@@ -3287,7 +3508,12 @@ app.get('/api/campaigns/:id', async (req, res) => {
             estimatedCost: Number(r.get('estimatedCost') || 0),
             startedAt: r.get('startedAt'),
             completedAt: r.get('completedAt'),
-            notes: r.get('notes') || ''
+            notes: r.get('notes') || '',
+            parentCampaignId: r.get('parentCampaignId') || null,
+            isRecurring: !!recurringConfig && !!recurringConfig.frequency,
+            recurringConfig,
+            recurringNextRun: r.get('recurringNextRun') || null,
+            recurringLastRun: r.get('recurringLastRun') || null
         });
     } catch {
         res.status(404).json({ error: 'Campaña no encontrada' });
@@ -3297,12 +3523,22 @@ app.get('/api/campaigns/:id', async (req, res) => {
 // Crear nueva campaña (estado 'draft' por defecto)
 app.post('/api/campaigns', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
-    const { name, templateName, templateLanguage, variables, recipients, status, scheduledFor, originPhoneId, createdBy, respectOptIn } = req.body;
+    const {
+        name, templateName, templateLanguage, variables, recipients, status,
+        scheduledFor, originPhoneId, createdBy, respectOptIn,
+        recurringConfig // nuevo: si viene, la campaña es madre recurrente
+    } = req.body;
 
     if (!name || !templateName) return res.status(400).json({ error: 'name y templateName son obligatorios' });
-    if (!Array.isArray(recipients) || recipients.length === 0) return res.status(400).json({ error: 'recipients debe ser un array no vacío' });
 
-    const cleanRecipients = (recipients as string[]).map(p => cleanNumber(p)).filter(Boolean);
+    const isRecurring = !!recurringConfig && !!recurringConfig.frequency;
+
+    // Para campañas no recurrentes, recipients es obligatorio. Para recurrentes, los filtros bastan.
+    if (!isRecurring && (!Array.isArray(recipients) || recipients.length === 0)) {
+        return res.status(400).json({ error: 'recipients debe ser un array no vacío' });
+    }
+
+    const cleanRecipients = Array.isArray(recipients) ? (recipients as string[]).map(p => cleanNumber(p)).filter(Boolean) : [];
     const totalRecipients = cleanRecipients.length;
     const estimatedCost = Number((totalRecipients * MARKETING_COST_PER_MSG).toFixed(2));
 
@@ -3312,7 +3548,7 @@ app.post('/api/campaigns', async (req, res) => {
             templateLanguage: templateLanguage || 'es_ES',
             variables: JSON.stringify(variables || []),
             recipients: JSON.stringify(cleanRecipients),
-            status: status || 'draft',
+            status: isRecurring ? 'recurring' : (status || 'draft'),
             originPhoneId: originPhoneId || waPhoneId || '',
             respectOptIn: respectOptIn !== false,
             createdAt: new Date().toISOString(),
@@ -3320,9 +3556,23 @@ app.post('/api/campaigns', async (req, res) => {
             totalRecipients, sentCount: 0, failedCount: 0, skippedCount: 0,
             estimatedCost
         };
-        if (scheduledFor) fields.scheduledFor = scheduledFor;
+        if (scheduledFor && !isRecurring) fields.scheduledFor = scheduledFor;
+
+        if (isRecurring) {
+            fields.recurringConfig = JSON.stringify(recurringConfig);
+            const nextRun = computeNextRun(recurringConfig);
+            if (nextRun) fields.recurringNextRun = nextRun.toISOString();
+        }
+
         const created = await base(TABLE_CAMPAIGNS).create([{ fields }]);
-        res.json({ success: true, id: created[0].id, totalRecipients, estimatedCost });
+        res.json({
+            success: true,
+            id: created[0].id,
+            totalRecipients,
+            estimatedCost,
+            recurring: isRecurring,
+            nextRun: isRecurring ? fields.recurringNextRun : null
+        });
     } catch (e: any) {
         console.error('[Campaigns] Error creando:', e.message);
         res.status(500).json({ error: e.message });
@@ -3362,13 +3612,31 @@ app.put('/api/campaigns/:id', async (req, res) => {
     }
 });
 
-// Eliminar campaña (no permitido si está en ejecución)
+// Eliminar campaña (no permitido si está en ejecución).
+// Si es madre recurrente, también borra las hijas asociadas.
 app.delete('/api/campaigns/:id', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     try {
         const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
         const currentStatus = r.get('status');
         if (currentStatus === 'running') return res.status(400).json({ error: 'No se puede eliminar una campaña en ejecución' });
+
+        // Si es madre recurrente, busca hijas asociadas
+        const isRecurring = currentStatus === 'recurring' || !!r.get('recurringConfig');
+        if (isRecurring) {
+            const children = await base(TABLE_CAMPAIGNS).select({
+                filterByFormula: `{parentCampaignId}='${req.params.id}'`,
+                maxRecords: 500
+            }).all();
+            // Borrar hijas en lotes de 10
+            for (let i = 0; i < children.length; i += 10) {
+                const ids = children.slice(i, i + 10).map(c => c.id);
+                if (ids.length > 0) {
+                    try { await base(TABLE_CAMPAIGNS).destroy(ids); } catch { }
+                }
+            }
+        }
+
         await base(TABLE_CAMPAIGNS).destroy([req.params.id]);
         res.json({ success: true });
     } catch (e: any) {
@@ -3404,6 +3672,77 @@ app.post('/api/campaigns/:id/cancel', async (req, res) => {
         }
         await base(TABLE_CAMPAIGNS).update([{ id: req.params.id, fields: { status: 'cancelled' } }]);
         res.json({ success: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Pausar una campaña recurrente
+app.post('/api/campaigns/:id/pause', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const status = r.get('status');
+        if (status !== 'recurring') {
+            return res.status(400).json({ error: 'Solo se pueden pausar campañas recurrentes' });
+        }
+        const config = safeJsonParse<any>(r.get('recurringConfig'), {});
+        config.paused = true;
+        await base(TABLE_CAMPAIGNS).update([{
+            id: req.params.id,
+            fields: { recurringConfig: JSON.stringify(config) }
+        }]);
+        res.json({ success: true, paused: true });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Reanudar una campaña recurrente pausada
+app.post('/api/campaigns/:id/resume', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const r = await base(TABLE_CAMPAIGNS).find(req.params.id);
+        const status = r.get('status');
+        if (status !== 'recurring') {
+            return res.status(400).json({ error: 'Solo se pueden reanudar campañas recurrentes' });
+        }
+        const config = safeJsonParse<any>(r.get('recurringConfig'), {});
+        config.paused = false;
+        // Recalcular nextRun por si el lastRun se quedó atrasado
+        const fields: any = { recurringConfig: JSON.stringify(config) };
+        const nextRun = computeNextRun(config);
+        if (nextRun) fields.recurringNextRun = nextRun.toISOString();
+        await base(TABLE_CAMPAIGNS).update([{ id: req.params.id, fields }]);
+        res.json({ success: true, paused: false, nextRun: fields.recurringNextRun || null });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Listar ejecuciones (campañas hijas) de una campaña recurrente madre
+app.get('/api/campaigns/:id/executions', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const children = await base(TABLE_CAMPAIGNS).select({
+            filterByFormula: `{parentCampaignId}='${req.params.id}'`,
+            sort: [{ field: 'createdAt', direction: 'desc' }],
+            maxRecords: 100
+        }).all();
+        const list = children.map(r => ({
+            id: r.id,
+            name: r.get('name'),
+            status: r.get('status'),
+            startedAt: r.get('startedAt') || null,
+            completedAt: r.get('completedAt') || null,
+            createdAt: r.get('createdAt') || null,
+            totalRecipients: Number(r.get('totalRecipients') || 0),
+            sentCount: Number(r.get('sentCount') || 0),
+            failedCount: Number(r.get('failedCount') || 0),
+            skippedCount: Number(r.get('skippedCount') || 0),
+            estimatedCost: Number(r.get('estimatedCost') || 0)
+        }));
+        res.json(list);
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }

@@ -3,7 +3,7 @@ import {
     Megaphone, Send, Users, Calendar as CalendarIcon, TrendingUp, Plus, Edit3,
     Trash2, Eye, X, ChevronLeft, ChevronRight, Check, Clock, Target, AlertCircle,
     Loader2, Search, Filter, Mail, DollarSign, BarChart3, CheckCircle2, XCircle,
-    PauseCircle, FileText, Sparkles, ArrowLeft
+    PauseCircle, FileText, Sparkles, ArrowLeft, Repeat, Play, Pause, History
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -15,7 +15,7 @@ interface CampaignSummary {
     id: string;
     name: string;
     templateName: string;
-    status: 'draft' | 'scheduled' | 'running' | 'completed' | 'failed' | 'cancelled';
+    status: 'draft' | 'scheduled' | 'running' | 'completed' | 'failed' | 'cancelled' | 'recurring';
     scheduledFor: string | null;
     createdAt: string;
     createdBy: string;
@@ -26,6 +26,12 @@ interface CampaignSummary {
     estimatedCost: number;
     startedAt: string | null;
     completedAt: string | null;
+    parentCampaignId?: string | null;
+    isRecurring?: boolean;
+    recurringPaused?: boolean;
+    recurringNextRun?: string | null;
+    recurringLastRun?: string | null;
+    recurringFrequency?: string | null;
 }
 
 interface CampaignDetail extends CampaignSummary {
@@ -35,6 +41,21 @@ interface CampaignDetail extends CampaignSummary {
     originPhoneId: string | null;
     respectOptIn: boolean;
     notes: string;
+    recurringConfig?: any;
+}
+
+interface CampaignExecution {
+    id: string;
+    name: string;
+    status: string;
+    createdAt: string | null;
+    startedAt: string | null;
+    completedAt: string | null;
+    totalRecipients: number;
+    sentCount: number;
+    failedCount: number;
+    skippedCount: number;
+    estimatedCost: number;
 }
 
 interface CampaignSend {
@@ -162,6 +183,24 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
         } catch (e: any) { alert('Error: ' + e.message); }
     };
 
+    const handlePause = async (id: string) => {
+        try {
+            const r = await fetch(`${API_URL}/campaigns/${id}/pause`, { method: 'POST' });
+            const data = await r.json();
+            if (data.success) loadCampaigns();
+            else alert('❌ ' + (data.error || 'Error'));
+        } catch (e: any) { alert('Error: ' + e.message); }
+    };
+
+    const handleResume = async (id: string) => {
+        try {
+            const r = await fetch(`${API_URL}/campaigns/${id}/resume`, { method: 'POST' });
+            const data = await r.json();
+            if (data.success) loadCampaigns();
+            else alert('❌ ' + (data.error || 'Error'));
+        } catch (e: any) { alert('Error: ' + e.message); }
+    };
+
     const handleEdit = async (id: string) => {
         try {
             const r = await fetch(`${API_URL}/campaigns/${id}`);
@@ -259,6 +298,7 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
                         { key: 'all', label: 'Todas' },
                         { key: 'draft', label: 'Borradores' },
                         { key: 'scheduled', label: 'Programadas' },
+                        { key: 'recurring', label: '🔁 Recurrentes' },
                         { key: 'running', label: 'En curso' },
                         { key: 'completed', label: 'Completadas' },
                         { key: 'failed', label: 'Fallidas' },
@@ -300,6 +340,8 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
                                 onEdit={() => handleEdit(c.id)}
                                 onDelete={() => handleDelete(c.id, c.name)}
                                 onCancel={() => handleCancel(c.id)}
+                                onPause={() => handlePause(c.id)}
+                                onResume={() => handleResume(c.id)}
                             />
                         ))}
                     </div>
@@ -382,38 +424,68 @@ const CampaignCard: React.FC<{
     onEdit: () => void;
     onDelete: () => void;
     onCancel: () => void;
-}> = ({ campaign, isDark, readOnly, onView, onSend, onEdit, onDelete, onCancel }) => {
+    onPause: () => void;
+    onResume: () => void;
+}> = ({ campaign, isDark, readOnly, onView, onSend, onEdit, onDelete, onCancel, onPause, onResume }) => {
     const statusBadge = getStatusBadge(campaign.status, isDark);
     const progress = campaign.totalRecipients > 0
         ? Math.round(((campaign.sentCount + campaign.failedCount + campaign.skippedCount) / campaign.totalRecipients) * 100)
         : 0;
+    const isRecurring = !!campaign.isRecurring;
+    const isPaused = !!campaign.recurringPaused;
 
     return (
-        <div className={`p-4 rounded-2xl border transition-all ${isDark ? 'bg-slate-800/40 border-white/5 hover:border-orange-500/30' : 'bg-white border-slate-200 hover:border-orange-300 hover:shadow-md'}`}>
+        <div className={`p-4 rounded-2xl border transition-all ${isRecurring
+            ? (isDark ? 'bg-purple-500/5 border-purple-500/30 hover:border-purple-500/50' : 'bg-purple-50/50 border-purple-200 hover:border-purple-400 hover:shadow-md')
+            : (isDark ? 'bg-slate-800/40 border-white/5 hover:border-orange-500/30' : 'bg-white border-slate-200 hover:border-orange-300 hover:shadow-md')}`}>
             <div className="flex items-start justify-between gap-3 flex-wrap">
                 <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-3 mb-2">
+                    <div className="flex items-center gap-3 mb-2 flex-wrap">
                         <h3 className={`text-base font-bold truncate ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{campaign.name}</h3>
                         <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${statusBadge.cls}`}>
                             {statusBadge.label}
                         </span>
+                        {isRecurring && (
+                            <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase flex items-center gap-1 ${isPaused ? 'bg-amber-500/20 text-amber-600' : 'bg-purple-500/20 text-purple-600'}`}>
+                                <Repeat className="w-3 h-3" />
+                                {isPaused ? 'PAUSADA' : 'RECURRENTE'}
+                            </span>
+                        )}
                     </div>
                     <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                         <span className="flex items-center gap-1"><FileText className="w-3 h-3" />{campaign.templateName}</span>
-                        <span className="flex items-center gap-1"><Users className="w-3 h-3" />{campaign.totalRecipients} destinatarios</span>
+                        {!isRecurring && (
+                            <span className="flex items-center gap-1"><Users className="w-3 h-3" />{campaign.totalRecipients} destinatarios</span>
+                        )}
                         {campaign.scheduledFor && (
                             <span className="flex items-center gap-1"><Clock className="w-3 h-3" />Programada: {formatDateTime(campaign.scheduledFor)}</span>
                         )}
-                        {campaign.completedAt && (
+                        {isRecurring && campaign.recurringNextRun && !isPaused && (
+                            <span className="flex items-center gap-1 text-purple-500 font-semibold"><Repeat className="w-3 h-3" />Próxima: {formatDateTime(campaign.recurringNextRun)}</span>
+                        )}
+                        {isRecurring && campaign.recurringLastRun && (
+                            <span className="flex items-center gap-1"><History className="w-3 h-3" />Última: {formatDateTime(campaign.recurringLastRun)}</span>
+                        )}
+                        {campaign.completedAt && !isRecurring && (
                             <span className="flex items-center gap-1"><CheckCircle2 className="w-3 h-3" />Terminada: {formatDateTime(campaign.completedAt)}</span>
                         )}
-                        <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />~{campaign.estimatedCost.toFixed(2)}€</span>
+                        <span className="flex items-center gap-1"><DollarSign className="w-3 h-3" />~{campaign.estimatedCost.toFixed(2)}€{isRecurring ? ' / ejecución' : ''}</span>
                     </div>
                 </div>
                 <div className="flex items-center gap-1.5">
                     <button onClick={onView} title="Ver detalle" className={`p-2 rounded-lg transition ${isDark ? 'hover:bg-white/5 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
                         <Eye className="w-4 h-4" />
                     </button>
+                    {!readOnly && isRecurring && !isPaused && (
+                        <button onClick={onPause} title="Pausar campaña recurrente" className="p-2 rounded-lg bg-gradient-to-br from-amber-500 to-orange-500 text-white hover:shadow-md transition">
+                            <Pause className="w-4 h-4" />
+                        </button>
+                    )}
+                    {!readOnly && isRecurring && isPaused && (
+                        <button onClick={onResume} title="Reanudar campaña recurrente" className="p-2 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 text-white hover:shadow-md transition">
+                            <Play className="w-4 h-4" />
+                        </button>
+                    )}
                     {!readOnly && (campaign.status === 'draft' || campaign.status === 'scheduled') && (
                         <>
                             <button onClick={onSend} title="Enviar ahora" className="p-2 rounded-lg bg-gradient-to-br from-green-500 to-emerald-600 text-white hover:shadow-md transition">
@@ -480,7 +552,17 @@ const CampaignWizard: React.FC<{
     const [recipients, setRecipients] = useState<string[]>(initialData?.recipients || []);
     const [respectOptIn, setRespectOptIn] = useState<boolean>(initialData?.respectOptIn ?? true);
     const [scheduledFor, setScheduledFor] = useState<string>(initialData?.scheduledFor ? toLocalDateTimeInput(initialData.scheduledFor) : '');
-    const [sendMode, setSendMode] = useState<'now' | 'schedule' | 'draft'>(initialData?.scheduledFor ? 'schedule' : 'now');
+    const [sendMode, setSendMode] = useState<'now' | 'schedule' | 'draft' | 'recurring'>(
+        (initialData as any)?.isRecurring ? 'recurring' : (initialData?.scheduledFor ? 'schedule' : 'now')
+    );
+
+    // Estado recurrente
+    const initRecurring = (initialData as any)?.recurringConfig || {};
+    const [recFrequency, setRecFrequency] = useState<'daily' | 'weekly' | 'monthly' | 'custom'>(initRecurring.frequency || 'weekly');
+    const [recDayOfWeek, setRecDayOfWeek] = useState<number>(initRecurring.dayOfWeek ?? 1); // 1 = lunes
+    const [recDayOfMonth, setRecDayOfMonth] = useState<number>(initRecurring.dayOfMonth ?? 1);
+    const [recIntervalDays, setRecIntervalDays] = useState<number>(initRecurring.intervalDays ?? 7);
+    const [recHour, setRecHour] = useState<number>(initRecurring.hour ?? 10);
 
     // Plantillas y contactos
     const [templates, setTemplates] = useState<MetaTemplate[]>([]);
@@ -567,8 +649,15 @@ const CampaignWizard: React.FC<{
     // ----- Validaciones -----
     const canGoToStep2 = name.trim().length > 1 && templateName.length > 0;
     const canGoToStep3 = variables.every(v => v.trim().length > 0) || templateVarCount === 0;
-    const canGoToStep4 = recipients.length > 0;
-    const canSubmit = (sendMode !== 'schedule' || (scheduledFor && new Date(scheduledFor) > new Date()));
+    // En modo recurrente no se exigen recipients seleccionados (se calculan al ejecutar con los filtros)
+    const canGoToStep4 = recipients.length > 0 || sendMode === 'recurring';
+    const canSubmit =
+        (sendMode === 'schedule' ? (scheduledFor && new Date(scheduledFor) > new Date()) :
+            (sendMode === 'recurring' ? (
+                (recFrequency !== 'custom' || recIntervalDays >= 1) &&
+                (recFrequency !== 'weekly' || (recDayOfWeek >= 0 && recDayOfWeek <= 6)) &&
+                (recFrequency !== 'monthly' || (recDayOfMonth >= 1 && recDayOfMonth <= 28))
+            ) : true));
 
     // ----- Guardar -----
     const handleSave = async () => {
@@ -583,6 +672,22 @@ const CampaignWizard: React.FC<{
             status: sendMode === 'schedule' ? 'scheduled' : (sendMode === 'draft' ? 'draft' : 'draft')
         };
         if (sendMode === 'schedule' && scheduledFor) payload.scheduledFor = new Date(scheduledFor).toISOString();
+
+        // Modo recurrente: enviar configuración + filtros guardados (en lugar de la lista fija)
+        if (sendMode === 'recurring') {
+            payload.recurringConfig = {
+                frequency: recFrequency,
+                hour: recHour,
+                ...(recFrequency === 'weekly' && { dayOfWeek: recDayOfWeek }),
+                ...(recFrequency === 'monthly' && { dayOfMonth: recDayOfMonth }),
+                ...(recFrequency === 'custom' && { intervalDays: recIntervalDays }),
+                filters: {
+                    department: contactFilterDept || '',
+                    tags: contactFilterTag ? [contactFilterTag] : [],
+                    onlyOptedIn: contactFilterOptIn
+                }
+            };
+        }
 
         try {
             let id = initialData?.id;
@@ -612,6 +717,8 @@ const CampaignWizard: React.FC<{
                 else alert('Campaña guardada pero error al lanzar envío: ' + (sendData.error || ''));
             } else if (sendMode === 'schedule') {
                 alert('📅 Campaña programada. Se enviará automáticamente a la hora indicada.');
+            } else if (sendMode === 'recurring') {
+                alert('🔁 Campaña recurrente activada. Se enviará automáticamente según la cadencia configurada. Puedes pausarla cuando quieras.');
             } else {
                 alert('💾 Campaña guardada como borrador.');
             }
@@ -714,6 +821,12 @@ const CampaignWizard: React.FC<{
                             estimatedCost={estimatedCost}
                             campaignName={name}
                             templateName={templateName}
+                            recFrequency={recFrequency} setRecFrequency={setRecFrequency}
+                            recDayOfWeek={recDayOfWeek} setRecDayOfWeek={setRecDayOfWeek}
+                            recDayOfMonth={recDayOfMonth} setRecDayOfMonth={setRecDayOfMonth}
+                            recIntervalDays={recIntervalDays} setRecIntervalDays={setRecIntervalDays}
+                            recHour={recHour} setRecHour={setRecHour}
+                            filterTag={contactFilterTag} filterDept={contactFilterDept} filterOptIn={contactFilterOptIn}
                         />
                     )}
                 </div>
@@ -738,7 +851,10 @@ const CampaignWizard: React.FC<{
                             disabled={saving || !canSubmit}
                             className="px-5 py-2 rounded-lg font-semibold text-sm bg-gradient-to-r from-green-500 to-emerald-600 text-white shadow-md hover:shadow-lg transition active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-2">
                             {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                            {sendMode === 'now' ? 'Guardar y enviar ahora' : sendMode === 'schedule' ? 'Programar campaña' : 'Guardar borrador'}
+                            {sendMode === 'now' ? 'Guardar y enviar ahora' :
+                                sendMode === 'schedule' ? 'Programar campaña' :
+                                    sendMode === 'recurring' ? 'Activar campaña recurrente' :
+                                        'Guardar borrador'}
                         </button>
                     )}
                 </div>
@@ -970,7 +1086,92 @@ const Step3Recipients: React.FC<any> = ({
 const Step4Schedule: React.FC<any> = ({
     isDark, sendMode, setSendMode, scheduledFor, setScheduledFor,
     respectOptIn, setRespectOptIn, recipients, estimatedCost,
-    campaignName, templateName
+    campaignName, templateName,
+    recFrequency, setRecFrequency,
+    recDayOfWeek, setRecDayOfWeek,
+    recDayOfMonth, setRecDayOfMonth,
+    recIntervalDays, setRecIntervalDays,
+    recHour, setRecHour,
+    filterTag, filterDept, filterOptIn
+}) => {
+    // Vista previa de la próxima ejecución (cálculo cliente, mismo algoritmo que el backend)
+    const computeNextRunPreview = () => {
+        const now = new Date();
+        const hour = Math.max(0, Math.min(23, recHour));
+        if (recFrequency === 'daily') {
+            const next = new Date(now);
+            next.setHours(hour, 0, 0, 0);
+            if (next <= now) next.setDate(next.getDate() + 1);
+            return next;
+        }
+        if (recFrequency === 'weekly') {
+            const next = new Date(now);
+            next.setHours(hour, 0, 0, 0);
+            let i = 0;
+            while ((next.getDay() !== recDayOfWeek || next <= now) && i < 14) {
+                next.setDate(next.getDate() + 1);
+                i++;
+            }
+            return next;
+        }
+        if (recFrequency === 'monthly') {
+            const next = new Date(now);
+            next.setDate(recDayOfMonth);
+            next.setHours(hour, 0, 0, 0);
+            if (next <= now) {
+                next.setMonth(next.getMonth() + 1);
+                next.setDate(recDayOfMonth);
+                next.setHours(hour, 0, 0, 0);
+            }
+            return next;
+        }
+        if (recFrequency === 'custom') {
+            const next = new Date(now);
+            next.setHours(hour, 0, 0, 0);
+            next.setDate(next.getDate() + recIntervalDays);
+            return next;
+        }
+        return null;
+    };
+    const nextRunPreview = computeNextRunPreview();
+    const formatNext = (d: Date | null) => d ? d.toLocaleString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+
+    const weekdays = ['Domingo', 'Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado'];
+    const frequencyLabel: Record<string, string> = {
+        daily: 'cada día',
+        weekly: `cada ${weekdays[recDayOfWeek].toLowerCase()}`,
+        monthly: `el día ${recDayOfMonth} de cada mes`,
+        custom: `cada ${recIntervalDays} día${recIntervalDays === 1 ? '' : 's'}`
+    };
+
+    return (
+    <Step4Inner
+        isDark={isDark} sendMode={sendMode} setSendMode={setSendMode}
+        scheduledFor={scheduledFor} setScheduledFor={setScheduledFor}
+        respectOptIn={respectOptIn} setRespectOptIn={setRespectOptIn}
+        recipients={recipients} estimatedCost={estimatedCost}
+        campaignName={campaignName} templateName={templateName}
+        recFrequency={recFrequency} recDayOfWeek={recDayOfWeek} recDayOfMonth={recDayOfMonth}
+        recIntervalDays={recIntervalDays} recHour={recHour}
+        setRecFrequency={setRecFrequency} setRecDayOfWeek={setRecDayOfWeek} setRecDayOfMonth={setRecDayOfMonth}
+        setRecIntervalDays={setRecIntervalDays} setRecHour={setRecHour}
+        filterTag={filterTag} filterDept={filterDept} filterOptIn={filterOptIn}
+        nextRunPreview={nextRunPreview} formatNext={formatNext} weekdays={weekdays} frequencyLabel={frequencyLabel}
+    />
+    );
+};
+
+const Step4Inner: React.FC<any> = ({
+    isDark, sendMode, setSendMode, scheduledFor, setScheduledFor,
+    respectOptIn, setRespectOptIn, recipients, estimatedCost,
+    campaignName, templateName,
+    recFrequency, setRecFrequency,
+    recDayOfWeek, setRecDayOfWeek,
+    recDayOfMonth, setRecDayOfMonth,
+    recIntervalDays, setRecIntervalDays,
+    recHour, setRecHour,
+    filterTag, filterDept, filterOptIn,
+    nextRunPreview, formatNext, weekdays, frequencyLabel
 }) => (
     <div className="space-y-5">
         {/* Resumen */}
@@ -979,18 +1180,23 @@ const Step4Schedule: React.FC<any> = ({
             <div className="grid grid-cols-2 gap-3 text-xs">
                 <SummaryRow isDark={isDark} label="Nombre" value={campaignName} />
                 <SummaryRow isDark={isDark} label="Plantilla" value={templateName} />
-                <SummaryRow isDark={isDark} label="Destinatarios" value={`${recipients.length} contactos`} />
-                <SummaryRow isDark={isDark} label="Coste estimado" value={`~${estimatedCost.toFixed(2)} €`} highlight />
+                {sendMode === 'recurring' ? (
+                    <SummaryRow isDark={isDark} label="Destinatarios" value={`Filtros aplicados (recalculados cada vez)`} />
+                ) : (
+                    <SummaryRow isDark={isDark} label="Destinatarios" value={`${recipients.length} contactos`} />
+                )}
+                <SummaryRow isDark={isDark} label={sendMode === 'recurring' ? 'Coste por ejecución' : 'Coste estimado'} value={`~${estimatedCost.toFixed(2)} €`} highlight />
             </div>
         </div>
 
         {/* Modo de envío */}
         <div>
             <label className={`block text-xs font-bold uppercase tracking-wide mb-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>¿Cuándo enviar?</label>
-            <div className="grid grid-cols-3 gap-2">
-                <ModeButton isDark={isDark} active={sendMode === 'now'} onClick={() => setSendMode('now')} icon={<Send className="w-4 h-4" />} label="Enviar ahora" desc="Inmediato" />
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                <ModeButton isDark={isDark} active={sendMode === 'now'} onClick={() => setSendMode('now')} icon={<Send className="w-4 h-4" />} label="Ahora" desc="Inmediato" />
                 <ModeButton isDark={isDark} active={sendMode === 'schedule'} onClick={() => setSendMode('schedule')} icon={<Clock className="w-4 h-4" />} label="Programar" desc="Fecha/hora futura" />
-                <ModeButton isDark={isDark} active={sendMode === 'draft'} onClick={() => setSendMode('draft')} icon={<FileText className="w-4 h-4" />} label="Guardar borrador" desc="Enviar manualmente" />
+                <ModeButton isDark={isDark} active={sendMode === 'recurring'} onClick={() => setSendMode('recurring')} icon={<Repeat className="w-4 h-4" />} label="Recurrente" desc="Periódica automática" />
+                <ModeButton isDark={isDark} active={sendMode === 'draft'} onClick={() => setSendMode('draft')} icon={<FileText className="w-4 h-4" />} label="Borrador" desc="Manual" />
             </div>
         </div>
 
@@ -1007,6 +1213,104 @@ const Step4Schedule: React.FC<any> = ({
                 <p className={`mt-1 text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
                     Se enviará automáticamente a la hora indicada (zona horaria local).
                 </p>
+            </div>
+        )}
+
+        {sendMode === 'recurring' && (
+            <div className={`p-4 rounded-xl border-2 space-y-4 ${isDark ? 'bg-purple-500/5 border-purple-500/30' : 'bg-purple-50 border-purple-300'}`}>
+                <div className="flex items-center gap-2">
+                    <Repeat className="w-5 h-5 text-purple-500" />
+                    <span className={`text-sm font-bold ${isDark ? 'text-purple-300' : 'text-purple-800'}`}>Configura la cadencia</span>
+                </div>
+
+                {/* Frecuencia */}
+                <div>
+                    <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Frecuencia</label>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+                        {[
+                            { v: 'daily', label: 'Diaria' },
+                            { v: 'weekly', label: 'Semanal' },
+                            { v: 'monthly', label: 'Mensual' },
+                            { v: 'custom', label: 'Cada X días' }
+                        ].map(opt => (
+                            <button key={opt.v}
+                                type="button"
+                                onClick={() => setRecFrequency(opt.v)}
+                                className={`px-3 py-2 rounded-lg text-sm font-semibold transition border ${recFrequency === opt.v
+                                    ? 'bg-purple-500 text-white border-purple-500'
+                                    : isDark ? 'bg-slate-800 border-white/10 text-slate-300 hover:bg-slate-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
+                                {opt.label}
+                            </button>
+                        ))}
+                    </div>
+                </div>
+
+                {/* Día específico según frecuencia */}
+                {recFrequency === 'weekly' && (
+                    <div>
+                        <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Día de la semana</label>
+                        <select value={recDayOfWeek} onChange={(e) => setRecDayOfWeek(Number(e.target.value))}
+                            className={`w-full px-4 py-2.5 rounded-lg text-sm border ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}>
+                            {weekdays.map((d: string, i: number) => <option key={i} value={i}>{d}</option>)}
+                        </select>
+                    </div>
+                )}
+
+                {recFrequency === 'monthly' && (
+                    <div>
+                        <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Día del mes (1-28)</label>
+                        <input type="number" min={1} max={28} value={recDayOfMonth}
+                            onChange={(e) => setRecDayOfMonth(Math.max(1, Math.min(28, Number(e.target.value) || 1)))}
+                            className={`w-full px-4 py-2.5 rounded-lg text-sm border ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`} />
+                        <p className={`mt-1 text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Limitado a 28 para evitar problemas con febrero.</p>
+                    </div>
+                )}
+
+                {recFrequency === 'custom' && (
+                    <div>
+                        <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Cada cuántos días</label>
+                        <input type="number" min={1} max={365} value={recIntervalDays}
+                            onChange={(e) => setRecIntervalDays(Math.max(1, Math.min(365, Number(e.target.value) || 1)))}
+                            className={`w-full px-4 py-2.5 rounded-lg text-sm border ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`} />
+                        <p className={`mt-1 text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Por ejemplo, 15 = una vez cada 15 días.</p>
+                    </div>
+                )}
+
+                {/* Hora */}
+                <div>
+                    <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Hora del envío</label>
+                    <select value={recHour} onChange={(e) => setRecHour(Number(e.target.value))}
+                        className={`w-full px-4 py-2.5 rounded-lg text-sm border ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}>
+                        {Array.from({ length: 24 }, (_, h) => (
+                            <option key={h} value={h}>{String(h).padStart(2, '0')}:00</option>
+                        ))}
+                    </select>
+                </div>
+
+                {/* Filtros activos como info */}
+                <div className={`p-3 rounded-lg text-xs ${isDark ? 'bg-slate-900/50 text-slate-400' : 'bg-white text-slate-600'}`}>
+                    <strong className={isDark ? 'text-slate-200' : 'text-slate-800'}>📋 Destinatarios cada ejecución:</strong>
+                    <ul className="mt-1 ml-4 list-disc space-y-0.5">
+                        {filterDept && <li>Departamento: <code>{filterDept}</code></li>}
+                        {filterTag && <li>Etiqueta: <code>{filterTag}</code></li>}
+                        <li>{filterOptIn ? '✅ Solo contactos con opt-in marketing' : '⚠️ Sin filtrar opt-in (RIESGO)'}</li>
+                        {!filterDept && !filterTag && !filterOptIn && <li className="text-amber-500">⚠️ Sin filtros: se enviará a TODOS los contactos. Recomendado volver al paso 3 y filtrar.</li>}
+                    </ul>
+                    <p className="mt-2 text-[11px] italic">Los destinatarios se recalculan cada vez que se ejecute, así que si añades nuevos clientes con opt-in los incluirá automáticamente.</p>
+                </div>
+
+                {/* Vista previa */}
+                <div className={`p-3 rounded-lg ${isDark ? 'bg-purple-500/10' : 'bg-white'} border-2 border-dashed ${isDark ? 'border-purple-500/40' : 'border-purple-300'}`}>
+                    <div className={`text-xs font-bold uppercase mb-1 ${isDark ? 'text-purple-300' : 'text-purple-800'}`}>📅 Esta campaña se enviará</div>
+                    <div className={`text-sm font-semibold ${isDark ? 'text-purple-200' : 'text-purple-900'}`}>
+                        {frequencyLabel[recFrequency]} a las {String(recHour).padStart(2, '0')}:00
+                    </div>
+                    {nextRunPreview && (
+                        <div className={`text-xs mt-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                            <strong>Próxima ejecución:</strong> {formatNext(nextRunPreview)}
+                        </div>
+                    )}
+                </div>
             </div>
         )}
 
@@ -1062,17 +1366,20 @@ const ModeButton: React.FC<any> = ({ isDark, active, onClick, icon, label, desc 
 const CampaignDetailView: React.FC<{ campaignId: string; onBack: () => void; isDark: boolean; API_URL: string }> = ({ campaignId, onBack, isDark, API_URL }) => {
     const [campaign, setCampaign] = useState<CampaignDetail | null>(null);
     const [sends, setSends] = useState<CampaignSend[]>([]);
+    const [executions, setExecutions] = useState<CampaignExecution[]>([]);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         const load = async () => {
             try {
-                const [r1, r2] = await Promise.all([
+                const [r1, r2, r3] = await Promise.all([
                     fetch(`${API_URL}/campaigns/${campaignId}`),
-                    fetch(`${API_URL}/campaigns/${campaignId}/sends`)
+                    fetch(`${API_URL}/campaigns/${campaignId}/sends`),
+                    fetch(`${API_URL}/campaigns/${campaignId}/executions`)
                 ]);
                 if (r1.ok) setCampaign(await r1.json());
                 if (r2.ok) setSends(await r2.json());
+                if (r3.ok) setExecutions(await r3.json());
             } catch (e) { console.error(e); }
             finally { setLoading(false); }
         };
@@ -1139,6 +1446,95 @@ const CampaignDetailView: React.FC<{ campaignId: string; onBack: () => void; isD
                         </div>
                     )}
                 </div>
+
+                {/* Si es recurrente: configuración + historial de ejecuciones */}
+                {(campaign as any).isRecurring && (
+                    <div className={`p-5 rounded-xl border-2 ${isDark ? 'bg-purple-500/5 border-purple-500/30' : 'bg-purple-50/50 border-purple-200'}`}>
+                        <div className="flex items-center gap-2 mb-3">
+                            <Repeat className="w-5 h-5 text-purple-500" />
+                            <h3 className={`text-sm font-bold ${isDark ? 'text-purple-300' : 'text-purple-800'}`}>Campaña recurrente</h3>
+                            {(campaign as any).recurringConfig?.paused && (
+                                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold uppercase bg-amber-500/20 text-amber-600">PAUSADA</span>
+                            )}
+                        </div>
+                        {(campaign as any).recurringConfig && (() => {
+                            const cfg = (campaign as any).recurringConfig;
+                            const wd = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'];
+                            let label = '';
+                            if (cfg.frequency === 'daily') label = `cada día a las ${String(cfg.hour ?? 10).padStart(2, '0')}:00`;
+                            if (cfg.frequency === 'weekly') label = `cada ${wd[cfg.dayOfWeek ?? 1]} a las ${String(cfg.hour ?? 10).padStart(2, '0')}:00`;
+                            if (cfg.frequency === 'monthly') label = `el día ${cfg.dayOfMonth ?? 1} de cada mes a las ${String(cfg.hour ?? 10).padStart(2, '0')}:00`;
+                            if (cfg.frequency === 'custom') label = `cada ${cfg.intervalDays ?? 7} días a las ${String(cfg.hour ?? 10).padStart(2, '0')}:00`;
+                            return (
+                                <div className={`text-sm mb-3 ${isDark ? 'text-purple-200' : 'text-purple-900'}`}>
+                                    <strong>Cadencia:</strong> {label}
+                                </div>
+                            );
+                        })()}
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-3 text-xs">
+                            <div className={`p-3 rounded-lg ${isDark ? 'bg-slate-900/40' : 'bg-white'}`}>
+                                <div className={`font-bold uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Próxima ejecución</div>
+                                <div className={`text-sm font-semibold mt-0.5 ${isDark ? 'text-purple-300' : 'text-purple-700'}`}>
+                                    {(campaign as any).recurringNextRun ? formatDateTime((campaign as any).recurringNextRun) : '—'}
+                                </div>
+                            </div>
+                            <div className={`p-3 rounded-lg ${isDark ? 'bg-slate-900/40' : 'bg-white'}`}>
+                                <div className={`font-bold uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Última ejecución</div>
+                                <div className={`text-sm font-semibold mt-0.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                                    {(campaign as any).recurringLastRun ? formatDateTime((campaign as any).recurringLastRun) : 'Aún no ejecutada'}
+                                </div>
+                            </div>
+                            <div className={`p-3 rounded-lg ${isDark ? 'bg-slate-900/40' : 'bg-white'}`}>
+                                <div className={`font-bold uppercase ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Ejecuciones totales</div>
+                                <div className={`text-sm font-semibold mt-0.5 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>
+                                    {executions.length}
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Historial de ejecuciones */}
+                        <div className="mt-4">
+                            <h4 className={`text-xs font-bold uppercase mb-2 flex items-center gap-1 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                                <History className="w-3 h-3" /> Historial de ejecuciones
+                            </h4>
+                            {executions.length === 0 ? (
+                                <div className={`p-4 rounded-lg text-center text-xs ${isDark ? 'bg-slate-900/40 text-slate-500' : 'bg-white text-slate-400'}`}>
+                                    Aún no se ha ejecutado ninguna vez. La primera ejecución será en {(campaign as any).recurringNextRun ? formatDateTime((campaign as any).recurringNextRun) : '—'}.
+                                </div>
+                            ) : (
+                                <div className={`rounded-lg border overflow-hidden ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
+                                    <table className="w-full text-xs">
+                                        <thead className={`text-[10px] uppercase ${isDark ? 'bg-slate-900/60 text-slate-400' : 'bg-slate-50 text-slate-600'}`}>
+                                            <tr>
+                                                <th className="px-3 py-2 text-left">Cuándo</th>
+                                                <th className="px-3 py-2 text-left">Estado</th>
+                                                <th className="px-3 py-2 text-right">Enviados</th>
+                                                <th className="px-3 py-2 text-right">Fallidos</th>
+                                                <th className="px-3 py-2 text-right">Saltados</th>
+                                                <th className="px-3 py-2 text-right">Coste</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {executions.map((ex, i) => {
+                                                const exBadge = getStatusBadge(ex.status, isDark);
+                                                return (
+                                                    <tr key={i} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'}`}>
+                                                        <td className={`px-3 py-2 ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{formatDateTime(ex.startedAt || ex.createdAt || '')}</td>
+                                                        <td className="px-3 py-2"><span className={`px-2 py-0.5 rounded text-[10px] font-bold ${exBadge.cls}`}>{exBadge.label}</span></td>
+                                                        <td className="px-3 py-2 text-right text-green-500 font-semibold">{ex.sentCount}</td>
+                                                        <td className="px-3 py-2 text-right text-red-500 font-semibold">{ex.failedCount}</td>
+                                                        <td className="px-3 py-2 text-right text-yellow-500 font-semibold">{ex.skippedCount}</td>
+                                                        <td className={`px-3 py-2 text-right ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>{ex.estimatedCost.toFixed(2)}€</td>
+                                                    </tr>
+                                                );
+                                            })}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                )}
 
                 {/* Notas/errores */}
                 {campaign.notes && (
@@ -1227,6 +1623,7 @@ function getStatusBadge(status: string, _isDark: boolean) {
         completed: { cls: 'bg-green-500/20 text-green-600', label: 'Completada' },
         failed: { cls: 'bg-red-500/20 text-red-500', label: 'Fallida' },
         cancelled: { cls: 'bg-slate-500/20 text-slate-500', label: 'Cancelada' },
+        recurring: { cls: 'bg-purple-500/20 text-purple-600', label: 'Activa' },
     };
     return map[status] || { cls: 'bg-slate-500/20 text-slate-500', label: status };
 }
