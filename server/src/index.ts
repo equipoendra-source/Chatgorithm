@@ -3800,6 +3800,325 @@ app.post('/api/contacts/import', async (req: any, res: any) => {
     res.json({ success: true, created, updated, skipped, failed, errors });
 });
 
+// ==========================================
+//  FEATURE FLAGS (módulos premium activables desde Airtable Config)
+// ==========================================
+
+// Comprueba si un módulo premium está activado para esta empresa
+// Buscamos en la tabla Config un registro con name='feature_xxx' y type='enabled'
+async function isFeatureEnabled(featureName: string): Promise<boolean> {
+    if (!base) return false;
+    try {
+        const sanitized = featureName.replace(/'/g, '');
+        const recs = await base('Config').select({
+            filterByFormula: `AND({name}='${sanitized}', {type}='enabled')`,
+            maxRecords: 1
+        }).firstPage();
+        return recs.length > 0;
+    } catch (e: any) {
+        console.error(`[Features] Error comprobando ${featureName}:`, e.message);
+        return false;
+    }
+}
+
+// Devuelve qué módulos premium están activos para esta empresa
+app.get('/api/features', async (_req, res) => {
+    if (!base) return res.json({});
+    try {
+        const recs = await base('Config').select({}).all();
+        const features: Record<string, boolean> = {};
+        recs.forEach(r => {
+            const name = ((r.get('name') as string) || '').trim();
+            const type = ((r.get('type') as string) || '').trim().toLowerCase();
+            if (name.startsWith('feature_') && type === 'enabled') {
+                features[name] = true;
+            }
+        });
+        res.json(features);
+    } catch (e: any) {
+        console.error('[Features] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================
+//  AUDITORÍA DE TIEMPOS DE RESPUESTA (módulo premium)
+// ==========================================
+
+app.get('/api/audit/response-times', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+
+    const enabled = await isFeatureEnabled('feature_response_audit');
+    if (!enabled) {
+        return res.status(403).json({
+            error: 'feature_locked',
+            module: 'feature_response_audit',
+            message: 'Este módulo no está activado para tu cuenta.'
+        });
+    }
+
+    try {
+        const days = Math.min(Math.max(parseInt(String(req.query.days || '30')), 1), 90);
+        const cutoffMs = Date.now() - days * 24 * 60 * 60 * 1000;
+
+        // Cargar mensajes del rango. Filtramos por timestamp para no traer todo el histórico.
+        const messages = await base('Messages').select({
+            sort: [{ field: 'timestamp', direction: 'asc' }]
+        }).all();
+
+        // Función para distinguir si un sender es un número (cliente) o un nombre (agente)
+        const isPhoneLike = (s: string) => {
+            if (!s) return false;
+            const cleaned = s.replace(/\D/g, '');
+            return cleaned.length >= 9 && /^\d+$/.test(s.replace(/[\s+\-()]/g, ''));
+        };
+
+        // Agrupar mensajes por contacto-cliente (siempre el número de teléfono)
+        // y clasificar dirección
+        type Msg = { ts: number; from: 'client' | 'agent'; agentName?: string; sender: string; recipient: string };
+        const byContact: Record<string, Msg[]> = {};
+
+        let totalIncoming = 0;
+        let totalOutgoing = 0;
+
+        for (const m of messages) {
+            const tsRaw = m.get('timestamp') as string;
+            if (!tsRaw) continue;
+            const ts = new Date(tsRaw).getTime();
+            if (isNaN(ts) || ts < cutoffMs) continue;
+
+            const sender = ((m.get('sender') as string) || '').trim();
+            const recipient = ((m.get('recipient') as string) || '').trim();
+            if (!sender || !recipient) continue;
+
+            // Filtrar mensajes del sistema/automáticos para no contaminar métricas
+            const senderLower = sender.toLowerCase();
+            if (senderLower === 'sistema' || senderLower === 'system' || senderLower === 'laura' || senderLower === 'bot') continue;
+
+            const senderIsPhone = isPhoneLike(sender);
+            const recipientIsPhone = isPhoneLike(recipient);
+
+            let contactPhone = '';
+            let from: 'client' | 'agent' = 'client';
+            let agentName: string | undefined;
+
+            if (senderIsPhone && !recipientIsPhone) {
+                // Mensaje entrante del cliente
+                contactPhone = sender;
+                from = 'client';
+                totalIncoming++;
+            } else if (!senderIsPhone && recipientIsPhone) {
+                // Mensaje saliente del agente
+                contactPhone = recipient;
+                from = 'agent';
+                agentName = sender;
+                totalOutgoing++;
+            } else {
+                continue; // No clasificable
+            }
+
+            const key = contactPhone.replace(/\D/g, '');
+            if (!byContact[key]) byContact[key] = [];
+            byContact[key].push({ ts, from, agentName, sender, recipient });
+        }
+
+        // Calcular pares (mensaje cliente → primera respuesta del agente)
+        // y otras métricas
+        const responsePairs: { waitMs: number; agentName: string; ts: number; weekday: number; hour: number }[] = [];
+        let abandonedConversations = 0;
+        let totalConversations = 0;
+        const pendingNow: { phone: string; waitMs: number; lastClientMessageAt: number }[] = [];
+        const now = Date.now();
+
+        for (const phone in byContact) {
+            totalConversations++;
+            const msgs = byContact[phone].sort((a, b) => a.ts - b.ts);
+
+            let lastClientMsg: Msg | null = null;
+            let everResponded = false;
+
+            for (const m of msgs) {
+                if (m.from === 'client') {
+                    // Si había uno pendiente sin responder y aparece otro, lo dejamos pasar (acumula esperando)
+                    if (!lastClientMsg) lastClientMsg = m;
+                } else {
+                    // Agente responde
+                    if (lastClientMsg) {
+                        const waitMs = m.ts - lastClientMsg.ts;
+                        if (waitMs >= 0) {
+                            const d = new Date(lastClientMsg.ts);
+                            responsePairs.push({
+                                waitMs,
+                                agentName: m.agentName || 'Desconocido',
+                                ts: lastClientMsg.ts,
+                                weekday: d.getDay(),
+                                hour: d.getHours(),
+                            });
+                            everResponded = true;
+                        }
+                        lastClientMsg = null;
+                    }
+                }
+            }
+
+            // Si quedó un cliente sin respuesta al final
+            if (lastClientMsg) {
+                const waitMs = now - lastClientMsg.ts;
+                pendingNow.push({ phone, waitMs, lastClientMessageAt: lastClientMsg.ts });
+                if (!everResponded) abandonedConversations++;
+            }
+        }
+
+        const sumWait = responsePairs.reduce((acc, p) => acc + p.waitMs, 0);
+        const avgFirstResponseMs = responsePairs.length > 0 ? sumWait / responsePairs.length : 0;
+
+        // Mediana
+        const sortedWaits = responsePairs.map(p => p.waitMs).sort((a, b) => a - b);
+        const medianWaitMs = sortedWaits.length > 0
+            ? sortedWaits[Math.floor(sortedWaits.length / 2)]
+            : 0;
+
+        // Pendientes >1h y >24h
+        const pendingOver1h = pendingNow.filter(p => p.waitMs > 3600 * 1000).length;
+        const pendingOver24h = pendingNow.filter(p => p.waitMs > 24 * 3600 * 1000).length;
+
+        // Top 5 pendientes más antiguos
+        const topPending = pendingNow
+            .sort((a, b) => b.waitMs - a.waitMs)
+            .slice(0, 10)
+            .map(p => ({ phone: p.phone, hoursWaiting: Math.round(p.waitMs / 3600000 * 10) / 10, since: new Date(p.lastClientMessageAt).toISOString() }));
+
+        // Ranking agentes
+        const agentMap: Record<string, { count: number; sumMs: number }> = {};
+        responsePairs.forEach(p => {
+            if (!agentMap[p.agentName]) agentMap[p.agentName] = { count: 0, sumMs: 0 };
+            agentMap[p.agentName].count++;
+            agentMap[p.agentName].sumMs += p.waitMs;
+        });
+        const agentRanking = Object.entries(agentMap).map(([name, data]) => ({
+            name,
+            responses: data.count,
+            avgMinutes: Math.round((data.sumMs / data.count) / 60000 * 10) / 10
+        })).sort((a, b) => a.avgMinutes - b.avgMinutes);
+
+        // Heatmap día×hora (matriz 7x24 con tiempo medio en minutos)
+        const heatmap: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+        const heatmapCount: number[][] = Array.from({ length: 7 }, () => Array(24).fill(0));
+        responsePairs.forEach(p => {
+            heatmap[p.weekday][p.hour] += p.waitMs / 60000;
+            heatmapCount[p.weekday][p.hour]++;
+        });
+        const heatmapAvg = heatmap.map((row, d) => row.map((sum, h) => {
+            const c = heatmapCount[d][h];
+            return c > 0 ? Math.round((sum / c) * 10) / 10 : null;
+        }));
+
+        // Tendencia: tiempo medio por día de los últimos N días
+        const dailyMap: Record<string, { count: number; sumMs: number }> = {};
+        responsePairs.forEach(p => {
+            const dateKey = new Date(p.ts).toISOString().split('T')[0];
+            if (!dailyMap[dateKey]) dailyMap[dateKey] = { count: 0, sumMs: 0 };
+            dailyMap[dateKey].count++;
+            dailyMap[dateKey].sumMs += p.waitMs;
+        });
+        const trend: { date: string; avgMinutes: number; count: number }[] = [];
+        for (let i = days - 1; i >= 0; i--) {
+            const d = new Date(now - i * 24 * 3600 * 1000);
+            const key = d.toISOString().split('T')[0];
+            const entry = dailyMap[key];
+            trend.push({
+                date: key,
+                avgMinutes: entry ? Math.round((entry.sumMs / entry.count) / 60000 * 10) / 10 : 0,
+                count: entry ? entry.count : 0,
+            });
+        }
+
+        // Health score (0-100): media ponderada
+        // - <5 min media -> 100, <30 min -> 80, <2h -> 60, <12h -> 40, peor -> 20
+        const avgMin = avgFirstResponseMs / 60000;
+        let healthScore = 100;
+        if (avgMin > 5) healthScore = 90;
+        if (avgMin > 15) healthScore = 80;
+        if (avgMin > 30) healthScore = 70;
+        if (avgMin > 60) healthScore = 60;
+        if (avgMin > 120) healthScore = 45;
+        if (avgMin > 360) healthScore = 30;
+        if (avgMin > 720) healthScore = 15;
+        const abandonedRatio = totalConversations > 0 ? abandonedConversations / totalConversations : 0;
+        if (abandonedRatio > 0.3) healthScore = Math.min(healthScore, 40);
+        if (abandonedRatio > 0.5) healthScore = Math.min(healthScore, 25);
+        if (pendingOver24h > 5) healthScore = Math.max(0, healthScore - 10);
+
+        // Recomendaciones automáticas
+        const recommendations: { level: 'info' | 'warning' | 'critical'; text: string }[] = [];
+        if (avgMin > 60) {
+            recommendations.push({ level: 'warning', text: `El tiempo medio de primera respuesta es de ${Math.round(avgMin)} minutos. Por encima de 1h pierdes leads. Considera reforzar el equipo o activar la IA Laura.` });
+        }
+        if (pendingOver24h > 0) {
+            recommendations.push({ level: 'critical', text: `Tienes ${pendingOver24h} cliente(s) esperando respuesta hace más de 24h. Atiéndelos cuanto antes para no perderlos.` });
+        }
+        if (pendingOver1h >= 5) {
+            recommendations.push({ level: 'warning', text: `${pendingOver1h} mensajes llevan más de 1h sin contestar. Activa notificaciones para tu equipo.` });
+        }
+        if (abandonedRatio > 0.15) {
+            recommendations.push({ level: 'warning', text: `El ${Math.round(abandonedRatio * 100)}% de las conversaciones quedan sin responder ningún día. Revisa los filtros de tu inbox y la asignación de departamentos.` });
+        }
+        if (agentRanking.length >= 2) {
+            const fastest = agentRanking[0];
+            const slowest = agentRanking[agentRanking.length - 1];
+            if (slowest.avgMinutes > fastest.avgMinutes * 2 && fastest.avgMinutes > 0) {
+                const ratio = Math.round(slowest.avgMinutes / fastest.avgMinutes * 10) / 10;
+                recommendations.push({ level: 'info', text: `${fastest.name} responde ${ratio}× más rápido que ${slowest.name}. Considera redistribuir conversaciones o formar al equipo.` });
+            }
+        }
+        // Mejor/peor hora
+        let worstHourAvg = 0; let worstHourLabel = '';
+        for (let d = 0; d < 7; d++) {
+            for (let h = 0; h < 24; h++) {
+                const v = heatmapAvg[d][h];
+                if (v !== null && v > worstHourAvg) {
+                    worstHourAvg = v;
+                    const wd = ['domingo', 'lunes', 'martes', 'miércoles', 'jueves', 'viernes', 'sábado'][d];
+                    worstHourLabel = `${wd} ${h}:00-${h + 1}:00`;
+                }
+            }
+        }
+        if (worstHourAvg > avgMin * 2 && worstHourAvg > 30) {
+            recommendations.push({ level: 'info', text: `La franja horaria más lenta es ${worstHourLabel} (media ${Math.round(worstHourAvg)} min). Refuerza ese turno o crea respuestas automáticas.` });
+        }
+
+        if (recommendations.length === 0) {
+            recommendations.push({ level: 'info', text: '¡Todo correcto! Tu equipo responde dentro de los parámetros saludables. Sigue así.' });
+        }
+
+        res.json({
+            success: true,
+            range: { days, since: new Date(cutoffMs).toISOString() },
+            kpis: {
+                avgFirstResponseMinutes: Math.round((avgFirstResponseMs / 60000) * 10) / 10,
+                medianFirstResponseMinutes: Math.round((medianWaitMs / 60000) * 10) / 10,
+                pendingOver1h,
+                pendingOver24h,
+                abandonedConversations,
+                abandonedRatio: Math.round(abandonedRatio * 1000) / 10, // %
+                totalIncoming,
+                totalOutgoing,
+                totalConversations,
+                totalResponses: responsePairs.length,
+                healthScore,
+            },
+            agentRanking,
+            heatmap: heatmapAvg,
+            trend,
+            topPending,
+            recommendations,
+        });
+    } catch (e: any) {
+        console.error('[Audit] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Lanzar el scheduler de campañas en intervalos y al arrancar
 setInterval(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error periódico:', e.message)), 300000); // cada 5 min
 setTimeout(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error inicial:', e.message)), 45000); // a los 45s del arranque

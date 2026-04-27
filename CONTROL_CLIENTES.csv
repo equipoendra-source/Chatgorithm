@@ -1,0 +1,17 @@
+﻿Cliente;Sector;Plan contratado;Mes;Precio cobrado (€);Render Backend (€);Render Frontend (€);Airtable (€);Cloudinary (€);Twilio (€);Gemini IA (€);Otros (€);Coste TOTAL (€);Margen (€);% Margen;Nº usuarios;Nº contactos;Nº mensajes IA;Notas
+EJEMPLO Taller Pérez;Taller mecánico;Profesional;Enero 2026;169,00;7,00;0,00;20,00;0,00;5,00;8,00;0,00;40,00;129,00;76,33%;4;850;1200;Cliente activo IA usándola mucho
+EJEMPLO Clínica Dental;Clínica;Esencial;Enero 2026;89,00;7,00;0,00;0,00;0,00;0,00;0,00;0,00;7,00;82,00;92,13%;2;320;0;Sin IA contratada
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+;;;;;;;;;;;;;;;;;;
+TOTAL DEL MES;;;;;;;;;;;;;;;;;;

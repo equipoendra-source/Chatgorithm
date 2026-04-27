@@ -1,0 +1,25 @@
+﻿Categoría;Servicio;Coste mínimo (€/mes);Coste típico (€/mes);Coste máximo (€/mes);Quién paga;Plan/Configuración recomendada;Notas
+INFRAESTRUCTURA;Render Backend;7,00;15,00;25,00;Tú;Starter o Standard;7$ Starter (web service básico). Standard 25$ si necesitas más RAM/CPU
+INFRAESTRUCTURA;Render Frontend (static);0,00;0,00;7,00;Tú;Static Site (gratis);Render hace los static sites GRATIS. Solo si pasas a SSR pagarías
+BASE DE DATOS;Airtable;0,00;20,00;45,00;Tú;Plus 20$ o Pro 45$;Free hasta 1.000 registros. Plus 50.000. Pro 125.000. Cliente con muchos contactos requiere Plus mínimo
+ALMACENAMIENTO;Cloudinary;0,00;0,00;15,00;Tú;Free Tier;25 GB y 25k transformaciones/mes GRATIS. Solo pagas si lo superas
+LLAMADAS VOIP;Twilio Voice;5,00;15,00;30,00;Tú;Pay-per-use;~0,013€/min llamadas salientes España. Variable según uso
+WHATSAPP META;Meta WABA - Service (cliente inicia);0,00;0,00;15,00;Cliente final;Cloud API;1.000 conv/mes GRATIS. Después ~0,015€/conv
+WHATSAPP META;Meta WABA - Utility (recordatorios);3,00;10,00;30,00;Cliente final;Cloud API;~0,028€/conversación. Para recordatorios de citas
+WHATSAPP META;Meta WABA - Marketing (campañas);0,00;25,00;120,00;Cliente final;Cloud API;~0,073€/conversación. Sólo si hace campañas
+IA;Google Gemini API;5,00;15,00;25,00;Tú;Gemini 2.0 Flash;~0,0001€/1k tokens entrada. Variable según volumen de conversaciones
+NOTIFICACIONES;Firebase FCM;0,00;0,00;0,00;Tú;Spark (gratis);Plan gratuito ilimitado para notificaciones push
+;;;;;;;
+TOTALES;TOTAL TÚ (sin Meta);17,00;65,00;147,00;;;Lo que pagas tú al mes por cliente
+TOTALES;TOTAL CLIENTE PAGA (Meta);3,00;35,00;165,00;;;Lo que el cliente paga directamente a Meta
+TOTALES;COSTE TOTAL POR CLIENTE;20,00;100,00;312,00;;;Suma de ambos
+;;;;;;;
+ANÁLISIS DE MARGEN;Plan Esencial 89€/mes;;;;;;Margen estimado: 89 - 65 = 24€ (27%)
+ANÁLISIS DE MARGEN;Plan Profesional 169€/mes;;;;;;Margen estimado: 169 - 75 = 94€ (56%)
+ANÁLISIS DE MARGEN;Plan Negocio 279€/mes;;;;;;Margen estimado: 279 - 110 = 169€ (61%)
+;;;;;;;
+ESCALADO POR Nº CLIENTES;5 clientes Pro;;;;;;Ingresos 845€ - Costes 375€ = 470€/mes margen
+ESCALADO POR Nº CLIENTES;15 clientes Pro;;;;;;Ingresos 2.535€ - Costes 1.125€ = 1.410€/mes margen
+ESCALADO POR Nº CLIENTES;30 clientes Pro;;;;;;Ingresos 5.070€ - Costes 2.250€ = 2.820€/mes margen
+ESCALADO POR Nº CLIENTES;50 clientes Pro;;;;;;Ingresos 8.450€ - Costes 3.750€ = 4.700€/mes margen
+ESCALADO POR Nº CLIENTES;100 clientes mix;;;;;;Ingresos ~17.000€ - Costes ~7.500€ = 9.500€/mes margen

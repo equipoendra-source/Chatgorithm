@@ -8,10 +8,13 @@ import {
   Calendar,
   AlertCircle,
   Loader2,
-  ServerCrash
+  ServerCrash,
+  Activity,
+  Lock
 } from 'lucide-react';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
+import ResponseTimeAudit from './ResponseTimeAudit';
 
 const AnalyticsDashboard = () => {
   const { theme } = useTheme();
@@ -21,6 +24,21 @@ const AnalyticsDashboard = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [missingData, setMissingData] = useState(false);
+
+  // Pestañas: 'general' (analíticas existentes) | 'audit' (módulo premium)
+  const [activeTab, setActiveTab] = useState<'general' | 'audit'>('general');
+
+  // Estado de las features premium
+  const [features, setFeatures] = useState<Record<string, boolean> | null>(null);
+  const auditEnabled = features ? !!features.feature_response_audit : null;
+
+  useEffect(() => {
+    // Cargar features premium
+    fetch(`${API_URL}/features`)
+      .then(r => r.json())
+      .then(f => setFeatures(f || {}))
+      .catch(() => setFeatures({}));
+  }, []);
 
   useEffect(() => {
     fetch(`${API_URL}/analytics`)
@@ -47,22 +65,58 @@ const AnalyticsDashboard = () => {
 
   // --- Renderizado de Estados ---
 
+  // Wrapper con tabs (siempre visible)
+  const TabsBar = () => (
+    <div className={`flex gap-1 mb-6 p-1 rounded-xl max-w-2xl mx-auto ${isDark ? 'bg-slate-800/60 border border-slate-700' : 'bg-slate-100 border border-slate-200'}`}>
+      <button
+        onClick={() => setActiveTab('general')}
+        className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-semibold text-sm transition-all ${activeTab === 'general' ? (isDark ? 'bg-indigo-600 text-white shadow-lg' : 'bg-white text-slate-800 shadow-sm') : (isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+      >
+        <BarChart3 size={16} /> General
+      </button>
+      <button
+        onClick={() => setActiveTab('audit')}
+        className={`flex-1 flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg font-semibold text-sm transition-all ${activeTab === 'audit' ? (isDark ? 'bg-amber-600 text-white shadow-lg' : 'bg-white text-slate-800 shadow-sm') : (isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')}`}
+      >
+        {auditEnabled ? <Activity size={16} /> : <Lock size={14} />}
+        Auditoría de respuesta
+        {auditEnabled === false && <span className={`text-[9px] px-1.5 py-0.5 rounded-full font-bold ${activeTab === 'audit' ? 'bg-amber-200 text-amber-800' : (isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-100 text-amber-700')}`}>PRO</span>}
+      </button>
+    </div>
+  );
+
+  // Si está en pestaña Auditoría, render directo (no depende de carga de analytics)
+  if (activeTab === 'audit') {
+    return (
+      <div className="max-w-6xl mx-auto pb-10">
+        <TabsBar />
+        <ResponseTimeAudit isFeatureEnabled={auditEnabled} />
+      </div>
+    );
+  }
+
   if (loading) {
     return (
-      <div className="w-full h-64 flex flex-col items-center justify-center text-slate-400 gap-2">
-        <Loader2 className="animate-spin" size={32} />
-        <p className="text-sm font-medium">Calculando métricas...</p>
+      <div className="max-w-6xl mx-auto pb-10">
+        <TabsBar />
+        <div className="w-full h-64 flex flex-col items-center justify-center text-slate-400 gap-2">
+          <Loader2 className="animate-spin" size={32} />
+          <p className="text-sm font-medium">Calculando métricas...</p>
+        </div>
       </div>
     );
   }
 
   if (error) {
     return (
-      <div className={`w-full p-8 flex flex-col items-center justify-center text-center rounded-2xl border ${isDark ? 'glass-panel border-red-500/20' : 'bg-red-50 border-red-100'}`}>
-        <AlertCircle className="text-red-400 mb-3" size={48} />
-        <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Error de conexión</h3>
-        <p className={`text-sm mt-1 max-w-md ${isDark ? 'text-slate-300' : 'text-slate-500'}`}>{error}</p>
-        <button onClick={() => window.location.reload()} className={`mt-4 px-4 py-2 rounded-lg text-sm font-bold transition ${isDark ? 'bg-slate-800 text-white hover:bg-slate-700 border border-slate-600' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>Reintentar</button>
+      <div className="max-w-6xl mx-auto pb-10">
+        <TabsBar />
+        <div className={`w-full p-8 flex flex-col items-center justify-center text-center rounded-2xl border ${isDark ? 'glass-panel border-red-500/20' : 'bg-red-50 border-red-100'}`}>
+          <AlertCircle className="text-red-400 mb-3" size={48} />
+          <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Error de conexión</h3>
+          <p className={`text-sm mt-1 max-w-md ${isDark ? 'text-slate-300' : 'text-slate-500'}`}>{error}</p>
+          <button onClick={() => window.location.reload()} className={`mt-4 px-4 py-2 rounded-lg text-sm font-bold transition ${isDark ? 'bg-slate-800 text-white hover:bg-slate-700 border border-slate-600' : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'}`}>Reintentar</button>
+        </div>
       </div>
     );
   }
@@ -70,14 +124,17 @@ const AnalyticsDashboard = () => {
   // AVISO ESPECÍFICO: El servidor responde pero sin datos (Ruta vacía)
   if (missingData) {
     return (
-      <div className={`w-full p-8 flex flex-col items-center justify-center text-center rounded-2xl border ${isDark ? 'glass-panel border-yellow-500/20' : 'bg-yellow-50 border-yellow-100'}`}>
-        <ServerCrash className="text-yellow-500 mb-3" size={48} />
-        <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Falta Lógica en el Servidor</h3>
-        <p className={`text-sm mt-2 max-w-md ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
-          La ruta <code>/api/analytics</code> existe pero devuelve datos vacíos.
-          <br />Probablemente copiaste una versión resumida del archivo <code>index.ts</code>.
-        </p>
-        <p className="text-xs text-slate-400 mt-4">Copia y pega el bloque de código de Analíticas en tu servidor.</p>
+      <div className="max-w-6xl mx-auto pb-10">
+        <TabsBar />
+        <div className={`w-full p-8 flex flex-col items-center justify-center text-center rounded-2xl border ${isDark ? 'glass-panel border-yellow-500/20' : 'bg-yellow-50 border-yellow-100'}`}>
+          <ServerCrash className="text-yellow-500 mb-3" size={48} />
+          <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Falta Lógica en el Servidor</h3>
+          <p className={`text-sm mt-2 max-w-md ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+            La ruta <code>/api/analytics</code> existe pero devuelve datos vacíos.
+            <br />Probablemente copiaste una versión resumida del archivo <code>index.ts</code>.
+          </p>
+          <p className="text-xs text-slate-400 mt-4">Copia y pega el bloque de código de Analíticas en tu servidor.</p>
+        </div>
       </div>
     );
 
@@ -95,6 +152,8 @@ const AnalyticsDashboard = () => {
 
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-10">
+
+      <TabsBar />
 
       {/* Header */}
       <div className={`border-b pb-4 ${isDark ? 'border-slate-700' : 'border-slate-200'}`}>
