@@ -116,6 +116,9 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
     const [campaigns, setCampaigns] = useState<CampaignSummary[]>([]);
     const [globalStats, setGlobalStats] = useState<GlobalStats | null>(null);
     const [loading, setLoading] = useState(true);
+    const [refreshing, setRefreshing] = useState(false);
+    const [lastUpdate, setLastUpdate] = useState<Date | null>(null);
+    const [, setTick] = useState(0); // fuerza re-render para actualizar "hace Xs"
     const [filterStatus, setFilterStatus] = useState<string>('all');
     const [searchQuery, setSearchQuery] = useState('');
 
@@ -124,8 +127,10 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
     const [viewingCampaignId, setViewingCampaignId] = useState<string | null>(null);
 
     // ----- Cargar datos -----
-    const loadCampaigns = async () => {
-        setLoading(true);
+    // silent=true → no muestra spinner, solo actualiza en segundo plano
+    const loadCampaigns = async (silent = false) => {
+        if (silent) setRefreshing(true);
+        else setLoading(true);
         try {
             const [r1, r2] = await Promise.all([
                 fetch(`${API_URL}/campaigns`),
@@ -133,18 +138,44 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
             ]);
             if (r1.ok) setCampaigns(await r1.json());
             if (r2.ok) setGlobalStats(await r2.json());
+            setLastUpdate(new Date());
         } catch (e) {
             console.error('Error cargando campañas:', e);
         } finally {
-            setLoading(false);
+            if (silent) setRefreshing(false);
+            else setLoading(false);
         }
     };
 
     useEffect(() => {
         loadCampaigns();
-        const interval = setInterval(loadCampaigns, 15000); // refrescar cada 15s
+        // Refresco silencioso cada 15s
+        const interval = setInterval(() => {
+            // Si el wizard está abierto, no refresques (evita perder datos del usuario al re-render)
+            if (!showWizard && !viewingCampaignId) {
+                loadCampaigns(true);
+            }
+        }, 15000);
         return () => clearInterval(interval);
+    }, [showWizard, viewingCampaignId]);
+
+    // Tick cada segundo para que "hace Xs" se actualice
+    useEffect(() => {
+        const t = setInterval(() => setTick(x => x + 1), 1000);
+        return () => clearInterval(t);
     }, []);
+
+    // Texto del indicador "actualizado hace..."
+    const refreshLabel = (() => {
+        if (!lastUpdate) return '';
+        const diffMs = Date.now() - lastUpdate.getTime();
+        const seconds = Math.floor(diffMs / 1000);
+        if (seconds < 5) return 'justo ahora';
+        if (seconds < 60) return `hace ${seconds}s`;
+        const min = Math.floor(seconds / 60);
+        if (min < 60) return `hace ${min} min`;
+        return lastUpdate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' });
+    })();
 
     // ----- Acciones -----
     const handleSendNow = async (id: string) => {
@@ -260,7 +291,17 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
                         </p>
                     </div>
                 </div>
-                {!readOnly && (
+                <div className="flex items-center gap-3">
+                    {/* Indicador de auto-refresco */}
+                    {lastUpdate && (
+                        <div
+                            className={`hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium ${isDark ? 'bg-slate-800/50 text-slate-400' : 'bg-slate-100 text-slate-500'}`}
+                            title={`Última actualización: ${lastUpdate.toLocaleTimeString('es-ES')}`}>
+                            <span className={`w-2 h-2 rounded-full ${refreshing ? 'bg-orange-500 animate-pulse' : 'bg-green-500'}`}></span>
+                            {refreshing ? 'Actualizando...' : `Actualizado ${refreshLabel}`}
+                        </div>
+                    )}
+                    {!readOnly && (
                     <button
                         onClick={handleNew}
                         className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-pink-600 hover:shadow-lg hover:shadow-orange-500/30 text-white font-semibold transition active:scale-[0.98]">
@@ -268,6 +309,7 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
                         Nueva campaña
                     </button>
                 )}
+                </div>
             </div>
 
             {/* Stats globales */}
