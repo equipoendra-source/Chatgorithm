@@ -24,6 +24,8 @@
     "@twilio/voice-sdk": "^2.10.1",
     "driver.js": "^1.4.0",
     "emoji-picker-react": "^4.5.16",
+    "html2canvas": "^1.4.1",
+    "jspdf": "^2.5.2",
     "lucide-react": "^0.294.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
