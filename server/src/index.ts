@@ -1611,7 +1611,22 @@ async function processAI(text: string, contactPhone: string, contactName: string
             const nombreContexto = nombreConocido
                 ? `\n\n⚠️ DATO DEL CLIENTE: Su nombre ya es conocido: "${contactName}". NO le preguntes el nombre.`
                 : `\n\n⚠️ DATO DEL CLIENTE: Nombre desconocido. Si va a reservar cita, pregúntale su nombre antes de llamar a book_appointment.`;
-            const systemPrompt = rawPrompt + nombreContexto;
+
+            // RAG: buscar info relevante en la base de conocimiento del negocio
+            let ragContext = '';
+            try {
+                const relevantChunks = await searchKnowledge(text, 4);
+                if (relevantChunks.length > 0) {
+                    ragContext = '\n\n## 📚 INFORMACIÓN RELEVANTE DEL NEGOCIO (consulta esto antes de responder):\n' +
+                        relevantChunks.map((c, i) => `[${i + 1}] (de "${c.source}"):\n${c.text}`).join('\n\n---\n\n') +
+                        '\n\nUSA esta información para responder con precisión. Si la pregunta del cliente NO está cubierta por esta información, NO te la inventes — dilo claramente y ofrece pasar a un humano.';
+                    console.log(`📚 [RAG] ${relevantChunks.length} chunks relevantes inyectados (top score: ${relevantChunks[0].score.toFixed(2)})`);
+                }
+            } catch (e: any) {
+                console.error('[RAG] Error buscando contexto:', e.message);
+            }
+
+            const systemPrompt = rawPrompt + nombreContexto + ragContext;
 
             const model = genAI.getGenerativeModel({
                 model: MODEL_NAME,
@@ -3826,6 +3841,291 @@ app.get('/api/campaigns-stats', async (_req, res) => {
             totalSent, totalFailed, totalSkipped,
             totalCost: Number(totalCost.toFixed(2))
         });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// ==========================================
+//  RAG — Base de conocimiento de Laura (subida de documentos)
+// ==========================================
+// Tabla Airtable: BotKnowledge
+//   chunkText (Long text)  - el trozo de texto
+//   embedding (Long text)  - vector serializado como JSON
+//   source    (Single line text) - nombre del documento de origen
+//   uploadedAt (Date with time)
+//   chunkIndex (Number) - orden dentro del documento
+
+const TABLE_BOT_KNOWLEDGE = 'BotKnowledge';
+
+// Divide texto en chunks de ~500 palabras con solapamiento de 50 palabras (mejor recall)
+function chunkTextForRag(text: string, wordsPerChunk = 500, overlap = 50): string[] {
+    if (!text) return [];
+    // Normalizamos espacios y saltos de línea
+    const cleaned = text.replace(/\r/g, '').replace(/\n{3,}/g, '\n\n').replace(/[ \t]+/g, ' ').trim();
+    const words = cleaned.split(/\s+/);
+    if (words.length <= wordsPerChunk) return [cleaned];
+    const chunks: string[] = [];
+    let i = 0;
+    while (i < words.length) {
+        const slice = words.slice(i, i + wordsPerChunk);
+        chunks.push(slice.join(' '));
+        if (i + wordsPerChunk >= words.length) break;
+        i += (wordsPerChunk - overlap);
+    }
+    return chunks;
+}
+
+// Llama a la API de embeddings de Google (text-embedding-004)
+// Devuelve null si falla
+async function computeEmbedding(text: string): Promise<number[] | null> {
+    if (!geminiApiKey || !genAI) return null;
+    try {
+        const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
+        const result = await model.embedContent(text);
+        return result.embedding.values || null;
+    } catch (e: any) {
+        console.error('[Embedding] Error:', e.message);
+        return null;
+    }
+}
+
+// Similitud coseno entre dos vectores
+function cosineSimilarity(a: number[], b: number[]): number {
+    if (a.length !== b.length) return 0;
+    let dot = 0, magA = 0, magB = 0;
+    for (let i = 0; i < a.length; i++) {
+        dot += a[i] * b[i];
+        magA += a[i] * a[i];
+        magB += b[i] * b[i];
+    }
+    const denom = Math.sqrt(magA) * Math.sqrt(magB);
+    return denom === 0 ? 0 : dot / denom;
+}
+
+// Busca los topK chunks más relevantes para una pregunta
+async function searchKnowledge(query: string, topK = 4): Promise<{ text: string; source: string; score: number }[]> {
+    if (!base) return [];
+    try {
+        const queryEmbedding = await computeEmbedding(query);
+        if (!queryEmbedding) return [];
+
+        const records = await base(TABLE_BOT_KNOWLEDGE).select({ maxRecords: 5000 }).all();
+        if (records.length === 0) return [];
+
+        const scored = records.map(r => {
+            const embStr = r.get('embedding') as string;
+            if (!embStr) return null;
+            try {
+                const emb = JSON.parse(embStr);
+                if (!Array.isArray(emb)) return null;
+                const score = cosineSimilarity(queryEmbedding, emb);
+                return {
+                    text: (r.get('chunkText') as string) || '',
+                    source: (r.get('source') as string) || '',
+                    score
+                };
+            } catch { return null; }
+        }).filter((x): x is { text: string; source: string; score: number } => x !== null);
+
+        scored.sort((a, b) => b.score - a.score);
+        // Solo devolvemos resultados con score relevante (>0.5)
+        return scored.slice(0, topK).filter(x => x.score > 0.5);
+    } catch (e: any) {
+        console.error('[searchKnowledge] Error:', e.message);
+        return [];
+    }
+}
+
+// Endpoint: subir documento y procesarlo
+app.post('/api/bot/knowledge/upload', upload.single('file'), async (req: any, res: any) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    if (!req.file) return res.status(400).json({ error: 'No se recibió archivo' });
+    if (!geminiApiKey) return res.status(500).json({ error: 'GEMINI_API_KEY no configurada' });
+
+    const fname = (req.file.originalname || 'documento').trim();
+    const ext = fname.split('.').pop()?.toLowerCase() || '';
+
+    try {
+        let text = '';
+        if (ext === 'txt' || ext === 'md') {
+            text = req.file.buffer.toString('utf-8');
+        } else if (ext === 'pdf') {
+            const pdfParse = require('pdf-parse');
+            const result = await pdfParse(req.file.buffer);
+            text = result.text || '';
+        } else if (ext === 'docx') {
+            const mammoth = require('mammoth');
+            const result = await mammoth.extractRawText({ buffer: req.file.buffer });
+            text = result.value || '';
+        } else {
+            return res.status(400).json({ error: `Formato no soportado: ${ext}. Usa PDF, DOCX, TXT o MD.` });
+        }
+
+        if (!text.trim()) return res.status(400).json({ error: 'No se pudo extraer texto del documento (¿está vacío o protegido?)' });
+
+        const chunks = chunkTextForRag(text);
+        console.log(`📚 [BotKnowledge] Procesando "${fname}" — ${chunks.length} chunks`);
+
+        // Borrar chunks previos del mismo source (re-upload)
+        try {
+            const existing = await base(TABLE_BOT_KNOWLEDGE).select({
+                filterByFormula: `{source}='${fname.replace(/'/g, "")}'`,
+                maxRecords: 500
+            }).all();
+            for (let i = 0; i < existing.length; i += 10) {
+                const ids = existing.slice(i, i + 10).map(r => r.id);
+                if (ids.length) await base(TABLE_BOT_KNOWLEDGE).destroy(ids).catch(() => { });
+            }
+        } catch { }
+
+        // Generar embeddings y guardar (en lotes de 10 a Airtable)
+        const records: any[] = [];
+        const now = new Date().toISOString();
+        let processed = 0;
+        for (let i = 0; i < chunks.length; i++) {
+            const emb = await computeEmbedding(chunks[i]);
+            if (!emb) continue;
+            records.push({
+                fields: {
+                    chunkText: chunks[i],
+                    embedding: JSON.stringify(emb),
+                    source: fname,
+                    uploadedAt: now,
+                    chunkIndex: i
+                }
+            });
+            processed++;
+            // Insertar en lotes de 10
+            if (records.length === 10 || i === chunks.length - 1) {
+                try { await base(TABLE_BOT_KNOWLEDGE).create(records as any); }
+                catch (e: any) { console.error('[BotKnowledge] Error guardando lote:', e.message); }
+                records.length = 0;
+            }
+            // Pequeña pausa para no saturar la API de embeddings
+            if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 100));
+        }
+
+        res.json({
+            success: true,
+            source: fname,
+            chunksTotal: chunks.length,
+            chunksProcessed: processed,
+            sizeChars: text.length
+        });
+    } catch (e: any) {
+        console.error('[BotKnowledge] Error procesando:', e.message);
+        res.status(500).json({ error: 'Error procesando documento: ' + e.message });
+    }
+});
+
+// Endpoint: listar documentos (agrupado por source)
+app.get('/api/bot/knowledge', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const records = await base(TABLE_BOT_KNOWLEDGE).select({ maxRecords: 5000 }).all();
+        const grouped: Record<string, { source: string; chunks: number; uploadedAt: string; sizeChars: number }> = {};
+        records.forEach(r => {
+            const source = (r.get('source') as string) || 'sin nombre';
+            const text = (r.get('chunkText') as string) || '';
+            const ts = (r.get('uploadedAt') as string) || '';
+            if (!grouped[source]) {
+                grouped[source] = { source, chunks: 0, uploadedAt: ts, sizeChars: 0 };
+            }
+            grouped[source].chunks++;
+            grouped[source].sizeChars += text.length;
+            if (ts > grouped[source].uploadedAt) grouped[source].uploadedAt = ts;
+        });
+        res.json(Object.values(grouped).sort((a, b) => b.uploadedAt.localeCompare(a.uploadedAt)));
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Endpoint: borrar todos los chunks de un documento
+app.delete('/api/bot/knowledge/:source', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const source = decodeURIComponent(req.params.source);
+        const records = await base(TABLE_BOT_KNOWLEDGE).select({
+            filterByFormula: `{source}='${source.replace(/'/g, "")}'`,
+            maxRecords: 1000
+        }).all();
+        for (let i = 0; i < records.length; i += 10) {
+            const ids = records.slice(i, i + 10).map(r => r.id);
+            if (ids.length) await base(TABLE_BOT_KNOWLEDGE).destroy(ids).catch(() => { });
+        }
+        res.json({ success: true, deletedChunks: records.length });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Endpoint del WIZARD de configuración de Laura por sector
+app.post('/api/bot/setup-wizard', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const {
+        sector, businessName, services, hours, booksAppointments,
+        dataToCollect, tone, extraInfo
+    } = req.body || {};
+
+    if (!sector || !businessName) {
+        return res.status(400).json({ error: 'sector y businessName son obligatorios' });
+    }
+
+    // Plantillas base por sector
+    const sectorIntros: Record<string, string> = {
+        taller: `Eres "Laura", asistente virtual de **${businessName}**, un taller mecánico / concesionario. Eres amable, profesional y eficiente.`,
+        clinica_dental: `Eres "Laura", asistente virtual de la **clínica dental ${businessName}**. Eres cercana, empática y profesional. Tu trato debe transmitir confianza y tranquilidad.`,
+        peluqueria: `Eres "Laura", asistente virtual de **${businessName}**, un centro de peluquería y estética. Eres amable, simpática y cercana.`,
+        clinica_medica: `Eres "Laura", asistente virtual de **${businessName}**, un centro médico / fisioterapia. Eres profesional, empática y respetuosa con la información sensible.`,
+        gestoria: `Eres "Laura", asistente virtual de **${businessName}**, una gestoría/asesoría. Eres profesional, formal y precisa.`,
+        inmobiliaria: `Eres "Laura", asistente virtual de **${businessName}**, una inmobiliaria. Eres comercial, atenta y orientada a resolver dudas sobre propiedades.`,
+        academia: `Eres "Laura", asistente virtual de **${businessName}**, una academia/centro de formación. Eres motivadora, clara y orientada a resolver dudas sobre cursos.`,
+        veterinario: `Eres "Laura", asistente virtual de **${businessName}**, un centro veterinario. Eres cariñosa, empática y profesional cuando se trata de mascotas.`,
+        otro: `Eres "Laura", asistente virtual de **${businessName}**. Eres amable, profesional y eficiente.`
+    };
+
+    const intro = sectorIntros[sector] || sectorIntros.otro;
+    const toneInstr = tone === 'cercano' ? 'Tu tono es cercano y amigable, tuteas al cliente cuando es apropiado.' :
+        tone === 'divertido' ? 'Tu tono es divertido y desenfadado, con emojis frecuentes.' :
+            'Tu tono es formal y profesional. Trata al cliente de usted.';
+
+    const dataInstr = (dataToCollect && Array.isArray(dataToCollect) && dataToCollect.length > 0)
+        ? `\n\n## 📋 DATOS QUE DEBES PEDIR ANTES DE RESERVAR/CONFIRMAR:\n${dataToCollect.map((d: string, i: number) => `${i + 1}. ${d}`).join('\n')}`
+        : '';
+
+    const servicesInstr = services && services.trim()
+        ? `\n\n## 🛠️ SERVICIOS QUE OFRECEMOS:\n${services.trim()}`
+        : '';
+
+    const hoursInstr = hours && hours.trim()
+        ? `\n\n## 🕒 HORARIO DE ATENCIÓN:\n${hours.trim()}`
+        : '';
+
+    const extraInstr = extraInfo && extraInfo.trim()
+        ? `\n\n## ℹ️ INFORMACIÓN IMPORTANTE DEL NEGOCIO:\n${extraInfo.trim()}`
+        : '';
+
+    const bookingFlow = booksAppointments
+        ? `\n\n## 📅 GESTIÓN DE CITAS\n- Si el cliente pide cita: llama get_available_days() para ver días disponibles\n- Tras seleccionar día: llama get_available_appointments(date)\n- Pide los datos necesarios uno a uno\n- Llama book_appointment() cuando tengas todos los datos\n- Tras reservar, llama stop_conversation()`
+        : `\n\n## ❌ NO GESTIONAS CITAS\nEste negocio NO usa la agenda automática. Si un cliente pide cita, pásalo a humano con assign_department("Admin").`;
+
+    const baseRules = `\n\n## 🚨 REGLAS ABSOLUTAS\n- NUNCA muestres IDs internos o códigos técnicos (ej: rec-XXXXX).\n- NUNCA inventes datos. Si no sabes algo, pásalo a humano con assign_department("Admin").\n- SIEMPRE saluda en tu primer mensaje.\n- Si te preguntan algo del negocio, busca primero en la información disponible. Si no aparece, dilo claramente.`;
+
+    const responseFormat = `\n\n## FORMATO DE RESPUESTA (OBLIGATORIO)\nTu respuesta SIEMPRE debe ser JSON válido con esta estructura exacta:\n{\n  "customer_message": "Mensaje cordial para el cliente (emojis permitidos)",\n  "internal_control": { "intent": "BOOKING|SALES|SUPPORT", "status": "active|completed" }\n}\nNO respondas nunca con texto plano. SOLO JSON válido.`;
+
+    const fullPrompt = `Fecha y hora actual: {{DATE_PLACEHOLDER}} (zona horaria: Madrid, España)\n\n${intro}\n\n${toneInstr}${baseRules}${dataInstr}${servicesInstr}${hoursInstr}${extraInstr}${bookingFlow}${responseFormat}`;
+
+    // Guardar en BotSettings
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            await base('BotSettings').update([{ id: r[0].id, fields: { Value: fullPrompt } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'system_prompt', Value: fullPrompt } }]);
+        }
+        res.json({ success: true, prompt: fullPrompt });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }

@@ -3,7 +3,7 @@ import {
     User, Plus, Briefcase, ArrowLeft, Trash2, ShieldAlert, CheckCircle,
     LayoutList, RefreshCw, Pencil, X, MessageSquare, Tag, Zap, BarChart3,
     Calendar, Bot, Save, Bell, UserPlus, Database, Upload, Clock, Palette, Sun, Moon, Lock,
-    ChevronDown, ChevronUp, Wrench
+    ChevronDown, ChevronUp, ChevronRight, Wrench
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -11,6 +11,8 @@ import { App as CapacitorApp } from '@capacitor/app';
 // @ts-ignore
 import WhatsAppTemplatesManager from './WhatsAppTemplatesManager';
 import ContactImportWizard from './ContactImportWizard';
+import BotConfigWizard from './BotConfigWizard';
+import BotKnowledgeManager from './BotKnowledgeManager';
 // @ts-ignore
 import AnalyticsDashboard from './AnalyticsDashboard';
 // @ts-ignore
@@ -86,6 +88,10 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
     // Diagnóstico avanzado de notificaciones (colapsable)
     const [showDiagnostic, setShowDiagnostic] = useState(false);
+
+    // Wizard de configuración de Laura
+    const [showBotWizard, setShowBotWizard] = useState(false);
+    const [showAdvancedPrompt, setShowAdvancedPrompt] = useState(false);
 
     // --- EFECTOS DE CARGA ---
     useEffect(() => {
@@ -384,7 +390,88 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                     {activeTab === 'whatsapp' && <WhatsAppTemplatesManager />}
                     {activeTab === 'analytics' && <AnalyticsDashboard />}
                     {activeTab === 'agenda' && <CalendarDashboard />}
-                    {activeTab === 'bot_config' && (<div className={`max-w-4xl mx-auto p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="mb-6"><h2 className={`text-xl font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><Bot className="w-6 h-6 text-teal-600" /> Configuración del Cerebro IA</h2><p className="text-sm text-slate-500">Define la personalidad, reglas y tono del asistente virtual.</p></div>{isLoadingPrompt ? (<div className="p-10 text-center text-slate-400"><RefreshCw className="animate-spin inline mr-2" /> Cargando prompt...</div>) : (<div className="space-y-4"><label className="text-xs font-bold text-slate-400 uppercase block">Instrucciones del Sistema (System Prompt)</label><textarea value={botPrompt} onChange={(e) => setBotPrompt(e.target.value)} className={`w-full h-96 p-4 border rounded-xl font-mono text-sm focus:ring-2 focus:ring-teal-500 outline-none resize-none leading-relaxed ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'}`} placeholder="Escribe aquí las instrucciones para la IA..." /><div className="flex justify-end"><button onClick={handleSavePrompt} className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg shadow-teal-100 active:scale-95 transition-all flex items-center gap-2"><Save size={18} /> Guardar Cambios</button></div></div>)}</div>)}
+                    {activeTab === 'bot_config' && (
+                        <div className="max-w-4xl mx-auto space-y-6">
+                            {/* Cabecera */}
+                            <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+                                <div className="flex items-start gap-3 mb-4">
+                                    <div className="p-2.5 rounded-xl bg-gradient-to-br from-teal-500 to-cyan-600 shadow-lg">
+                                        <Bot className="w-5 h-5 text-white" />
+                                    </div>
+                                    <div>
+                                        <h2 className={`text-xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Configuración de Laura (IA)</h2>
+                                        <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Personaliza el asistente virtual para tu negocio.</p>
+                                    </div>
+                                </div>
+
+                                {/* Botón principal: wizard */}
+                                <button
+                                    onClick={() => setShowBotWizard(true)}
+                                    className="w-full p-5 rounded-xl bg-gradient-to-r from-purple-500 to-pink-600 text-white text-left hover:shadow-lg transition active:scale-[0.99]">
+                                    <div className="flex items-center gap-3">
+                                        <div className="p-2 rounded-lg bg-white/20">
+                                            <Bot className="w-5 h-5" />
+                                        </div>
+                                        <div className="flex-1">
+                                            <div className="font-bold">🪄 Iniciar wizard de configuración</div>
+                                            <div className="text-xs opacity-90 mt-0.5">Configura Laura en 7 pasos según tu sector (taller, clínica, peluquería...)</div>
+                                        </div>
+                                        <ChevronRight className="w-5 h-5" />
+                                    </div>
+                                </button>
+                            </div>
+
+                            {/* Manager de documentos */}
+                            <BotKnowledgeManager />
+
+                            {/* Edición avanzada del prompt (colapsable) */}
+                            <div>
+                                <button
+                                    onClick={() => setShowAdvancedPrompt(!showAdvancedPrompt)}
+                                    className={`w-full flex items-center justify-between gap-2 px-4 py-3 rounded-xl border text-sm font-semibold transition-all ${isDark ? 'bg-slate-800/40 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
+                                    <div className="flex items-center gap-2">
+                                        <Bot size={16} className={isDark ? 'text-slate-500' : 'text-slate-400'} />
+                                        <span>Editar prompt avanzado</span>
+                                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>AVANZADO</span>
+                                    </div>
+                                    {showAdvancedPrompt ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                </button>
+                                {showAdvancedPrompt && (
+                                    <div className={`mt-3 p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+                                        <div className={`mb-4 px-3 py-2 rounded-lg text-xs ${isDark ? 'bg-amber-500/10 text-amber-300' : 'bg-amber-50 text-amber-800'}`}>
+                                            ⚠️ Solo edita esto si sabes lo que haces. El wizard genera un prompt optimizado automáticamente.
+                                        </div>
+                                        {isLoadingPrompt ? (
+                                            <div className="p-10 text-center text-slate-400"><RefreshCw className="animate-spin inline mr-2" /> Cargando prompt...</div>
+                                        ) : (
+                                            <div className="space-y-4">
+                                                <label className={`text-xs font-bold uppercase block ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Prompt del sistema (avanzado)</label>
+                                                <textarea
+                                                    value={botPrompt}
+                                                    onChange={(e) => setBotPrompt(e.target.value)}
+                                                    className={`w-full h-96 p-4 border rounded-xl font-mono text-sm focus:ring-2 focus:ring-teal-500 outline-none resize-none leading-relaxed ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-700'}`}
+                                                    placeholder="Escribe aquí las instrucciones para la IA..."
+                                                />
+                                                <div className="flex justify-end">
+                                                    <button onClick={handleSavePrompt} className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg active:scale-95 transition-all flex items-center gap-2">
+                                                        <Save size={18} /> Guardar prompt manual
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Wizard modal */}
+                            {showBotWizard && (
+                                <BotConfigWizard
+                                    onClose={() => setShowBotWizard(false)}
+                                    onSaved={(newPrompt) => { setBotPrompt(newPrompt); setShowBotWizard(false); }}
+                                />
+                            )}
+                        </div>
+                    )}
                     {activeTab === 'notifications' && (
                         <div className={`max-w-2xl mx-auto p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
                             <div className="flex justify-between items-center mb-6">
