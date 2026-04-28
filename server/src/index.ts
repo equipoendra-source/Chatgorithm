@@ -1402,10 +1402,10 @@ async function getAvailableDays() {
     }
 }
 
-async function bookAppointment(optionIndex: number, clientPhone: string, clientName: string, field1: string = '', field2: string = '', field3: string = '', field4: string = '') {
+async function bookAppointment(optionIndex: number, clientPhone: string, clientName: string, field1: string = '', field2: string = '', field3: string = '', field4: string = '', field5: string = '') {
     if (!base) return "Error BD";
 
-    console.log(`📅 [Book] Intentando reservar opción ${optionIndex} para ${clientPhone} | Datos: ${field1} | ${field2} | ${field3} | ${field4}`);
+    console.log(`📅 [Book] Intentando reservar opción ${optionIndex} para ${clientPhone} | Datos: ${field1} | ${field2} | ${field3} | ${field4} | ${field5}`);
 
     // Intentar obtener cache (primero memoria, luego Airtable)
     const userMap = await getAppointmentCache(clientPhone);
@@ -1439,8 +1439,8 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
         const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
         console.log(`📅 [Book] Actualizando cita a Booked...`);
-        // Mapeo: los 4 campos genéricos se guardan en las columnas existentes de Airtable.
-        // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra) por compatibilidad,
+        // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
+        // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra, Notas) por compatibilidad,
         // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels
         await base('Appointments').update([{
             id: realId,
@@ -1451,7 +1451,8 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 "Matricula": field1,
                 "Marca": field2,
                 "Modelo": field3,
-                "Extra": field4
+                "Extra": field4,
+                "Notas": field5
             }
         }]);
         console.log(`✅ [Book] Cita actualizada correctamente`);
@@ -1505,7 +1506,7 @@ async function cancelAppointment(clientPhone: string) {
 
         await base('Appointments').update([{
             id: record.id,
-            fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "" }
+            fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "", "Notas": "" }
         }]);
 
         console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate}`);
@@ -1633,9 +1634,10 @@ async function processAI(text: string, contactPhone: string, contactName: string
 2. **${fieldLabels.field2.label}** — ${fieldLabels.field2.description}
 3. **${fieldLabels.field3.label}** — ${fieldLabels.field3.description}
 4. **${fieldLabels.field4.label}** (opcional) — ${fieldLabels.field4.description}
+5. **${fieldLabels.field5.label}** (opcional) — ${fieldLabels.field5.description}
 
-Cuando llames a book_appointment, PASA esos datos en los parámetros field1, field2, field3, field4 (en ese orden).
-Pídelos uno a uno de forma natural, no en una sola pregunta. Si el cliente no quiere darte el campo 4 (opcional), no insistas.`;
+Cuando llames a book_appointment, PASA esos datos en los parámetros field1, field2, field3, field4, field5 (en ese orden).
+Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 son opcionales — si el cliente no quiere darlos, no insistas.`;
 
             // RAG: buscar info relevante en la base de conocimiento del negocio
             let ragContext = '';
@@ -1668,7 +1670,7 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Si el cliente no q
                         { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." } }, required: ["date"] } },
                         {
                             name: "book_appointment",
-                            description: `Book an appointment using the slot index number. ONLY call this when you have ALL the required data from the client. The 4 custom fields adapt to the sector configured. After booking, ALWAYS call stop_conversation.`,
+                            description: `Book an appointment using the slot index number. ONLY call this when you have ALL the required data from the client. The 5 custom fields adapt to the sector configured. After booking, ALWAYS call stop_conversation.`,
                             parameters: {
                                 type: SchemaType.OBJECT,
                                 properties: {
@@ -1677,7 +1679,8 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Si el cliente no q
                                     field1: { type: SchemaType.STRING, description: fieldLabels.field1.description },
                                     field2: { type: SchemaType.STRING, description: fieldLabels.field2.description },
                                     field3: { type: SchemaType.STRING, description: fieldLabels.field3.description },
-                                    field4: { type: SchemaType.STRING, description: fieldLabels.field4.description }
+                                    field4: { type: SchemaType.STRING, description: fieldLabels.field4.description },
+                                    field5: { type: SchemaType.STRING, description: fieldLabels.field5.description }
                                 },
                                 required: ["optionIndex", "clientName", "field1", "field2", "field3"]
                             }
@@ -1706,12 +1709,13 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Si el cliente no q
                         Number(args.optionIndex),
                         clean,
                         args.clientName || contactName,
-                        // Aceptar tanto los nombres genéricos (field1..field4) como los antiguos (licensePlate, carBrand, carModel)
+                        // Aceptar tanto los nombres genéricos (field1..field5) como los antiguos (licensePlate, carBrand, carModel)
                         // por compatibilidad con prompts existentes
                         args.field1 || args.licensePlate || '',
                         args.field2 || args.carBrand || '',
                         args.field3 || args.carModel || '',
-                        args.field4 || ''
+                        args.field4 || '',
+                        args.field5 || ''
                     );
                     else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
                     else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
@@ -2056,15 +2060,17 @@ app.get('/api/appointments', async (req, res) => {
             status: r.get('Status'),
             clientPhone: r.get('ClientPhone'),
             clientName: r.get('ClientName'),
-            // Aliases legacy + alias genérico nuevo (field1..field4)
+            // Aliases legacy + alias genérico nuevo (field1..field5)
             matricula: r.get('Matricula'),
             marca: r.get('Marca'),
             modelo: r.get('Modelo'),
             extra: r.get('Extra'),
+            notas: r.get('Notas'),
             field1: r.get('Matricula'),
             field2: r.get('Marca'),
             field3: r.get('Modelo'),
-            field4: r.get('Extra')
+            field4: r.get('Extra'),
+            field5: r.get('Notas')
         })));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
 });
@@ -2084,15 +2090,17 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.status) f["Status"] = req.body.status;
         if (req.body.clientPhone !== undefined) f["ClientPhone"] = req.body.clientPhone;
         if (req.body.clientName !== undefined) f["ClientName"] = req.body.clientName;
-        // Aceptar tanto los nombres antiguos (matricula/marca/modelo) como los genéricos (field1..field4)
+        // Aceptar tanto los nombres antiguos (matricula/marca/modelo) como los genéricos (field1..field5)
         if (req.body.matricula !== undefined) f["Matricula"] = req.body.matricula;
         if (req.body.marca !== undefined) f["Marca"] = req.body.marca;
         if (req.body.modelo !== undefined) f["Modelo"] = req.body.modelo;
         if (req.body.extra !== undefined) f["Extra"] = req.body.extra;
+        if (req.body.notas !== undefined) f["Notas"] = req.body.notas;
         if (req.body.field1 !== undefined) f["Matricula"] = req.body.field1;
         if (req.body.field2 !== undefined) f["Marca"] = req.body.field2;
         if (req.body.field3 !== undefined) f["Modelo"] = req.body.field3;
         if (req.body.field4 !== undefined) f["Extra"] = req.body.field4;
+        if (req.body.field5 !== undefined) f["Notas"] = req.body.field5;
         await base('Appointments').update([{ id: req.params.id, fields: f }]);
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
@@ -4136,64 +4144,73 @@ app.delete('/api/bot/knowledge/:source', async (req, res) => {
 //  FIELD LABELS — etiquetas dinámicas por sector
 // ==========================================
 
-// Plantillas predefinidas de los 4 campos según sector
+// Plantillas predefinidas de los 5 campos según sector
 type FieldLabel = { label: string; placeholder: string; key: string; description: string };
-type SectorFieldLabels = { field1: FieldLabel; field2: FieldLabel; field3: FieldLabel; field4: FieldLabel };
+type SectorFieldLabels = { field1: FieldLabel; field2: FieldLabel; field3: FieldLabel; field4: FieldLabel; field5: FieldLabel };
 
 const SECTOR_FIELD_LABELS: Record<string, SectorFieldLabels> = {
     taller: {
         field1: { label: 'Matrícula', placeholder: 'Ej: 1234ABC', key: 'licensePlate', description: 'Matrícula del vehículo (ej: 1234ABC)' },
         field2: { label: 'Marca', placeholder: 'Ej: Ford', key: 'carBrand', description: 'Marca del vehículo (ej: Ford, Toyota, BMW)' },
         field3: { label: 'Modelo', placeholder: 'Ej: Focus', key: 'carModel', description: 'Modelo del vehículo (ej: Focus, Corolla)' },
-        field4: { label: 'Año / Kms', placeholder: 'Ej: 2020 · 80.000 km', key: 'yearKms', description: 'Año y kilometraje aproximado (opcional)' }
+        field4: { label: 'Año / Kms', placeholder: 'Ej: 2020 · 80.000 km', key: 'yearKms', description: 'Año y kilometraje aproximado (opcional)' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     clinica_dental: {
         field1: { label: 'Paciente', placeholder: 'Nombre del paciente', key: 'patientName', description: 'Nombre completo del paciente' },
         field2: { label: 'Tratamiento', placeholder: 'Ej: Limpieza, ortodoncia', key: 'treatment', description: 'Tratamiento o motivo de la visita' },
         field3: { label: 'Mutua / Seguro', placeholder: 'Ej: Sanitas, Adeslas', key: 'insurance', description: 'Mutua o seguro médico (opcional)' },
-        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir (opcional)' }
+        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir (opcional)' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     peluqueria: {
         field1: { label: 'Cliente', placeholder: 'Nombre del cliente', key: 'clientName', description: 'Nombre del cliente' },
         field2: { label: 'Servicio', placeholder: 'Ej: Corte, color, mechas', key: 'service', description: 'Servicio que solicita' },
         field3: { label: 'Estilista', placeholder: 'Estilista preferido', key: 'stylist', description: 'Estilista preferido (opcional)' },
-        field4: { label: 'Notas', placeholder: 'Comentarios adicionales', key: 'notes', description: 'Notas o comentarios adicionales' }
+        field4: { label: 'Producto / Color', placeholder: 'Ej: tinte 7.0', key: 'productColor', description: 'Producto o color preferido (opcional)' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     clinica_medica: {
         field1: { label: 'Paciente', placeholder: 'Nombre del paciente', key: 'patientName', description: 'Nombre completo del paciente' },
         field2: { label: 'Especialidad', placeholder: 'Ej: Fisioterapia, traumatología', key: 'specialty', description: 'Especialidad solicitada' },
         field3: { label: 'Mutua / Seguro', placeholder: 'Ej: Sanitas, Mapfre', key: 'insurance', description: 'Mutua o seguro médico (opcional)' },
-        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir (opcional)' }
+        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir (opcional)' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     gestoria: {
         field1: { label: 'Nombre', placeholder: 'Nombre completo', key: 'clientName', description: 'Nombre completo del cliente' },
         field2: { label: 'Tipo de gestión', placeholder: 'Ej: Renta, sociedad', key: 'serviceType', description: 'Tipo de gestión solicitada' },
         field3: { label: 'NIF / CIF', placeholder: 'Ej: 12345678A', key: 'taxId', description: 'NIF o CIF del cliente' },
-        field4: { label: 'Notas', placeholder: 'Comentarios adicionales', key: 'notes', description: 'Notas o comentarios adicionales' }
+        field4: { label: 'Email', placeholder: 'Ej: cliente@email.com', key: 'email', description: 'Email de contacto (opcional)' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     inmobiliaria: {
         field1: { label: 'Cliente', placeholder: 'Nombre del cliente', key: 'clientName', description: 'Nombre del cliente' },
         field2: { label: 'Tipo de propiedad', placeholder: 'Ej: Piso, casa, local', key: 'propertyType', description: 'Tipo de propiedad de interés' },
         field3: { label: 'Zona', placeholder: 'Ej: Centro, Salamanca', key: 'area', description: 'Zona de interés' },
-        field4: { label: 'Presupuesto', placeholder: 'Ej: 200-300k €', key: 'budget', description: 'Presupuesto orientativo' }
+        field4: { label: 'Presupuesto', placeholder: 'Ej: 200-300k €', key: 'budget', description: 'Presupuesto orientativo' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     academia: {
         field1: { label: 'Alumno', placeholder: 'Nombre del alumno', key: 'studentName', description: 'Nombre del alumno' },
         field2: { label: 'Curso', placeholder: 'Ej: Inglés B1, oposiciones', key: 'course', description: 'Curso de interés' },
         field3: { label: 'Nivel / Edad', placeholder: 'Ej: 12 años, B1', key: 'levelAge', description: 'Nivel actual o edad del alumno' },
-        field4: { label: 'Notas', placeholder: 'Comentarios adicionales', key: 'notes', description: 'Notas o comentarios adicionales' }
+        field4: { label: 'Email contacto', placeholder: 'Ej: padre@email.com', key: 'email', description: 'Email de contacto del padre/madre o alumno (opcional)' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     veterinario: {
         field1: { label: 'Mascota', placeholder: 'Ej: Firulais', key: 'petName', description: 'Nombre de la mascota' },
         field2: { label: 'Especie / raza', placeholder: 'Ej: Yorkshire, gato siamés', key: 'species', description: 'Especie y raza de la mascota' },
         field3: { label: 'Motivo', placeholder: 'Ej: Vacuna anual, revisión', key: 'reason', description: 'Motivo de la visita' },
-        field4: { label: 'Edad', placeholder: 'Ej: 3 años', key: 'age', description: 'Edad aproximada de la mascota' }
+        field4: { label: 'Edad', placeholder: 'Ej: 3 años', key: 'age', description: 'Edad aproximada de la mascota' },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     otro: {
         field1: { label: 'Campo 1', placeholder: 'Información 1', key: 'field1', description: 'Primer dato del cliente' },
         field2: { label: 'Campo 2', placeholder: 'Información 2', key: 'field2', description: 'Segundo dato del cliente' },
         field3: { label: 'Campo 3', placeholder: 'Información 3', key: 'field3', description: 'Tercer dato del cliente' },
-        field4: { label: 'Campo 4', placeholder: 'Información 4', key: 'field4', description: 'Cuarto dato del cliente' }
+        field4: { label: 'Campo 4', placeholder: 'Información 4', key: 'field4', description: 'Cuarto dato del cliente' },
+        field5: { label: 'Campo 5', placeholder: 'Información 5', key: 'field5', description: 'Quinto dato del cliente' }
     }
 };
 
@@ -4210,8 +4227,12 @@ async function getFieldLabels(): Promise<SectorFieldLabels> {
         const raw = r[0].get('Value') as string;
         if (!raw) return fallback;
         const parsed = JSON.parse(raw);
-        // Validamos estructura mínima
+        // Validamos estructura mínima (4 primeros campos obligatorios)
         if (parsed?.field1?.label && parsed?.field2?.label && parsed?.field3?.label && parsed?.field4?.label) {
+            // Si falta field5 (config antigua), añadimos uno por defecto
+            if (!parsed.field5?.label) {
+                parsed.field5 = { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' };
+            }
             return parsed as SectorFieldLabels;
         }
         return fallback;
@@ -4224,6 +4245,27 @@ async function getFieldLabels(): Promise<SectorFieldLabels> {
 app.get('/api/bot/field-labels', async (_req, res) => {
     const labels = await getFieldLabels();
     res.json(labels);
+});
+
+// Estado del wizard: para precargar las respuestas anteriores cuando el usuario lo reabre
+app.get('/api/bot/wizard-state', async (_req, res) => {
+    if (!base) return res.json({});
+    try {
+        const r = await base('BotSettings').select({
+            filterByFormula: "{Setting} = 'wizard_state'",
+            maxRecords: 1
+        }).firstPage();
+        if (r.length === 0) return res.json({});
+        const raw = r[0].get('Value') as string;
+        if (!raw) return res.json({});
+        try {
+            res.json(JSON.parse(raw));
+        } catch {
+            res.json({});
+        }
+    } catch {
+        res.json({});
+    }
 });
 
 // Endpoint del WIZARD de configuración de Laura por sector
@@ -4282,7 +4324,7 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
 
     const fullPrompt = `Fecha y hora actual: {{DATE_PLACEHOLDER}} (zona horaria: Madrid, España)\n\n${intro}\n\n${toneInstr}${baseRules}${dataInstr}${servicesInstr}${hoursInstr}${extraInstr}${bookingFlow}${responseFormat}`;
 
-    // Guardar prompt y field_labels en BotSettings
+    // Guardar prompt, field_labels Y estado del wizard en BotSettings
     try {
         // 1. Guardar el system_prompt
         const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage();
@@ -4300,6 +4342,19 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
             await base('BotSettings').update([{ id: r2[0].id, fields: { Value: labelsJson } }]);
         } else {
             await base('BotSettings').create([{ fields: { Setting: 'field_labels', Value: labelsJson } }]);
+        }
+
+        // 3. Guardar el ESTADO COMPLETO del wizard para poder editarlo después sin empezar de cero
+        const stateJson = JSON.stringify({
+            sector, businessName, services, hours, booksAppointments,
+            dataToCollect: dataToCollect || [], tone, extraInfo: extraInfo || '',
+            savedAt: new Date().toISOString()
+        });
+        const r3 = await base('BotSettings').select({ filterByFormula: "{Setting} = 'wizard_state'", maxRecords: 1 }).firstPage();
+        if (r3.length > 0) {
+            await base('BotSettings').update([{ id: r3[0].id, fields: { Value: stateJson } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'wizard_state', Value: stateJson } }]);
         }
 
         res.json({ success: true, prompt: fullPrompt, fieldLabels: labels });

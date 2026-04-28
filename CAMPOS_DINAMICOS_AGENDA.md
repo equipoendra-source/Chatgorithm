@@ -1,24 +1,33 @@
 # 🎨 Campos dinámicos de la agenda según sector
 
-Este documento explica cómo funcionan los **4 campos personalizados** de las citas según el sector configurado en el wizard de Laura.
+Este documento explica cómo funcionan los **5 campos personalizados** de las citas según el sector configurado en el wizard de Laura.
 
 ---
 
 ## 📋 Lo que tienes que hacer en Airtable
 
-Solo **1 cambio**: añadir un campo nuevo a la tabla `Appointments` que ya tienes.
+Necesitas añadir **2 campos nuevos** a la tabla `Appointments`.
 
-### Pasos:
+### Campo 1: `Extra`
 
 1. Abre tu base de Airtable de Chatgorim
-2. Ve a la tabla **`Appointments`** (es la de las citas, ya existe)
-3. Pulsa el botón **`+`** al final de las cabeceras de campos para añadir uno nuevo
+2. Ve a la tabla **`Appointments`**
+3. Pulsa el botón **`+`** al final de las cabeceras
 4. Configura:
-   - **Nombre del campo:** `Extra`
-   - **Tipo:** `Single line text` (texto de una sola línea)
+   - **Nombre:** `Extra`
+   - **Tipo:** `Single line text`
 5. **Crear**
 
-⚠️ Importante: el nombre debe ser exactamente **`Extra`** (con E mayúscula).
+### Campo 2: `Notas`
+
+1. En la misma tabla `Appointments`
+2. Pulsa **`+`** al final
+3. Configura:
+   - **Nombre:** `Notas`
+   - **Tipo:** `Long text` (porque las notas pueden ser largas)
+4. **Crear**
+
+⚠️ Los nombres son sensibles a mayúsculas. Tienen que ser exactamente **`Extra`** y **`Notas`**.
 
 ---
 

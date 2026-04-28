@@ -16,10 +16,12 @@ interface Appointment {
     marca?: string;
     modelo?: string;
     extra?: string;
+    notas?: string;
     field1?: string;
     field2?: string;
     field3?: string;
     field4?: string;
+    field5?: string;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -28,13 +30,15 @@ interface FieldLabels {
     field2: FieldLabelEntry;
     field3: FieldLabelEntry;
     field4: FieldLabelEntry;
+    field5: FieldLabelEntry;
 }
 
 const DEFAULT_FIELD_LABELS: FieldLabels = {
     field1: { label: 'Matrícula', placeholder: 'Ej: 1234ABC', key: 'licensePlate', description: '' },
     field2: { label: 'Marca', placeholder: 'Ej: Ford', key: 'carBrand', description: '' },
     field3: { label: 'Modelo', placeholder: 'Ej: Focus', key: 'carModel', description: '' },
-    field4: { label: 'Extra', placeholder: 'Información adicional', key: 'extra', description: '' }
+    field4: { label: 'Año / Kms', placeholder: 'Ej: 2020 · 80.000 km', key: 'yearKms', description: '' },
+    field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: '' }
 };
 
 interface CalendarDashboardProps {
@@ -61,6 +65,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const [editMarca, setEditMarca] = useState('');
     const [editModelo, setEditModelo] = useState('');
     const [editExtra, setEditExtra] = useState('');
+    const [editNotas, setEditNotas] = useState('');
 
     // Etiquetas dinámicas según sector configurado en el wizard de Laura
     const [fieldLabels, setFieldLabels] = useState<FieldLabels>(DEFAULT_FIELD_LABELS);
@@ -116,6 +121,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
         setEditMarca(appt.marca || appt.field2 || '');
         setEditModelo(appt.modelo || appt.field3 || '');
         setEditExtra(appt.extra || appt.field4 || '');
+        setEditNotas(appt.notas || appt.field5 || '');
     };
 
     const handleUpdateAppt = async () => {
@@ -131,7 +137,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                     matricula: editMatricula,
                     marca: editMarca,
                     modelo: editModelo,
-                    extra: editExtra
+                    extra: editExtra,
+                    notas: editNotas
                 })
             });
             if (res.ok) {
@@ -501,6 +508,18 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                             onChange={(e) => setEditExtra(e.target.value)}
                                             className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
                                             placeholder={fieldLabels.field4.placeholder}
+                                            disabled={readOnly}
+                                        />
+                                    </div>
+                                    {/* Campo 5 (opcional, full width, textarea para notas largas) */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>{fieldLabels.field5.label} <span className="text-slate-400 font-normal">(opcional)</span></label>
+                                        <textarea
+                                            value={editNotas}
+                                            onChange={(e) => setEditNotas(e.target.value)}
+                                            rows={2}
+                                            className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none resize-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                            placeholder={fieldLabels.field5.placeholder}
                                             disabled={readOnly}
                                         />
                                     </div>

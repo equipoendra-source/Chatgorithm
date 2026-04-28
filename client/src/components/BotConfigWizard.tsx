@@ -1,7 +1,7 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import {
     Bot, ChevronLeft, ChevronRight, Loader2, CheckCircle2, X,
-    Wrench, Sparkles
+    Sparkles
 } from 'lucide-react';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
@@ -104,6 +104,8 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
 
     const [step, setStep] = useState(1);
     const [saving, setSaving] = useState(false);
+    const [loadingState, setLoadingState] = useState(true);
+    const [hasPreviousConfig, setHasPreviousConfig] = useState(false);
 
     // Estado del formulario
     const [sector, setSector] = useState<string>('');
@@ -116,6 +118,33 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
     const [extraInfo, setExtraInfo] = useState('');
 
     const selectedSector = SECTORS.find(s => s.id === sector);
+
+    // Cargar el estado guardado del wizard (si existe) para que el usuario edite en lugar de empezar de cero
+    useEffect(() => {
+        let cancelled = false;
+        (async () => {
+            try {
+                const r = await fetch(`${API_URL}/bot/wizard-state`);
+                if (!r.ok) { setLoadingState(false); return; }
+                const data = await r.json();
+                if (cancelled) return;
+                if (data && data.sector) {
+                    // Hay configuración previa: precargamos los valores
+                    setSector(data.sector);
+                    setBusinessName(data.businessName || '');
+                    setServices(data.services || '');
+                    if (data.hours) setHours(data.hours);
+                    if (typeof data.booksAppointments === 'boolean') setBooksAppointments(data.booksAppointments);
+                    if (Array.isArray(data.dataToCollect)) setDataToCollect(data.dataToCollect);
+                    if (data.tone) setTone(data.tone);
+                    if (data.extraInfo) setExtraInfo(data.extraInfo);
+                    setHasPreviousConfig(true);
+                }
+            } catch { /* fallback: empezar de cero */ }
+            finally { if (!cancelled) setLoadingState(false); }
+        })();
+        return () => { cancelled = true; };
+    }, []);
 
     // Auto-rellenar datos típicos al elegir sector
     const handleSelectSector = (s: typeof SECTORS[number]) => {
@@ -192,6 +221,19 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
 
                 {/* Contenido */}
                 <div className="flex-1 overflow-y-auto p-6">
+                    {loadingState ? (
+                        <div className="flex flex-col items-center justify-center py-20 gap-3 text-slate-400">
+                            <Loader2 className="w-8 h-8 animate-spin" />
+                            <p className="text-sm">Cargando configuración...</p>
+                        </div>
+                    ) : (
+                    <>
+                    {/* Aviso si hay configuración previa */}
+                    {hasPreviousConfig && step === 1 && (
+                        <div className={`mb-4 p-3 rounded-xl border-l-4 border-blue-500 text-sm ${isDark ? 'bg-blue-500/10 text-blue-200' : 'bg-blue-50 text-blue-800'}`}>
+                            ℹ️ <strong>Editando configuración anterior.</strong> Tus respuestas previas están precargadas. Cambia solo lo que quieras y guarda al final.
+                        </div>
+                    )}
                     {/* PASO 1: Sector */}
                     {step === 1 && (
                         <div className="space-y-4">
@@ -376,6 +418,8 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                                 <p className="text-xs">Pulsa "Guardar configuración" y empezará a responder a tus clientes adaptada a tu negocio.</p>
                             </div>
                         </div>
+                    )}
+                    </>
                     )}
                 </div>
 
