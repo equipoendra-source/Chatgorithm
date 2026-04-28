@@ -4122,19 +4122,33 @@ app.get('/api/bot/knowledge', async (_req, res) => {
 });
 
 // Endpoint: borrar todos los chunks de un documento
+// Soporta el caso especial "sin nombre" para limpiar chunks huérfanos sin source
 app.delete('/api/bot/knowledge/:source', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     try {
         const source = decodeURIComponent(req.params.source);
-        const records = await base(TABLE_BOT_KNOWLEDGE).select({
-            filterByFormula: `{source}='${source.replace(/'/g, "")}'`,
-            maxRecords: 1000
-        }).all();
-        for (let i = 0; i < records.length; i += 10) {
-            const ids = records.slice(i, i + 10).map(r => r.id);
+        let recordIds: string[];
+
+        if (source === 'sin nombre' || source === '__unnamed__') {
+            // Caso especial: borrar todos los registros con source vacío/null
+            const all = await base(TABLE_BOT_KNOWLEDGE).select({ maxRecords: 5000 }).all();
+            recordIds = all.filter(r => {
+                const s = (r.get('source') as string) || '';
+                return s.trim() === '';
+            }).map(r => r.id);
+        } else {
+            const found = await base(TABLE_BOT_KNOWLEDGE).select({
+                filterByFormula: `{source}='${source.replace(/'/g, "")}'`,
+                maxRecords: 1000
+            }).all();
+            recordIds = found.map(r => r.id);
+        }
+
+        for (let i = 0; i < recordIds.length; i += 10) {
+            const ids = recordIds.slice(i, i + 10);
             if (ids.length) await base(TABLE_BOT_KNOWLEDGE).destroy(ids).catch(() => { });
         }
-        res.json({ success: true, deletedChunks: records.length });
+        res.json({ success: true, deletedChunks: recordIds.length });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
