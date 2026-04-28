@@ -15,7 +15,27 @@ interface Appointment {
     matricula?: string;
     marca?: string;
     modelo?: string;
+    extra?: string;
+    field1?: string;
+    field2?: string;
+    field3?: string;
+    field4?: string;
 }
+
+interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
+interface FieldLabels {
+    field1: FieldLabelEntry;
+    field2: FieldLabelEntry;
+    field3: FieldLabelEntry;
+    field4: FieldLabelEntry;
+}
+
+const DEFAULT_FIELD_LABELS: FieldLabels = {
+    field1: { label: 'Matrícula', placeholder: 'Ej: 1234ABC', key: 'licensePlate', description: '' },
+    field2: { label: 'Marca', placeholder: 'Ej: Ford', key: 'carBrand', description: '' },
+    field3: { label: 'Modelo', placeholder: 'Ej: Focus', key: 'carModel', description: '' },
+    field4: { label: 'Extra', placeholder: 'Información adicional', key: 'extra', description: '' }
+};
 
 interface CalendarDashboardProps {
     readOnly?: boolean;
@@ -40,6 +60,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const [editMatricula, setEditMatricula] = useState('');
     const [editMarca, setEditMarca] = useState('');
     const [editModelo, setEditModelo] = useState('');
+    const [editExtra, setEditExtra] = useState('');
+
+    // Etiquetas dinámicas según sector configurado en el wizard de Laura
+    const [fieldLabels, setFieldLabels] = useState<FieldLabels>(DEFAULT_FIELD_LABELS);
 
     // Crear Manual
     const [newDate, setNewDate] = useState('');
@@ -58,6 +82,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
 
     useEffect(() => {
         fetchData();
+        // Cargar los field labels configurados en el wizard del bot
+        fetch(`${API_URL}/bot/field-labels`)
+            .then(r => r.ok ? r.json() : null)
+            .then(d => { if (d && d.field1 && d.field2 && d.field3 && d.field4) setFieldLabels(d); })
+            .catch(() => { /* fallback a default */ });
     }, []);
 
     const fetchData = async () => {
@@ -83,9 +112,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
         setEditPhone(appt.clientPhone || '');
-        setEditMatricula(appt.matricula || '');
-        setEditMarca(appt.marca || '');
-        setEditModelo(appt.modelo || '');
+        setEditMatricula(appt.matricula || appt.field1 || '');
+        setEditMarca(appt.marca || appt.field2 || '');
+        setEditModelo(appt.modelo || appt.field3 || '');
+        setEditExtra(appt.extra || appt.field4 || '');
     };
 
     const handleUpdateAppt = async () => {
@@ -100,7 +130,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                     clientPhone: editPhone,
                     matricula: editMatricula,
                     marca: editMarca,
-                    modelo: editModelo
+                    modelo: editModelo,
+                    extra: editExtra
                 })
             });
             if (res.ok) {
@@ -424,40 +455,54 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                             disabled={readOnly}
                                         />
                                     </div>
+                                    {/* Campo 1 (full width) */}
                                     <div>
-                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Matrícula</label>
+                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>{fieldLabels.field1.label}</label>
                                         <input
                                             type="text"
                                             value={editMatricula}
                                             onChange={(e) => setEditMatricula(e.target.value)}
                                             className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
-                                            placeholder="Ej: 1234ABC"
+                                            placeholder={fieldLabels.field1.placeholder}
                                             disabled={readOnly}
                                         />
                                     </div>
+                                    {/* Campos 2 y 3 (dos columnas) */}
                                     <div className="grid grid-cols-2 gap-2">
                                         <div>
-                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Marca</label>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>{fieldLabels.field2.label}</label>
                                             <input
                                                 type="text"
                                                 value={editMarca}
                                                 onChange={(e) => setEditMarca(e.target.value)}
                                                 className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
-                                                placeholder="Ej: Ford"
+                                                placeholder={fieldLabels.field2.placeholder}
                                                 disabled={readOnly}
                                             />
                                         </div>
                                         <div>
-                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Modelo</label>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>{fieldLabels.field3.label}</label>
                                             <input
                                                 type="text"
                                                 value={editModelo}
                                                 onChange={(e) => setEditModelo(e.target.value)}
                                                 className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
-                                                placeholder="Ej: Focus"
+                                                placeholder={fieldLabels.field3.placeholder}
                                                 disabled={readOnly}
                                             />
                                         </div>
+                                    </div>
+                                    {/* Campo 4 (opcional, full width) */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>{fieldLabels.field4.label} <span className="text-slate-400 font-normal">(opcional)</span></label>
+                                        <input
+                                            type="text"
+                                            value={editExtra}
+                                            onChange={(e) => setEditExtra(e.target.value)}
+                                            className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                            placeholder={fieldLabels.field4.placeholder}
+                                            disabled={readOnly}
+                                        />
                                     </div>
                                 </div>
                             )}
