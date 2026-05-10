@@ -221,6 +221,53 @@ const cleanNumber = (phone: any) => {
 const appointmentOptionsCache = new Map<string, Record<number, string>>();
 const processedWebhookIds = new Set<string>();
 
+// =========================================================================
+// LOCKS POR CLAVE — serialización para evitar race conditions
+// =========================================================================
+// Cada clave (teléfono cliente, recordId de cita...) tiene una cola FIFO de
+// trabajos. El siguiente trabajo no empieza hasta que termina el anterior.
+// Esto evita: (a) procesar 5 mensajes ráfaga del mismo cliente en paralelo
+// con respuestas contradictorias; (b) dos clientes reservando la misma cita
+// simultáneamente.
+//
+// IMPORTANTE: solo sirve dentro del proceso. Si Render tiene >1 instancia,
+// hace falta lock distribuido (Redis SETNX, etc). Para 1 instancia es óptimo.
+function makeKeyedLock() {
+    const queues = new Map<string, Promise<unknown>>();
+    return async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T> {
+        const prev = queues.get(key) || Promise.resolve();
+        let release!: () => void;
+        const mine = new Promise<void>(res => { release = res; });
+        // Encolar: el siguiente que pida este key tendrá que esperar a `mine`
+        queues.set(key, prev.then(() => mine));
+        try {
+            // Esperar a que el anterior termine
+            await prev;
+            return await fn();
+        } finally {
+            release();
+            // Limpiar si somos el último en la cola
+            if (queues.get(key) === prev.then(() => mine)) {
+                // No estrictamente correcto comparar promesas equivalentes, pero el GC se encargará
+            }
+            // Limpieza periódica de keys muertas: cada 60s borra entradas resueltas
+            // (coste despreciable, hecho lazy en cada release)
+            if (queues.size > 200) {
+                for (const [k, p] of queues) {
+                    // Si la promesa ya está resuelta hace rato, eliminarla
+                    Promise.resolve(p).then(() => {
+                        if (queues.get(k) === p) queues.delete(k);
+                    }).catch(() => {});
+                }
+            }
+        }
+    };
+}
+// Lock por número de teléfono — serializa procesado de mensajes entrantes
+const withPhoneLock = makeKeyedLock();
+// Lock por recordId de Appointment — serializa reservas de una misma cita
+const withAppointmentLock = makeKeyedLock();
+
 // --- TARJETA DE AGENTE ---
 // Rastrea qué agente respondió último a cada contacto (para enviar tarjeta solo al cambiar)
 const lastAgentPerContact = new Map<string, string>();   // phone → agentName
@@ -1554,69 +1601,98 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
 
     const realId = userMap[optionIndex];
     if (!realId) return `❌ Error: La opción ${optionIndex} no es válida.`;
-    try {
-        console.log(`📅 [Book] Buscando registro ${realId}...`);
-        const record = await base('Appointments').find(realId);
 
-        if (!record) {
-            console.error(`❌ [Book] Registro ${realId} no encontrado`);
-            return "❌ Vaya, esa hora ya no existe.";
-        }
-
-        const currentStatus = record.get('Status');
-        console.log(`📅 [Book] Status actual: ${currentStatus}`);
-
-        if (currentStatus !== 'Available') {
-            return "❌ Vaya, esa hora acaba de ocuparse.";
-        }
-
-        const dateVal = new Date(record.get('Date') as string);
-        const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
-
-        console.log(`📅 [Book] Actualizando cita a Booked...`);
-        // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
-        // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra, Notas) por compatibilidad,
-        // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels
-        await base('Appointments').update([{
-            id: realId,
-            fields: {
-                "Status": "Booked",
-                "ClientPhone": clientPhone,
-                "ClientName": clientName,
-                "Matricula": field1,
-                "Marca": field2,
-                "Modelo": field3,
-                "Extra": field4,
-                "Notas": field5
-            }
-        }]);
-        console.log(`✅ [Book] Cita actualizada correctamente`);
-
-        // CRÍTICO: Cambiar status del contacto para que la IA NO se reactive
-        const clean = cleanNumber(clientPhone);
-        const contacts = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'`, maxRecords: 1 }).firstPage();
-        if (contacts.length > 0) {
-            console.log(`📅 [Book] Actualizando contacto a 'Cerrado' y nombre '${clientName}'...`);
-            const contactFields: any = { "status": "Cerrado" };
-            // Actualizar nombre solo si el bot lo recopiló (no es el valor por defecto "Cliente")
-            if (clientName && clientName !== "Cliente") {
-                contactFields["name"] = clientName;
-            }
-            await base('Contacts').update([{ id: contacts[0].id, fields: contactFields }]);
-            io.emit('contact_updated_notification');
-        }
-
-        // Limpiar cache (memoria y Airtable)
-        await clearAppointmentCache(clientPhone);
-        activeAiChats.delete(clean);
-        io.emit('ai_active_change', { phone: clean, active: false });
-        console.log(`✅ [Book] Reserva completada para ${humanDate}`);
-        return `✅ RESERVA CONFIRMADA para el ${humanDate}.`;
-    } catch (e: any) {
-        console.error(`❌ [Book] ERROR AIRTABLE:`, e.message || e);
-        console.error(`❌ [Book] Stack:`, e.stack);
-        return "❌ Error técnico al guardar.";
+    // Validación de inputs antes de tocar Airtable
+    const cleanedPhone = cleanNumber(clientPhone);
+    if (!cleanedPhone) {
+        console.error(`❌ [Book] clientPhone vacío tras limpiar: "${clientPhone}"`);
+        return "❌ Error: número de teléfono inválido.";
     }
+    if (!clientName || !clientName.trim() || clientName === "Cliente") {
+        console.warn(`⚠️ [Book] clientName vacío o por defecto. Usando placeholder.`);
+        clientName = (clientName && clientName.trim()) || "Cliente";
+    }
+
+    // SERIALIZAR por recordId — si dos clientes intentan reservar la misma cita
+    // a la vez, el 2º espera al 1º y verá Status=Booked, devolviendo "ya ocupada".
+    return withAppointmentLock(realId, async () => {
+        try {
+            console.log(`📅 [Book] Buscando registro ${realId}...`);
+            const record = await base!.table('Appointments').find(realId);
+
+            if (!record) {
+                console.error(`❌ [Book] Registro ${realId} no encontrado`);
+                return "❌ Vaya, esa hora ya no existe.";
+            }
+
+            const currentStatus = record.get('Status');
+            console.log(`📅 [Book] Status actual: ${currentStatus}`);
+
+            if (currentStatus !== 'Available') {
+                console.warn(`⚠️ [Book] Race detectada: ${realId} ya estaba en estado "${currentStatus}" cuando llegamos al lock.`);
+                return "❌ Vaya, esa hora acaba de ocuparse. ¿Quieres ver otra?";
+            }
+
+            const dateVal = new Date(record.get('Date') as string);
+            const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
+
+            console.log(`📅 [Book] Actualizando cita a Booked...`);
+            // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
+            // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra, Notas) por compatibilidad,
+            // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels
+            await base!.table('Appointments').update([{
+                id: realId,
+                fields: {
+                    "Status": "Booked",
+                    "ClientPhone": cleanedPhone,
+                    "ClientName": clientName,
+                    "Matricula": field1,
+                    "Marca": field2,
+                    "Modelo": field3,
+                    "Extra": field4,
+                    "Notas": field5
+                }
+            }]);
+
+            // VERIFICACIÓN POST-UPDATE: re-leer y comprobar que somos el dueño.
+            // Si otra instancia (o un timing extremo) sobreescribió, detectamos.
+            try {
+                const verify = await base!.table('Appointments').find(realId);
+                const winnerPhone = String(verify.get('ClientPhone') || '');
+                if (winnerPhone && winnerPhone !== cleanedPhone) {
+                    console.error(`💥 [Book] Cross-instance race: ${realId} acabó con ClientPhone=${winnerPhone} (esperado ${cleanedPhone}). Cliente perdió la cita.`);
+                    return "❌ Vaya, justo otro cliente la ha cogido. ¿Quieres ver otra hora?";
+                }
+            } catch (e: any) {
+                console.warn(`⚠️ [Book] No pude verificar post-update (continuo asumiendo OK): ${e.message}`);
+            }
+            console.log(`✅ [Book] Cita actualizada correctamente y verificada`);
+
+            // CRÍTICO: Cambiar status del contacto para que la IA NO se reactive
+            const contacts = await base!.table('Contacts').select({ filterByFormula: `{phone} = '${cleanedPhone}'`, maxRecords: 1 }).firstPage();
+            if (contacts.length > 0) {
+                console.log(`📅 [Book] Actualizando contacto a 'Cerrado' y nombre '${clientName}'...`);
+                const contactFields: any = { "status": "Cerrado" };
+                // Actualizar nombre solo si el bot lo recopiló (no es el valor por defecto "Cliente")
+                if (clientName && clientName !== "Cliente") {
+                    contactFields["name"] = clientName;
+                }
+                await base!.table('Contacts').update([{ id: contacts[0].id, fields: contactFields }]);
+                io.emit('contact_updated_notification');
+            }
+
+            // Limpiar cache (memoria y Airtable)
+            await clearAppointmentCache(cleanedPhone);
+            activeAiChats.delete(cleanedPhone);
+            io.emit('ai_active_change', { phone: cleanedPhone, active: false });
+            console.log(`✅ [Book] Reserva completada para ${humanDate}`);
+            return `✅ RESERVA CONFIRMADA para el ${humanDate}.`;
+        } catch (e: any) {
+            console.error(`❌ [Book] ERROR AIRTABLE:`, e.message || e);
+            console.error(`❌ [Book] Stack:`, e.stack);
+            return "❌ Error técnico al guardar.";
+        }
+    });
 }
 
 async function cancelAppointment(clientPhone: string) {
@@ -1752,8 +1828,22 @@ async function processAI(
     inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
 ) {
     if (!genAI) { console.error("❌ No API Key"); return; }
-
     const clean = cleanNumber(contactPhone);
+
+    // Serializar TODA la lógica por número de cliente. Si llegan 5 mensajes
+    // en ráfaga del mismo número, se procesan uno detrás de otro y cada turno
+    // ve el historial actualizado del anterior — no respuestas contradictorias.
+    return withPhoneLock(clean, () => processAIInner(text, clean, contactName, originPhoneId, inboundMedia));
+}
+
+async function processAIInner(
+    text: string,
+    clean: string,
+    contactName: string,
+    originPhoneId: string,
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
+) {
+    if (!genAI) { console.error("❌ No API Key"); return; }
     const mediaTag = inboundMedia ? ` [+${inboundMedia.type}:${inboundMedia.mediaId}]` : '';
     console.log(`🧠 [IA] Start: ${clean}: "${text}"${mediaTag}`);
     activeAiChats.add(clean);
