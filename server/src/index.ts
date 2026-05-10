@@ -268,6 +268,54 @@ const withPhoneLock = makeKeyedLock();
 // Lock por recordId de Appointment — serializa reservas de una misma cita
 const withAppointmentLock = makeKeyedLock();
 
+// =========================================================================
+// TIMEOUT + ABORT — para no dejar al cliente esperando si Gemini se cuelga
+// =========================================================================
+// Gemini SDK no soporta AbortSignal en chat.sendMessage(), así que envolvemos
+// la promise en una carrera contra un timer y un signal de abort.
+// Cuando un agente humano interviene en la conversación, llamamos abort()
+// para cancelar la respuesta de la IA en curso (ya no la queremos).
+function withTimeout<T>(promise: Promise<T>, ms: number, signal?: AbortSignal): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+        let settled = false;
+        const timer = setTimeout(() => {
+            if (settled) return;
+            settled = true;
+            reject(Object.assign(new Error(`Gemini timeout (${ms}ms)`), { code: 'TIMEOUT' }));
+        }, ms);
+        const onAbort = () => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            reject(Object.assign(new Error('Operación cancelada'), { code: 'ABORT' }));
+        };
+        if (signal) {
+            if (signal.aborted) { onAbort(); return; }
+            signal.addEventListener('abort', onAbort, { once: true });
+        }
+        promise.then(
+            v => { if (settled) return; settled = true; clearTimeout(timer); resolve(v); },
+            e => { if (settled) return; settled = true; clearTimeout(timer); reject(e); }
+        );
+    });
+}
+
+// AbortController activo por número de cliente — para cancelar IA si interviene un agente
+const aiAbortControllers = new Map<string, AbortController>();
+
+// Decide si un error de Gemini merece reintento. Conservador: solo errores transitorios.
+function isRetryableGeminiError(error: any): boolean {
+    if (!error) return false;
+    if (error.code === 'ABORT') return false; // cancelado intencionalmente
+    if (error.code === 'TIMEOUT') return true;
+    const status = error.status || error.response?.status;
+    if (status === 429) return true; // rate limit
+    if (status === 500 || status === 502 || status === 503 || status === 504) return true;
+    // Errores de red sin status
+    if (!status && (error.code === 'ECONNRESET' || error.code === 'ETIMEDOUT' || error.code === 'ENOTFOUND' || error.code === 'EAI_AGAIN')) return true;
+    return false;
+}
+
 // --- TARJETA DE AGENTE ---
 // Rastrea qué agente respondió último a cada contacto (para enviar tarjeta solo al cambiar)
 const lastAgentPerContact = new Map<string, string>();   // phone → agentName
@@ -1850,7 +1898,18 @@ async function processAIInner(
     io.emit('ai_status', { phone: clean, status: 'thinking' });
     io.emit('ai_active_change', { phone: clean, active: true });
 
+    // Registrar AbortController para que un agente humano pueda cancelar la IA
+    // si interviene durante el await de Gemini. Si ya había uno (raro porque
+    // withPhoneLock serializa), abortamos el viejo por seguridad.
+    const previousController = aiAbortControllers.get(clean);
+    if (previousController) {
+        try { previousController.abort(); } catch (_) {}
+    }
+    const abortController = new AbortController();
+    aiAbortControllers.set(clean, abortController);
+
     const MAX_RETRIES = 3;
+    const GEMINI_TIMEOUT_MS = 45000; // 45s — suficiente para respuestas largas, corto para no abandonar al cliente
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
@@ -1995,7 +2054,11 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
                 firstMessageParts = [{ text }];
             }
 
-            let currentResponse: any = (await chat.sendMessage(firstMessageParts)).response;
+            let currentResponse: any = (await withTimeout(
+                chat.sendMessage(firstMessageParts),
+                GEMINI_TIMEOUT_MS,
+                abortController.signal
+            )).response;
 
             // Loop iterativo de tool calls — soporta múltiples rondas anidadas
             // (ej. get_available_days → get_available_appointments → book_appointment → stop_conversation)
@@ -2029,7 +2092,11 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
 
                 // Pasar TODAS las respuestas de tools a Gemini en una sola llamada
                 // (mejor que llamada por cada tool — menos cuota, más coherente)
-                currentResponse = (await chat.sendMessage(functionResponses)).response;
+                currentResponse = (await withTimeout(
+                    chat.sendMessage(functionResponses),
+                    GEMINI_TIMEOUT_MS,
+                    abortController.signal
+                )).response;
             }
 
             if (toolRound >= MAX_TOOL_ROUNDS) {
@@ -2054,22 +2121,46 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
             break;
 
         } catch (error: any) {
-            console.error(`❌ Error Gemini (intento ${attempt}/${MAX_RETRIES}):`, error.message || error);
+            const status = error.status || error.response?.status;
+            console.error(`❌ Error Gemini (intento ${attempt}/${MAX_RETRIES}) [${error.code || status || 'unknown'}]:`, error.message || error);
 
-            // Retry solo para 503 (sobrecarga)
-            if (error.status === 503 && attempt < MAX_RETRIES) {
+            // Si fue cancelado por intervención humana, salir limpio sin avisar al cliente
+            if (error.code === 'ABORT') {
+                console.log(`🛑 [IA] Cancelada por intervención humana — ${clean}`);
+                break;
+            }
+
+            // Retry para errores transitorios: 429, 500, 502, 503, 504, timeout, errores de red
+            if (isRetryableGeminiError(error) && attempt < MAX_RETRIES) {
                 const waitTime = 1000 * Math.pow(2, attempt); // 2s, 4s, 8s
-                console.log(`⏳ Reintentando en ${waitTime / 1000}s...`);
+                console.log(`⏳ Reintentando en ${waitTime / 1000}s (error retryable)...`);
                 await delay(waitTime);
                 continue;
             }
 
-            if (error.status === 404) console.error("👉 PISTA: Modelo no encontrado. Verifica MODEL_NAME.");
-            if (error.status === 503) console.error("👉 Modelo sobrecargado. Intentos agotados.");
+            // Errores no retryables o intentos agotados — avisar al cliente para no dejarle en silencio
+            if (status === 404) console.error("👉 PISTA: Modelo no encontrado. Verifica MODEL_NAME.");
+            if (status === 503) console.error("👉 Modelo sobrecargado. Intentos agotados.");
+            if (status === 429) console.error("👉 Rate limit / cuota agotada de Gemini.");
+            if (error.code === 'TIMEOUT') console.error("👉 Gemini tardó demasiado en responder.");
+
+            // Fallback al cliente — NUNCA dejar al cliente sin respuesta cuando la IA falla
+            try {
+                const fallbackMsg = error.code === 'TIMEOUT'
+                    ? "Disculpa, estoy tardando un poco. ¿Puedes repetirlo o esperar un momento? Si es urgente, te paso con un compañero."
+                    : "Disculpa, he tenido un fallo técnico procesando tu mensaje. ¿Puedes repetírmelo? Si sigue fallando, te derivamos a un agente.";
+                await sendWhatsAppText(clean, fallbackMsg, originPhoneId);
+            } catch (sendErr: any) {
+                console.error(`💥 [IA] Fallback al cliente también falló:`, sendErr.message);
+            }
             break;
         }
     }
 
+    // Limpieza: AbortController y status
+    if (aiAbortControllers.get(clean) === abortController) {
+        aiAbortControllers.delete(clean);
+    }
     io.emit('ai_status', { phone: clean, status: 'idle' });
 }
 
@@ -3103,6 +3194,15 @@ io.on('connection', (socket) => {
             console.log(`🛑 Handover: Agente humano intervino con ${cleanTo}. Deteniendo IA.`);
             activeAiChats.delete(cleanTo);
             io.emit('ai_active_change', { phone: cleanTo, active: false });
+        }
+        // CANCELAR la IA si está pensando ahora mismo — sin esto, la respuesta de
+        // Gemini llegaría DESPUÉS del mensaje del agente y el cliente vería dos
+        // mensajes contradictorios.
+        const inflight = aiAbortControllers.get(cleanTo);
+        if (inflight) {
+            console.log(`🛑 [IA] Cancelando respuesta en curso de Laura para ${cleanTo} (agente intervino)`);
+            try { inflight.abort(); } catch (_) {}
+            aiAbortControllers.delete(cleanTo);
         }
 
         // FIX: Forzar estado "En Curso" para evitar reactivación por "Nuevo"
