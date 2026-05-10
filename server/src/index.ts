@@ -1692,64 +1692,99 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
                 }]
             });
 
-            const chat = model.startChat({ history });
-            const result = await chat.sendMessage(text);
-            const response = result.response;
-            const calls = response.functionCalls();
+            // Helper: ejecuta una tool call por nombre y devuelve su string de resultado
+            const executeTool = async (call: any): Promise<string> => {
+                const args = call.args as any;
+                let toolResult = "";
 
-            if (calls && calls.length > 0) {
-                for (const call of calls) {
-                    console.log("🤖 Tool:", call.name);
-                    let toolResult = "";
-                    const args = call.args as any;
-
-                    if (call.name === "get_available_days") toolResult = await getAvailableDays();
-                    else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
-                    else if (call.name === "book_appointment") toolResult = await bookAppointment(
-                        Number(args.optionIndex),
-                        clean,
-                        args.clientName || contactName,
-                        // Aceptar tanto los nombres genéricos (field1..field5) como los antiguos (licensePlate, carBrand, carModel)
-                        // por compatibilidad con prompts existentes
-                        args.field1 || args.licensePlate || '',
-                        args.field2 || args.carBrand || '',
-                        args.field3 || args.carModel || '',
-                        args.field4 || '',
-                        args.field5 || ''
-                    );
-                    else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
-                    else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
-                    else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
-
-                    // Si book_appointment tuvo éxito, enviar confirmación directamente al cliente
-                    // porque Gemini llamará stop_conversation después (no texto), dejando result2.text() vacío
-                    if (call.name === "book_appointment" && toolResult.startsWith("✅")) {
-                        await sendWhatsAppText(clean, toolResult, originPhoneId);
-                    }
-
-                    const result2 = await chat.sendMessage([{
-                        functionResponse: { name: call.name, response: { result: toolResult } }
-                    }]);
-
-                    // result2 puede traer stop_conversation como tool call en lugar de texto
-                    const result2Calls = result2.response.functionCalls();
-                    if (result2Calls && result2Calls.length > 0) {
-                        for (const call2 of result2Calls) {
-                            if (call2.name === "stop_conversation") await stopConversation(clean);
-                        }
-                    }
-
-                    const finalTxt = result2.response.text();
-                    if (finalTxt && finalTxt.trim()) {
-                        await processJsonResponse(finalTxt, clean, originPhoneId);
-                    }
+                if (call.name === "get_available_days") toolResult = await getAvailableDays();
+                else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
+                else if (call.name === "book_appointment") toolResult = await bookAppointment(
+                    Number(args.optionIndex),
+                    clean,
+                    args.clientName || contactName,
+                    // Aceptar tanto los nombres genéricos (field1..field5) como los antiguos (licensePlate, carBrand, carModel)
+                    // por compatibilidad con prompts existentes
+                    args.field1 || args.licensePlate || '',
+                    args.field2 || args.carBrand || '',
+                    args.field3 || args.carModel || '',
+                    args.field4 || '',
+                    args.field5 || ''
+                );
+                else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
+                else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
+                else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
+                else {
+                    console.warn(`⚠️ Tool desconocida: ${call.name}`);
+                    toolResult = `Error: tool ${call.name} no implementada.`;
                 }
-            } else {
-                const txt = response.text();
-                await processJsonResponse(txt, clean, originPhoneId);
+
+                // Si book_appointment tuvo éxito, enviar confirmación directamente al cliente
+                // porque Gemini llamará stop_conversation después (no texto), dejando result2.text() vacío
+                if (call.name === "book_appointment" && toolResult.startsWith("✅")) {
+                    await sendWhatsAppText(clean, toolResult, originPhoneId);
+                }
+
+                return toolResult;
+            };
+
+            const chat = model.startChat({ history });
+            let currentResponse: any = (await chat.sendMessage(text)).response;
+
+            // Loop iterativo de tool calls — soporta múltiples rondas anidadas
+            // (ej. get_available_days → get_available_appointments → book_appointment → stop_conversation)
+            const MAX_TOOL_ROUNDS = 6; // Seguridad: cap por si Gemini entra en bucle
+            let toolRound = 0;
+            let bookingConfirmedDirectly = false; // Si book_appointment ya envió mensaje, no duplicar texto final
+
+            while (toolRound < MAX_TOOL_ROUNDS) {
+                const calls = currentResponse.functionCalls();
+                if (!calls || calls.length === 0) break;
+
+                toolRound++;
+                console.log(`🔁 [IA] Ronda de tools #${toolRound} (${calls.length} call${calls.length === 1 ? '' : 's'})`);
+
+                // Ejecutar todas las tools de esta ronda y recoger sus respuestas
+                const functionResponses: any[] = [];
+                for (const call of calls) {
+                    console.log(`🤖 Tool: ${call.name}${call.args && Object.keys(call.args).length ? ' args=' + JSON.stringify(call.args) : ''}`);
+                    const toolResult = await executeTool(call);
+                    const preview = toolResult.length > 200 ? toolResult.slice(0, 200) + '…' : toolResult;
+                    console.log(`   ↳ result: ${preview}`);
+
+                    if (call.name === "book_appointment" && toolResult.startsWith("✅")) {
+                        bookingConfirmedDirectly = true;
+                    }
+
+                    functionResponses.push({
+                        functionResponse: { name: call.name, response: { result: toolResult } }
+                    });
+                }
+
+                // Pasar TODAS las respuestas de tools a Gemini en una sola llamada
+                // (mejor que llamada por cada tool — menos cuota, más coherente)
+                currentResponse = (await chat.sendMessage(functionResponses)).response;
             }
 
-            // Éxito - salir del loop
+            if (toolRound >= MAX_TOOL_ROUNDS) {
+                console.warn(`⚠️ [IA] Límite de rondas de tools alcanzado (${MAX_TOOL_ROUNDS}). Posible loop.`);
+            }
+
+            // Procesar texto final de Gemini (si lo hay)
+            const finalTxt = currentResponse.text();
+            if (finalTxt && finalTxt.trim()) {
+                await processJsonResponse(finalTxt, clean, originPhoneId);
+            } else if (!bookingConfirmedDirectly) {
+                // Gemini se quedó mudo y no fue una reserva — avisar al cliente para no dejar el mensaje sin contestar
+                console.warn(`⚠️ [IA] Respuesta final vacía de Gemini tras ${toolRound} ronda(s) de tools. Enviando fallback.`);
+                await sendWhatsAppText(
+                    clean,
+                    "Disculpa, he tenido un problema procesando tu mensaje. ¿Puedes repetírmelo?",
+                    originPhoneId
+                );
+            }
+
+            // Éxito - salir del loop de retries
             break;
 
         } catch (error: any) {
