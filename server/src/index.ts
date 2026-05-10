@@ -3955,12 +3955,12 @@ function chunkTextForRag(text: string, wordsPerChunk = 500, overlap = 50): strin
     return chunks;
 }
 
-// Llama a la API de embeddings de Google (text-embedding-004)
+// Llama a la API de embeddings de Google (gemini-embedding-001)
 // Devuelve null si falla
 async function computeEmbedding(text: string): Promise<number[] | null> {
     if (!geminiApiKey || !genAI) return null;
     try {
-        const model = genAI.getGenerativeModel({ model: 'text-embedding-004' });
+        const model = genAI.getGenerativeModel({ model: 'gemini-embedding-001' });
         const result = await model.embedContent(text);
         return result.embedding.values || null;
     } catch (e: any) {
