@@ -19,6 +19,7 @@ import admin from 'firebase-admin';
 import sharp from 'sharp';
 import { v2 as cloudinary } from 'cloudinary';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
@@ -48,10 +49,54 @@ process.on('uncaughtException', (error) => {
     // En producción, logeamos pero NO crasheamos (con cuidado)
 });
 
+// --- VARIABLES DE SEGURIDAD ---
+// (Declaradas ANTES del setup de Express porque CORS las necesita.)
+// META_APP_SECRET: secreto de la app de Meta (panel de developers → settings → basic → app secret)
+// Sin él, el webhook no verifica HMAC y cualquiera puede inyectar mensajes falsos.
+const metaAppSecret = process.env.META_APP_SECRET;
+// ALLOWED_ORIGINS: lista de orígenes (CSV) permitidos para CORS y Socket.IO.
+// Ej: "https://chatgorithm-frontend.onrender.com,http://localhost:5173"
+// Si está vacío, se cae a "*" con warning (peligroso en producción).
+const allowedOriginsEnv = process.env.ALLOWED_ORIGINS;
+const allowedOrigins: string[] | "*" = allowedOriginsEnv
+    ? allowedOriginsEnv.split(',').map(s => s.trim()).filter(Boolean)
+    : "*";
+if (allowedOrigins === "*") {
+    console.warn("⚠️ [SECURITY] ALLOWED_ORIGINS no configurado. CORS abierto a *. Configúralo en producción.");
+} else {
+    console.log(`🔒 [SECURITY] CORS restringido a: ${(allowedOrigins as string[]).join(', ')}`);
+}
+// SOCKET_AUTH_REQUIRED: si es "false", desactiva la auth de Socket.IO (solo para debug). Default: true.
+const socketAuthRequired = (process.env.SOCKET_AUTH_REQUIRED ?? 'true').toLowerCase() !== 'false';
+if (!socketAuthRequired) {
+    console.warn("⚠️ [SECURITY] SOCKET_AUTH_REQUIRED=false. Eventos destructivos de Socket.IO sin protección.");
+}
+
 const app = express();
-app.use(cors());
+
+// --- CORS ---
+// Restringe orígenes según ALLOWED_ORIGINS. Si "*", abierto (con warning ya impreso).
+const corsOptions: cors.CorsOptions = allowedOrigins === "*"
+    ? { origin: "*" }
+    : {
+        origin: (origin, cb) => {
+            // Permitir peticiones same-origin / Postman / curl (sin header Origin)
+            if (!origin) return cb(null, true);
+            if ((allowedOrigins as string[]).includes(origin)) return cb(null, true);
+            console.warn(`🚫 [CORS] Origen bloqueado: ${origin}`);
+            cb(new Error('CORS: origen no permitido'));
+        },
+        credentials: true,
+    };
+app.use(cors(corsOptions));
 app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
+// IMPORTANTE: el `verify` callback captura el body crudo en req.rawBody para verificar HMAC del webhook.
+// Sin esto no se puede comprobar la firma X-Hub-Signature-256 de Meta porque express.json ya parseó el body.
+app.use(express.json({
+    verify: (req: any, _res, buf) => {
+        req.rawBody = buf;
+    }
+}));
 
 // RUTA PING
 app.get('/', (req, res) => {
@@ -120,8 +165,48 @@ if (geminiApiKey) {
 
 const httpServer = createServer(app);
 const io = new Server(httpServer, {
-    cors: { origin: "*", methods: ["GET", "POST"] }
+    cors: {
+        origin: allowedOrigins === "*" ? "*" : (allowedOrigins as string[]),
+        methods: ["GET", "POST"],
+        credentials: allowedOrigins !== "*",
+    }
 });
+
+// --- AUTENTICACIÓN DE EVENTOS SOCKET.IO ---
+// Eventos públicos (no requieren login): bootstrapping, login y conexión.
+// El resto SOLO se procesan si socket.data.authenticated === true.
+const PUBLIC_SOCKET_EVENTS = new Set<string>([
+    'login_attempt',
+    'register_presence',
+    'typing',
+    'disconnect',
+    'request_config',          // lectura
+    'request_quick_replies',   // lectura
+    'request_agents',          // lectura (no incluye passwords)
+    'request_contacts',        // lectura
+    'request_conversation',    // lectura
+    'request_team_history',    // lectura
+    'mark_read',               // marcar leído (no destructivo)
+]);
+
+// Lista de eventos DESTRUCTIVOS o que envían mensajes en nombre del negocio.
+// Nunca deben permitirse sin autenticación.
+const DESTRUCTIVE_SOCKET_EVENTS = new Set<string>([
+    'chatMessage',
+    'trigger_ai_manual',
+    'stop_ai_manual',
+    'create_agent',
+    'delete_agent',
+    'update_agent',
+    'add_config',
+    'delete_config',
+    'update_config',
+    'add_quick_reply',
+    'delete_quick_reply',
+    'update_quick_reply',
+    'update_contact_info',
+    'send_team_message',
+]);
 
 const onlineUsers = new Map<string, string>();
 const activeAiChats = new Set<string>();
@@ -142,19 +227,21 @@ const lastAgentPerContact = new Map<string, string>();   // phone → agentName
 const agentCardUrlCache = new Map<string, string>();     // agentName → cloudinary URL
 
 // --- WEB PUSH NOTIFICATIONS ---
-// VAPID keys - En producción, guárdalas en variables de entorno
-const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || 'BNibvQQfVfb6ozHGy2xqnt5JJV_rqq8hGmj5qQuJb1xozXnN7LX5aVfWlqDqx_1BHDlPvFxTf_IiQOI5Y8mMEFs';
-const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || 'X9mNyJVnqAhWJnH5fFYP_EWcqLwvB3g8IvXMaE7KqY0';
-if (!process.env.VAPID_PUBLIC_KEY || !process.env.VAPID_PRIVATE_KEY) {
-    console.warn('⚠️ [WebPush] VAPID_PUBLIC_KEY o VAPID_PRIVATE_KEY no configuradas en env. Las notificaciones web push no funcionarán correctamente.');
-}
+// VAPID keys SOLO desde env. Nunca hardcoded — claves en código git = leak permanente.
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
+const webPushEnabled = !!(VAPID_PUBLIC_KEY && VAPID_PRIVATE_KEY);
 
-// Configurar VAPID
-webpush.setVapidDetails(
-    'mailto:soporte@chatgorithm.com',
-    VAPID_PUBLIC_KEY,
-    VAPID_PRIVATE_KEY
-);
+if (!webPushEnabled) {
+    console.warn('⚠️ [WebPush] VAPID_PUBLIC_KEY o VAPID_PRIVATE_KEY no configuradas. Web push DESACTIVADO.');
+} else {
+    // Configurar VAPID solo si tenemos ambas claves
+    webpush.setVapidDetails(
+        'mailto:soporte@chatgorithm.com',
+        VAPID_PUBLIC_KEY!,
+        VAPID_PRIVATE_KEY!
+    );
+}
 
 // Almacén de suscripciones push (en memoria, en producción usar DB)
 const pushSubscriptions = new Map<string, any>();
@@ -430,6 +517,7 @@ async function sendFCMNotification(payload: { title: string, body: string, data?
 
 // Función para enviar push notification
 async function sendPushNotification(userIdentifier: string, payload: { title: string, body: string, icon?: string, url?: string, phone?: string }) {
+    if (!webPushEnabled) return; // VAPID keys no configuradas, push desactivado
     const subscription = pushSubscriptions.get(userIdentifier);
     if (!subscription) {
         console.log(`📱 [Push] No hay suscripción para ${userIdentifier}`);
@@ -2472,8 +2560,48 @@ app.post('/api/bot-config', async (req, res) => { if (!base) return res.sendStat
 //  WEBHOOKS (CORREGIDO: RECIPIENT EXPLÍCITO)
 // ==========================================
 app.get('/webhook', (req, res) => { if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === verifyToken) res.status(200).send(req.query['hub.challenge']); else res.sendStatus(403); });
+
+// HMAC verification — comprueba que el webhook viene realmente de Meta y no de un atacante.
+// Meta firma cada POST con HMAC-SHA256 usando el "App Secret" (panel Meta → app → settings → basic).
+// Si META_APP_SECRET no está configurado, se loguea warning pero se acepta (backward compat).
+function verifyMetaSignature(req: any): { ok: boolean, reason?: string } {
+    if (!metaAppSecret) {
+        // No bloqueamos para no romper despliegues existentes, pero avisamos en cada llamada
+        return { ok: true, reason: 'no_secret_configured' };
+    }
+    const signature = req.headers['x-hub-signature-256'] as string | undefined;
+    if (!signature || !signature.startsWith('sha256=')) {
+        return { ok: false, reason: 'missing_signature' };
+    }
+    const rawBody: Buffer | undefined = req.rawBody;
+    if (!rawBody) {
+        return { ok: false, reason: 'no_raw_body' };
+    }
+    const expected = 'sha256=' + crypto.createHmac('sha256', metaAppSecret).update(rawBody).digest('hex');
+    try {
+        const sigBuf = Buffer.from(signature);
+        const expBuf = Buffer.from(expected);
+        if (sigBuf.length !== expBuf.length) return { ok: false, reason: 'length_mismatch' };
+        const ok = crypto.timingSafeEqual(sigBuf, expBuf);
+        return ok ? { ok: true } : { ok: false, reason: 'signature_mismatch' };
+    } catch {
+        return { ok: false, reason: 'compare_error' };
+    }
+}
+
 app.post('/webhook', async (req, res) => {
     try {
+        // Verificación HMAC ANTES de cualquier otra cosa
+        const sigCheck = verifyMetaSignature(req);
+        if (!sigCheck.ok) {
+            console.warn(`🚫 [WEBHOOK] Firma inválida (${sigCheck.reason}). Petición rechazada.`);
+            return res.sendStatus(403);
+        }
+        if (sigCheck.reason === 'no_secret_configured' && !((global as any).__metaSecretWarningShown)) {
+            console.warn('⚠️ [SECURITY] META_APP_SECRET no configurado. Webhook aceptando peticiones SIN verificar firma. Configúralo en producción para evitar inyección de mensajes falsos.');
+            (global as any).__metaSecretWarningShown = true;
+        }
+
         const body = req.body;
         console.log(`📨 [WEBHOOK] POST recibido. object=${body.object}, entries=${body.entry?.length || 0}`);
 
@@ -2611,6 +2739,30 @@ app.post('/webhook', async (req, res) => {
 //  SOCKETS
 // ==========================================
 io.on('connection', (socket) => {
+    // Estado de autenticación por socket (se rellena en login_attempt)
+    socket.data.authenticated = false;
+    socket.data.username = null;
+    socket.data.role = null;
+
+    // Middleware de autenticación: bloquea eventos destructivos si el socket no ha completado login
+    socket.use((packet, next) => {
+        const eventName = packet[0];
+        if (!DESTRUCTIVE_SOCKET_EVENTS.has(eventName)) return next();
+        if (!socketAuthRequired) {
+            // Modo debug: dejar pasar pero loguear
+            if (!socket.data.authenticated) {
+                console.warn(`⚠️ [SOCKET] Evento destructivo "${eventName}" desde socket NO autenticado (auth desactivada por env).`);
+            }
+            return next();
+        }
+        if (socket.data.authenticated) return next();
+        console.warn(`🚫 [SOCKET] Bloqueado "${eventName}" — socket sin autenticar (id=${socket.id}).`);
+        socket.emit('action_error', 'Sesión no autenticada. Vuelve a iniciar sesión.');
+        // Llamar next() con error rompe la conexión en algunas versiones de socket.io.
+        // Mejor: cortar la cadena sin propagar.
+        return; // no llamar next() — el evento se descarta
+    });
+
     socket.on('request_config', async () => { if (base) { const r = await base('Config').select().all(); socket.emit('config_list', r.map(x => ({ id: x.id, name: x.get('name'), type: x.get('type') }))); } });
     socket.on('add_config', async (data) => { if (base) { await base('Config').create([{ fields: { "name": data.name, "type": data.type } }]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
     socket.on('delete_config', async (id) => { if (base) { const realId = (typeof id === 'object' && id.id) ? id.id : id; await base('Config').destroy([realId]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
@@ -2620,7 +2772,41 @@ io.on('connection', (socket) => {
     socket.on('delete_quick_reply', async (id) => { if (base) { await base('QuickReplies').destroy([id]); const r = await base('QuickReplies').select().all(); io.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
     socket.on('update_quick_reply', async (d) => { if (base) { await base('QuickReplies').update([{ id: d.id, fields: { "Title": d.title, "Content": d.content, "Shortcut": d.shortcut } }]); const r = await base('QuickReplies').select().all(); io.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
     socket.on('request_agents', async () => { if (base) { const r = await base('Agents').select().all(); socket.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); } });
-    socket.on('login_attempt', async (data) => { if (!base) return; const r = await base('Agents').select({ filterByFormula: `{name} = '${data.name}'`, maxRecords: 1 }).firstPage(); if (r.length > 0) { const pwd = r[0].get('password'); const prefs = r[0].get('Preferences') ? JSON.parse(r[0].get('Preferences') as string) : {}; let agentPasswordOk = false; if (!pwd || String(pwd).trim() === "") { agentPasswordOk = true; } else if (String(pwd).startsWith('$2b$')) { agentPasswordOk = await bcrypt.compare(String(data.password), String(pwd)); } else { agentPasswordOk = String(pwd) === String(data.password); if (agentPasswordOk) { try { const hashed = await bcrypt.hash(String(pwd), 10); await base('Agents').update([{ id: r[0].id, fields: { "password": hashed } }]); } catch (_) {} } } if (agentPasswordOk) socket.emit('login_success', { username: r[0].get('name'), role: r[0].get('role'), preferences: prefs }); else socket.emit('login_error', 'Contraseña incorrecta'); } else socket.emit('login_error', 'Usuario no encontrado'); });
+    socket.on('login_attempt', async (data) => {
+        if (!base) return;
+        // Sanitizar nombre para evitar inyección de fórmula Airtable
+        const safeName = String(data.name || '').replace(/'/g, "\\'");
+        const r = await base('Agents').select({ filterByFormula: `{name} = '${safeName}'`, maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            const pwd = r[0].get('password');
+            const prefs = r[0].get('Preferences') ? JSON.parse(r[0].get('Preferences') as string) : {};
+            let agentPasswordOk = false;
+            if (!pwd || String(pwd).trim() === "") {
+                agentPasswordOk = true;
+            } else if (String(pwd).startsWith('$2b$')) {
+                agentPasswordOk = await bcrypt.compare(String(data.password), String(pwd));
+            } else {
+                agentPasswordOk = String(pwd) === String(data.password);
+                if (agentPasswordOk) {
+                    try {
+                        const hashed = await bcrypt.hash(String(pwd), 10);
+                        await base('Agents').update([{ id: r[0].id, fields: { "password": hashed } }]);
+                    } catch (_) {}
+                }
+            }
+            if (agentPasswordOk) {
+                // ✅ Marcar el socket como autenticado para el middleware de eventos destructivos
+                socket.data.authenticated = true;
+                socket.data.username = r[0].get('name') as string;
+                socket.data.role = (r[0].get('role') as string) || 'agent';
+                socket.emit('login_success', { username: r[0].get('name'), role: r[0].get('role'), preferences: prefs });
+            } else {
+                socket.emit('login_error', 'Contraseña incorrecta');
+            }
+        } else {
+            socket.emit('login_error', 'Usuario no encontrado');
+        }
+    });
     socket.on('create_agent', async (d) => { if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
     socket.on('delete_agent', async (d) => { if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
     socket.on('update_agent', async (d) => { if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
@@ -2877,20 +3063,22 @@ io.on('connection', (socket) => {
                 }, fcmRecipients);
             }
 
-            // 2. Web (WebPush)
-            Array.from(pushSubscriptions.entries()).forEach(([username, sub]) => {
-                if (username === msg.sender) return; // No notificar al remitente
-                if (isPrivate && username !== u1 && username !== u2) return; // Filtro chat privado
-                
-                try {
-                    const payload = JSON.stringify({ title: pushTitle, body: msg.content, url: '/team' });
-                    webpush.sendNotification(sub, payload).catch(e => {
-                        console.error('❌ [WebPush] Error enviando team chat:', e.statusCode || e.message);
-                    });
-                } catch (e) {
-                    console.error('Error procesando WebPush de equipo:', e);
-                }
-            });
+            // 2. Web (WebPush) — solo si VAPID está configurado
+            if (webPushEnabled) {
+                Array.from(pushSubscriptions.entries()).forEach(([username, sub]) => {
+                    if (username === msg.sender) return; // No notificar al remitente
+                    if (isPrivate && username !== u1 && username !== u2) return; // Filtro chat privado
+
+                    try {
+                        const payload = JSON.stringify({ title: pushTitle, body: msg.content, url: '/team' });
+                        webpush.sendNotification(sub, payload).catch(e => {
+                            console.error('❌ [WebPush] Error enviando team chat:', e.statusCode || e.message);
+                        });
+                    } catch (e) {
+                        console.error('Error procesando WebPush de equipo:', e);
+                    }
+                });
+            }
 
         } catch (e: any) {
             console.error("❌ Error saving team msg:", e);
