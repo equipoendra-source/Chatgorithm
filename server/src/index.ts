@@ -1314,6 +1314,53 @@ async function sendAgentCardIfNeeded(cleanTo: string, agentName: string, originP
     }
 }
 
+// ==========================================================================
+// DESCARGA DE MEDIA DE WHATSAPP — para procesamiento multimodal con Gemini
+// ==========================================================================
+// Flujo Meta: GET /{media_id} → devuelve URL temporal → GET URL → bytes
+// Devuelve { buffer, mimeType } o null si falla.
+// MAX 19MB (límite de inlineData de Gemini es 20MB).
+const MAX_MEDIA_BYTES = 19 * 1024 * 1024;
+async function downloadWhatsAppMedia(mediaId: string, originPhoneId: string): Promise<{ buffer: Buffer, mimeType: string } | null> {
+    const token = getToken(originPhoneId);
+    if (!token) {
+        console.error('❌ [Media] Token no encontrado para', originPhoneId);
+        return null;
+    }
+    try {
+        // Paso 1: obtener URL del media
+        const meta = await axios.get(`https://graph.facebook.com/v21.0/${mediaId}`, {
+            headers: { Authorization: `Bearer ${token}` },
+            timeout: 10000
+        });
+        const url = meta.data?.url as string | undefined;
+        const mimeType = meta.data?.mime_type as string | undefined;
+        const fileSize = Number(meta.data?.file_size || 0);
+        if (!url || !mimeType) {
+            console.warn(`⚠️ [Media] Metadatos incompletos para ${mediaId}`);
+            return null;
+        }
+        if (fileSize > MAX_MEDIA_BYTES) {
+            console.warn(`⚠️ [Media] Archivo ${mediaId} excede ${MAX_MEDIA_BYTES} bytes (${fileSize}). Saltando.`);
+            return null;
+        }
+        // Paso 2: descargar bytes con el mismo token
+        const fileRes = await axios.get(url, {
+            headers: { Authorization: `Bearer ${token}` },
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            maxContentLength: MAX_MEDIA_BYTES,
+            maxBodyLength: MAX_MEDIA_BYTES,
+        });
+        const buffer = Buffer.from(fileRes.data);
+        console.log(`📥 [Media] Descargado ${mediaId}: ${mimeType}, ${buffer.length} bytes`);
+        return { buffer, mimeType };
+    } catch (e: any) {
+        console.error(`❌ [Media] Error descargando ${mediaId}:`, e.response?.status, e.response?.data || e.message);
+        return null;
+    }
+}
+
 async function sendWhatsAppText(to: string, body: string, originPhoneId: string) {
     const token = getToken(originPhoneId);
     if (!token) return console.error("❌ Error: Token no encontrado para", originPhoneId);
@@ -1694,11 +1741,21 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
     }
 }
 
-async function processAI(text: string, contactPhone: string, contactName: string, originPhoneId: string) {
+// inboundMedia: opcional. Cuando el cliente manda audio/imagen/vídeo, descargamos los bytes
+// y se los pasamos a Gemini como contenido multimodal en el primer mensaje del turno.
+// Esto convierte a Laura en un asistente que ENTIENDE notas de voz e imágenes — no solo texto.
+async function processAI(
+    text: string,
+    contactPhone: string,
+    contactName: string,
+    originPhoneId: string,
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
+) {
     if (!genAI) { console.error("❌ No API Key"); return; }
 
     const clean = cleanNumber(contactPhone);
-    console.log(`🧠 [IA] Start: ${clean}: "${text}"`);
+    const mediaTag = inboundMedia ? ` [+${inboundMedia.type}:${inboundMedia.mediaId}]` : '';
+    console.log(`🧠 [IA] Start: ${clean}: "${text}"${mediaTag}`);
     activeAiChats.add(clean);
     io.emit('ai_status', { phone: clean, status: 'thinking' });
     io.emit('ai_active_change', { phone: clean, active: true });
@@ -1817,7 +1874,38 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
             };
 
             const chat = model.startChat({ history });
-            let currentResponse: any = (await chat.sendMessage(text)).response;
+
+            // ============================================================
+            // CONSTRUIR EL PRIMER MENSAJE — multimodal si hay audio/imagen
+            // ============================================================
+            // Si el cliente mandó voz/foto/vídeo, descargamos los bytes y los enviamos
+            // como inlineData base64 a Gemini. Esto le permite ENTENDER el contenido
+            // (transcribir audio, leer imagen) en lugar de ver solo "🎤 (Audio)".
+            let firstMessageParts: any[];
+            if (inboundMedia && (inboundMedia.type === 'audio' || inboundMedia.type === 'image' || inboundMedia.type === 'video')) {
+                const downloaded = await downloadWhatsAppMedia(inboundMedia.mediaId, originPhoneId);
+                if (downloaded) {
+                    // Hint de texto para que Gemini sepa qué hacer
+                    const hint = inboundMedia.type === 'audio'
+                        ? `[El cliente envió una nota de voz. Escúchala y responde a lo que pide. Si no es claro, pídele aclaración. Texto literal del mensaje (placeholder): "${text}"]`
+                        : inboundMedia.type === 'image'
+                            ? `[El cliente envió una imagen${text && text !== '📷 (Imagen)' ? ' con caption: "' + text + '"' : ''}. Mírala y responde.]`
+                            : `[El cliente envió un vídeo${text && text !== '🎥 (Video)' ? ' con caption: "' + text + '"' : ''}. Analízalo y responde.]`;
+                    firstMessageParts = [
+                        { text: hint },
+                        { inlineData: { mimeType: downloaded.mimeType, data: downloaded.buffer.toString('base64') } }
+                    ];
+                    console.log(`🎙️ [IA] Mensaje multimodal: ${inboundMedia.type} ${downloaded.mimeType} (${downloaded.buffer.length} bytes)`);
+                } else {
+                    // Fallback: si la descarga falló, mandamos solo texto
+                    firstMessageParts = [{ text: `${text} [El cliente intentó enviar un ${inboundMedia.type} pero no se pudo descargar. Pídele que lo reenvíe o lo describa por texto.]` }];
+                    console.warn(`⚠️ [IA] Descarga de media falló para ${inboundMedia.mediaId}, fallback a texto`);
+                }
+            } else {
+                firstMessageParts = [{ text }];
+            }
+
+            let currentResponse: any = (await chat.sendMessage(firstMessageParts)).response;
 
             // Loop iterativo de tool calls — soporta múltiples rondas anidadas
             // (ej. get_available_days → get_available_appointments → book_appointment → stop_conversation)
@@ -2699,16 +2787,22 @@ app.post('/webhook', async (req, res) => {
             // Comprobar si hay sesión de reserva activa en Airtable (sobrevive reinicios)
             const hasPendingBooking = !activeAiChats.has(from) && !!(await getAppointmentCache(from));
 
+            // Construir paquete inboundMedia si el mensaje trae audio/imagen/vídeo/doc
+            const inboundMediaPkg: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' } | undefined =
+                (inboundMediaId && (inboundType === 'audio' || inboundType === 'image' || inboundType === 'video' || inboundType === 'document'))
+                    ? { mediaId: inboundMediaId, type: inboundType as 'audio' | 'image' | 'video' | 'document' }
+                    : undefined;
+
             if (activeAiChats.has(from)) {
                 console.log(`🤖 IA activada por sesión activa para ${from}`);
-                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId);
+                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
             } else if (hasPendingBooking) {
                 console.log(`🤖 IA reactivada por reserva pendiente en cache para ${from}`);
                 activeAiChats.add(from);
-                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId);
+                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
             } else if (contactRecord && (contactRecord.get('status') === 'Nuevo' || contactRecord.get('status') === 'Cerrado') && !contactRecord.get('assigned_to')) {
                 console.log(`🤖 IA activada (status=${contactRecord.get('status')}) para ${from}`);
-                processAI(text, from, contactRecord.get('name') as string || "Cliente", originPhoneId);
+                processAI(text, from, contactRecord.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
             } else {
                 console.log(`🔕 IA ignorada. Status=${contactRecord?.get('status')}, Assigned=${contactRecord?.get('assigned_to')}`);
             }
