@@ -103,6 +103,63 @@ app.get('/', (req, res) => {
     res.send('🤖 Servidor Chatgorim (Gemini Powered) Online 🚀');
 });
 
+// HEALTH CHECK — métricas para monitoreo y debugging
+// GET /api/health → JSON con uptime, contadores, latencias, alertas recientes
+app.get('/api/health', (_req, res) => {
+    const uptimeMs = Date.now() - BOOT_TIME;
+    res.json({
+        status: 'ok',
+        uptime: {
+            ms: uptimeMs,
+            human: `${Math.floor(uptimeMs / 86400000)}d ${Math.floor((uptimeMs % 86400000) / 3600000)}h ${Math.floor((uptimeMs % 3600000) / 60000)}m`
+        },
+        bootTime: new Date(BOOT_TIME).toISOString(),
+        version: 'v1.5-impoluta',
+        config: {
+            geminiModel: MODEL_NAME,
+            metaSecretConfigured: !!metaAppSecret,
+            corsRestricted: allowedOrigins !== '*',
+            socketAuthRequired: socketAuthRequired,
+            webPushEnabled: webPushEnabled,
+        },
+        counters: {
+            inboundMessages: metrics.inboundMessages,
+            outboundMessages: metrics.outboundMessages,
+            outboundFailures: metrics.outboundFailures,
+            outboundFailureRate: metrics.outboundMessages > 0
+                ? Number((metrics.outboundFailures / (metrics.outboundMessages + metrics.outboundFailures) * 100).toFixed(2))
+                : 0,
+            geminiCalls: metrics.geminiCalls,
+            geminiErrors: metrics.geminiErrors,
+            geminiTimeouts: metrics.geminiTimeouts,
+            geminiAborts: metrics.geminiAborts,
+            geminiErrorRate: metrics.geminiCalls > 0
+                ? Number((metrics.geminiErrors / metrics.geminiCalls * 100).toFixed(2))
+                : 0,
+            appointmentsBooked: metrics.appointmentsBooked,
+            appointmentsCancelled: metrics.appointmentsCancelled,
+            appointmentRaceLosses: metrics.appointmentRaceLosses,
+            fallbacksSent: metrics.fallbacksSent,
+            templatesFailed: metrics.templatesFailed,
+        },
+        latencies_ms: {
+            geminiSamples: metrics.geminiLatencies.length,
+            p50: metrics.percentile(0.5),
+            p95: metrics.percentile(0.95),
+            p99: metrics.percentile(0.99),
+        },
+        state: {
+            activeAiConversations: activeAiChats.size,
+            aiInflight: aiAbortControllers.size,
+            onlineAgents: Array.from(new Set(onlineUsers.values())).length,
+            kbCacheLoaded: !!kbCache,
+            kbCacheChunks: kbCache?.chunks.length || 0,
+            kbCacheAgeMs: kbCache ? Date.now() - kbCache.loadedAt : null,
+        },
+        recentAlerts: recentAlerts.slice(-10).reverse() // Últimas 10 alertas, más recientes primero
+    });
+});
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 // --- STORAGE INTERNO PARA CHAT DE EQUIPO ---
@@ -236,6 +293,68 @@ function escAt(s: any): string {
 function truncate(s: any, max: number = 1000): string {
     const str = String(s ?? '');
     return str.length > max ? str.slice(0, max) : str;
+}
+
+// =========================================================================
+// MÉTRICAS — contadores y latencias para /api/health
+// =========================================================================
+const BOOT_TIME = Date.now();
+const metrics = {
+    inboundMessages: 0,
+    outboundMessages: 0,
+    outboundFailures: 0,
+    geminiCalls: 0,
+    geminiErrors: 0,
+    geminiTimeouts: 0,
+    geminiAborts: 0,
+    appointmentsBooked: 0,
+    appointmentsCancelled: 0,
+    appointmentRaceLosses: 0,
+    fallbacksSent: 0,
+    templatesFailed: 0,
+    // Latencias en ms — anillo de 100 últimas medidas, para percentiles aprox
+    geminiLatencies: [] as number[],
+    pushLatency: (ms: number) => {
+        metrics.geminiLatencies.push(ms);
+        if (metrics.geminiLatencies.length > 100) metrics.geminiLatencies.shift();
+    },
+    percentile: (p: number): number => {
+        const arr = [...metrics.geminiLatencies].sort((a, b) => a - b);
+        if (arr.length === 0) return 0;
+        const idx = Math.min(arr.length - 1, Math.floor(arr.length * p));
+        return arr[idx];
+    }
+};
+
+// =========================================================================
+// ALERTAS al equipo — para que se enteren cuando algo falla en segundo plano
+// =========================================================================
+// Tipos de alerta:
+//   - 'send_failed'        — Meta rechazó un mensaje saliente (24h, template, etc.)
+//   - 'template_failed'    — template ScheduledNotification falló N veces
+//   - 'appointment_race'   — dos clientes pelearon por la misma cita
+//   - 'ia_fallback'        — Laura mandó fallback ('he tenido un problema...')
+//   - 'gemini_quota'       — cuota Gemini agotada
+type AlertType = 'send_failed' | 'template_failed' | 'appointment_race' | 'ia_fallback' | 'gemini_quota' | 'webhook_bad_sig';
+interface TeamAlert {
+    type: AlertType;
+    severity: 'warning' | 'error' | 'critical';
+    message: string;
+    context?: any;
+    timestamp: string;
+}
+const recentAlerts: TeamAlert[] = []; // ring buffer
+const MAX_ALERTS_KEPT = 50;
+function notifyTeam(type: AlertType, severity: TeamAlert['severity'], message: string, context?: any) {
+    const alert: TeamAlert = { type, severity, message, context, timestamp: new Date().toISOString() };
+    recentAlerts.push(alert);
+    if (recentAlerts.length > MAX_ALERTS_KEPT) recentAlerts.shift();
+    const emoji = severity === 'critical' ? '🚨' : severity === 'error' ? '❌' : '⚠️';
+    console.error(`${emoji} [ALERT:${type}] ${message}`, context ? JSON.stringify(context).slice(0, 500) : '');
+    // Emit a TODOS los sockets autenticados (el frontend filtra y muestra al admin)
+    try {
+        io.emit('team_alert', alert);
+    } catch (_) {}
 }
 
 const appointmentOptionsCache = new Map<string, Record<number, string>>();
@@ -1065,6 +1184,10 @@ async function runNotificationScheduler() {
                     await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
                         id: notif.id, fields: { status: 'failed', error: `Máximo reintentos. Último error: ${lastError}`.slice(0, 500) }
                     }]);
+                    metrics.templatesFailed++;
+                    notifyTeam('template_failed', 'error',
+                        `Notificación "${templateName}" a ${phone} FALLÓ tras 3 reintentos. Último error: ${lastError.slice(0, 200)}`,
+                        { phone, templateName, lastError });
                 }
             }
             await delay(300);
@@ -1476,34 +1599,131 @@ async function downloadWhatsAppMedia(mediaId: string, originPhoneId: string): Pr
     }
 }
 
-async function sendWhatsAppText(to: string, body: string, originPhoneId: string) {
+// Result type: callers nuevos pueden saber si el envío fue OK o falló.
+// Callers viejos que no miren el return siguen funcionando (backward compat).
+interface SendResult {
+    ok: boolean;
+    code?: number;            // Código de error Meta (131047 = 24h window, etc.)
+    metaError?: string;       // Mensaje de Meta
+    httpStatus?: number;      // Status HTTP
+    dedup?: boolean;          // Si fue dedupado por idempotencia
+}
+
+// Idempotencia: hash de (phone+body) → timestamp del último envío.
+// Si llega un envío idéntico en <10s, lo dedupamos. Protege contra dobles clicks
+// en frontend, retries duplicados de webhook, llamadas redundantes de Gemini.
+const recentSendHashes = new Map<string, number>();
+const DEDUP_WINDOW_MS = 10000;
+function shouldDedupSend(phone: string, body: string): boolean {
+    const key = `${phone}::${body.slice(0, 200)}`;
+    const last = recentSendHashes.get(key);
+    const now = Date.now();
+    if (last && (now - last) < DEDUP_WINDOW_MS) {
+        return true;
+    }
+    recentSendHashes.set(key, now);
+    // Limpieza lazy: cada 100 entradas borra las viejas
+    if (recentSendHashes.size > 100) {
+        for (const [k, ts] of recentSendHashes) {
+            if ((now - ts) > DEDUP_WINDOW_MS * 3) recentSendHashes.delete(k);
+        }
+    }
+    return false;
+}
+
+async function sendWhatsAppText(to: string, body: string, originPhoneId: string): Promise<SendResult> {
     const token = getToken(originPhoneId);
-    if (!token) return console.error("❌ Error: Token no encontrado para", originPhoneId);
+    if (!token) {
+        console.error("❌ Error: Token no encontrado para", originPhoneId);
+        return { ok: false, metaError: 'NO_TOKEN' };
+    }
+    if (!body || !body.trim()) {
+        console.warn("⚠️ sendWhatsAppText: body vacío, ignorando.");
+        return { ok: false, metaError: 'EMPTY_BODY' };
+    }
 
     // Limpieza aquí también
     const cleanTo = cleanNumber(to);
-
-    try {
-        await axios.post(
-            `https://graph.facebook.com/v21.0/${originPhoneId}/messages`,
-            { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body } },
-            { headers: { Authorization: `Bearer ${token}` } }
-        );
-
-        // Usamos saveAndEmitMessage para consistencia
-        await saveAndEmitMessage({
-            text: body,
-            sender: "Bot IA",
-            recipient: cleanTo,
-            timestamp: new Date().toISOString(),
-            type: "text",
-            origin_phone_id: originPhoneId
-        });
-
-        await handleContactUpdate(cleanTo, `🤖 Laura: ${body}`, undefined, originPhoneId);
-    } catch (e: any) {
-        console.error("Error enviando WA:", e.response?.data || e.message);
+    if (!cleanTo) {
+        console.error("❌ sendWhatsAppText: número destino vacío tras limpiar");
+        return { ok: false, metaError: 'INVALID_RECIPIENT' };
     }
+
+    // Idempotencia: si en los últimos 10s hemos mandado el MISMO body a este número,
+    // evitamos doble envío (clicks duplicados, retries de webhook, redundancia IA).
+    if (shouldDedupSend(cleanTo, body)) {
+        console.warn(`🔁 [WA] Mensaje duplicado a ${cleanTo} bloqueado por dedupe (<${DEDUP_WINDOW_MS}ms)`);
+        return { ok: true, dedup: true };
+    }
+
+    // Reintentos para errores transitorios (timeout, 5xx, rate limit).
+    // No reintentamos 4xx no transitorios (24h window, template no aprobado, número inválido).
+    const MAX_ATTEMPTS = 3;
+    let lastError: any = null;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        try {
+            await axios.post(
+                `https://graph.facebook.com/v21.0/${originPhoneId}/messages`,
+                { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body } },
+                { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
+            );
+
+            // Éxito: guardar mensaje y actualizar contacto
+            metrics.outboundMessages++;
+            await saveAndEmitMessage({
+                text: body,
+                sender: "Bot IA",
+                recipient: cleanTo,
+                timestamp: new Date().toISOString(),
+                type: "text",
+                origin_phone_id: originPhoneId
+            });
+            await handleContactUpdate(cleanTo, `🤖 Laura: ${body}`, undefined, originPhoneId);
+            return { ok: true };
+        } catch (e: any) {
+            lastError = e;
+            const status = e.response?.status;
+            const metaErr = e.response?.data?.error;
+            const metaCode = metaErr?.code as number | undefined;
+            const metaMsg = metaErr?.message || e.message;
+
+            // Errores transitorios → reintentar
+            const isTransient = !status || status === 429 || (status >= 500 && status < 600) || e.code === 'ECONNRESET' || e.code === 'ETIMEDOUT';
+            if (isTransient && attempt < MAX_ATTEMPTS) {
+                const wait = 1000 * Math.pow(2, attempt - 1); // 1s, 2s, 4s
+                console.warn(`⚠️ [WA] Envío transitorio falló (intento ${attempt}/${MAX_ATTEMPTS}): ${metaMsg}. Reintentando en ${wait}ms...`);
+                await delay(wait);
+                continue;
+            }
+
+            // Errores permanentes (no reintentar)
+            metrics.outboundFailures++;
+            console.error(`❌ [WA] Envío falló a ${cleanTo} [HTTP ${status}, code ${metaCode}]:`, metaMsg);
+
+            // Alertas específicas según código Meta
+            // 131047 = mensaje fuera de ventana 24h
+            // 131026 = receptor no tiene WhatsApp
+            // 131051 = tipo de mensaje no soportado
+            // 132xxx = problemas de template
+            if (metaCode === 131047) {
+                notifyTeam('send_failed', 'warning', `Ventana 24h cerrada con ${cleanTo}. No se pudo enviar texto libre. Considera usar un template.`, { phone: cleanTo, code: metaCode });
+            } else if (metaCode === 131026) {
+                notifyTeam('send_failed', 'warning', `${cleanTo} no tiene WhatsApp. Borra del contacto o cambia canal.`, { phone: cleanTo, code: metaCode });
+            } else if (status === 401 || status === 403) {
+                notifyTeam('send_failed', 'critical', `Token de WhatsApp INVÁLIDO o sin permisos. URGENTE: regenera el token.`, { code: metaCode, status });
+            } else if (status === 429) {
+                notifyTeam('send_failed', 'error', `Rate limit de Meta alcanzado. Mensajes salientes bloqueados temporalmente.`, { code: metaCode });
+            } else {
+                notifyTeam('send_failed', 'error', `No se pudo enviar mensaje a ${cleanTo}: ${metaMsg}`, { phone: cleanTo, code: metaCode, status });
+            }
+
+            return { ok: false, code: metaCode, metaError: metaMsg, httpStatus: status };
+        }
+    }
+    // Solo llegamos aquí si todos los retries fallaron con error transitorio
+    metrics.outboundFailures++;
+    notifyTeam('send_failed', 'error', `Envío falló tras ${MAX_ATTEMPTS} reintentos a ${cleanTo}: ${lastError?.message || 'unknown'}`, { phone: cleanTo });
+    return { ok: false, metaError: lastError?.message || 'MAX_RETRIES' };
 }
 
 // ==========================================
@@ -1676,10 +1896,19 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
         console.error(`❌ [Book] clientPhone vacío tras limpiar: "${clientPhone}"`);
         return "❌ Error: número de teléfono inválido.";
     }
+    // clientName ya no se acepta vacío ni "Cliente" — Gemini debe haberlo recopilado.
+    // Devolvemos un mensaje que la IA verá y aprovechará para preguntárselo al usuario.
     if (!clientName || !clientName.trim() || clientName === "Cliente") {
-        console.warn(`⚠️ [Book] clientName vacío o por defecto. Usando placeholder.`);
-        clientName = (clientName && clientName.trim()) || "Cliente";
+        console.warn(`⚠️ [Book] Intento de reserva SIN nombre real del cliente (clientName="${clientName}").`);
+        return "❌ Falta el nombre del cliente. Pídeselo y vuelve a llamar a book_appointment cuando lo tengas.";
     }
+    // Truncar campos para no romper Airtable (limit ~100KB pero quedémonos cortos)
+    clientName = truncate(clientName.trim(), 200);
+    field1 = truncate(field1, 200);
+    field2 = truncate(field2, 200);
+    field3 = truncate(field3, 200);
+    field4 = truncate(field4, 300);
+    field5 = truncate(field5, 500);
 
     // SERIALIZAR por recordId — si dos clientes intentan reservar la misma cita
     // a la vez, el 2º espera al 1º y verá Status=Booked, devolviendo "ya ocupada".
@@ -1698,6 +1927,8 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
 
             if (currentStatus !== 'Available') {
                 console.warn(`⚠️ [Book] Race detectada: ${realId} ya estaba en estado "${currentStatus}" cuando llegamos al lock.`);
+                metrics.appointmentRaceLosses++;
+                notifyTeam('appointment_race', 'warning', `Race detectada en cita ${realId}: cliente ${cleanedPhone} llegó tarde, cita ya estaba "${currentStatus}".`, { realId, phone: cleanedPhone, currentStatus });
                 return "❌ Vaya, esa hora acaba de ocuparse. ¿Quieres ver otra?";
             }
 
@@ -1729,6 +1960,8 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 const winnerPhone = String(verify.get('ClientPhone') || '');
                 if (winnerPhone && winnerPhone !== cleanedPhone) {
                     console.error(`💥 [Book] Cross-instance race: ${realId} acabó con ClientPhone=${winnerPhone} (esperado ${cleanedPhone}). Cliente perdió la cita.`);
+                    metrics.appointmentRaceLosses++;
+                    notifyTeam('appointment_race', 'error', `Race CROSS-INSTANCE en cita ${realId}: nuestra reserva fue pisada por ${winnerPhone}. ¿Hay >1 instancia de Render activa?`, { realId, expected: cleanedPhone, gotPhone: winnerPhone });
                     return "❌ Vaya, justo otro cliente la ha cogido. ¿Quieres ver otra hora?";
                 }
             } catch (e: any) {
@@ -1753,6 +1986,7 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             await clearAppointmentCache(cleanedPhone);
             activeAiChats.delete(cleanedPhone);
             io.emit('ai_active_change', { phone: cleanedPhone, active: false });
+            metrics.appointmentsBooked++;
             console.log(`✅ [Book] Reserva completada para ${humanDate}`);
             return `✅ RESERVA CONFIRMADA para el ${humanDate}.`;
         } catch (e: any) {
@@ -1788,6 +2022,7 @@ async function cancelAppointment(clientPhone: string) {
             fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "", "Notas": "" }
         }]);
 
+        metrics.appointmentsCancelled++;
         console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate}`);
         return `✅ CITA_CANCELADA: ${humanDate}`;
     } catch (e: any) {
@@ -1819,12 +2054,23 @@ async function stopConversation(phone: string) {
     return "Fin conversación.";
 }
 
-async function getChatHistory(phone: string, currentText?: string, limit = 10) {
+// limit aumentado de 10 a 25 — Laura recordará 25 mensajes hacia atrás en vez de 10.
+// Esto evita que olvide la matrícula que le diste hace 12 turnos.
+// originPhoneId opcional: si se pasa, filtra también por la WABA — protección multi-tenant
+// para que dos empresas en la misma instancia nunca se mezclen conversaciones.
+async function getChatHistory(phone: string, currentText?: string, limit = 25, originPhoneId?: string) {
     if (!base) return [];
     try {
         const clean = cleanNumber(phone);
+        // Filtro: mensajes donde el cliente es sender o recipient.
+        // Multi-tenant: si nos pasan origin_phone_id, filtramos también por él para evitar
+        // que conversaciones de empresas distintas se solapen.
+        let filterFormula = `OR({sender} = '${clean}', {recipient} = '${clean}')`;
+        if (originPhoneId) {
+            filterFormula = `AND(${filterFormula}, {origin_phone_id} = '${escAt(originPhoneId)}')`;
+        }
         const records = await base('Messages').select({
-            filterByFormula: `OR({sender} = '${clean}', {recipient} = '${clean}')`,
+            filterByFormula: filterFormula,
             sort: [{ field: "timestamp", direction: "desc" }],
             maxRecords: limit
         }).all();
@@ -1919,6 +2165,8 @@ async function processAIInner(
 
     const mediaTag = inboundMedia ? ` [+${inboundMedia.type}:${inboundMedia.mediaId}]` : '';
     console.log(`🧠 [IA] Start: ${clean}: "${text}"${mediaTag}`);
+    metrics.geminiCalls++;
+    const iaStartedAt = Date.now();
     activeAiChats.add(clean);
     io.emit('ai_status', { phone: clean, status: 'thinking' });
     io.emit('ai_active_change', { phone: clean, active: true });
@@ -1938,7 +2186,7 @@ async function processAIInner(
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            const history = await getChatHistory(clean, text);
+            const history = await getChatHistory(clean, text, 25, originPhoneId);
 
             const rawPrompt = await getSystemPrompt();
             const fieldLabels = await getFieldLabels();
@@ -2164,6 +2412,11 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
             const status = error.status || error.response?.status;
             console.error(`❌ Error Gemini (intento ${attempt}/${MAX_RETRIES}) [${error.code || status || 'unknown'}]:`, error.message || error);
 
+            // Métricas
+            metrics.geminiErrors++;
+            if (error.code === 'TIMEOUT') metrics.geminiTimeouts++;
+            if (error.code === 'ABORT') metrics.geminiAborts++;
+
             // Si fue cancelado por intervención humana, salir limpio sin avisar al cliente
             if (error.code === 'ABORT') {
                 console.log(`🛑 [IA] Cancelada por intervención humana — ${clean}`);
@@ -2181,7 +2434,10 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
             // Errores no retryables o intentos agotados — avisar al cliente para no dejarle en silencio
             if (status === 404) console.error("👉 PISTA: Modelo no encontrado. Verifica MODEL_NAME.");
             if (status === 503) console.error("👉 Modelo sobrecargado. Intentos agotados.");
-            if (status === 429) console.error("👉 Rate limit / cuota agotada de Gemini.");
+            if (status === 429) {
+                console.error("👉 Rate limit / cuota agotada de Gemini.");
+                notifyTeam('gemini_quota', 'critical', 'Cuota Gemini agotada. Laura no podrá responder hasta que se renueve o se ajuste el plan.', { status });
+            }
             if (error.code === 'TIMEOUT') console.error("👉 Gemini tardó demasiado en responder.");
 
             // Fallback al cliente — NUNCA dejar al cliente sin respuesta cuando la IA falla
@@ -2189,7 +2445,11 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
                 const fallbackMsg = error.code === 'TIMEOUT'
                     ? "Disculpa, estoy tardando un poco. ¿Puedes repetirlo o esperar un momento? Si es urgente, te paso con un compañero."
                     : "Disculpa, he tenido un fallo técnico procesando tu mensaje. ¿Puedes repetírmelo? Si sigue fallando, te derivamos a un agente.";
-                await sendWhatsAppText(clean, fallbackMsg, originPhoneId);
+                const sendRes = await sendWhatsAppText(clean, fallbackMsg, originPhoneId);
+                if (sendRes.ok) {
+                    metrics.fallbacksSent++;
+                    notifyTeam('ia_fallback', 'warning', `Laura envió fallback a ${clean} tras error Gemini.`, { error: error.message, code: error.code, status });
+                }
             } catch (sendErr: any) {
                 console.error(`💥 [IA] Fallback al cliente también falló:`, sendErr.message);
             }
@@ -2197,10 +2457,11 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
         }
     }
 
-    // Limpieza: AbortController y status
+    // Limpieza: AbortController, latencia y status
     if (aiAbortControllers.get(clean) === abortController) {
         aiAbortControllers.delete(clean);
     }
+    metrics.pushLatency(Date.now() - iaStartedAt);
     io.emit('ai_status', { phone: clean, status: 'idle' });
 }
 
@@ -2904,6 +3165,13 @@ app.post('/webhook', async (req, res) => {
         const sigCheck = verifyMetaSignature(req);
         if (!sigCheck.ok) {
             console.warn(`🚫 [WEBHOOK] Firma inválida (${sigCheck.reason}). Petición rechazada.`);
+            // Solo alertar al equipo si NO es "no_secret_configured" (eso ya se avisó en el arranque).
+            // Si tenemos secret y la firma no cuadra, alguien intenta inyectar mensajes falsos.
+            if (sigCheck.reason !== 'no_secret_configured') {
+                notifyTeam('webhook_bad_sig', 'critical',
+                    `Webhook con firma HMAC inválida (${sigCheck.reason}). Posible intento de inyección de mensajes falsos.`,
+                    { reason: sigCheck.reason, ip: req.ip });
+            }
             return res.sendStatus(403);
         }
         if (sigCheck.reason === 'no_secret_configured' && !((global as any).__metaSecretWarningShown)) {
@@ -2969,6 +3237,7 @@ app.post('/webhook', async (req, res) => {
             }
             processedWebhookIds.add(msg.id);
             setTimeout(() => processedWebhookIds.delete(msg.id), 300000); // 5 mins
+            metrics.inboundMessages++;
 
             console.log(`📩 [WEBHOOK] Mensaje de ${from}: "${text}" (tipo: ${msg.type}, mediaId: ${inboundMediaId || 'ninguno'}, phoneId: ${originPhoneId})`);
 
@@ -4529,6 +4798,57 @@ function cosineSimilarity(a: number[], b: number[]): number {
     return denom === 0 ? 0 : dot / denom;
 }
 
+// CACHE de la base de conocimiento — antes se hacía un select() de 5000 records
+// en CADA mensaje del cliente. Eso son ~5MB y varios segundos por turno.
+// Ahora cacheamos en memoria durante KB_CACHE_TTL ms y refresheamos en background.
+interface KbChunk { text: string; source: string; embedding: number[] }
+let kbCache: { chunks: KbChunk[]; loadedAt: number } | null = null;
+const KB_CACHE_TTL = 5 * 60 * 1000; // 5 minutos
+
+async function loadKbChunks(): Promise<KbChunk[]> {
+    if (!base) return [];
+    const records = await base(TABLE_BOT_KNOWLEDGE).select({ maxRecords: 5000 }).all();
+    const chunks: KbChunk[] = [];
+    for (const r of records) {
+        const embStr = r.get('embedding') as string;
+        if (!embStr) continue;
+        try {
+            const emb = JSON.parse(embStr);
+            if (!Array.isArray(emb)) continue;
+            chunks.push({
+                text: (r.get('chunkText') as string) || '',
+                source: (r.get('source') as string) || '',
+                embedding: emb
+            });
+        } catch { /* ignora chunks rotos */ }
+    }
+    return chunks;
+}
+
+async function getKbChunks(): Promise<KbChunk[]> {
+    const now = Date.now();
+    if (kbCache && (now - kbCache.loadedAt) < KB_CACHE_TTL) {
+        return kbCache.chunks;
+    }
+    // Cache miss o expirado — recargar (await porque la primera petición tiene que esperar)
+    try {
+        const fresh = await loadKbChunks();
+        kbCache = { chunks: fresh, loadedAt: now };
+        console.log(`📚 [KB] Cache (re)cargada: ${fresh.length} chunks`);
+        return fresh;
+    } catch (e: any) {
+        console.error('[KB] Error cargando chunks:', e.message);
+        // Si tenemos cache viejo, mejor servir eso que devolver vacío
+        return kbCache?.chunks || [];
+    }
+}
+
+// Invalidar cache cuando se sube/actualiza KB (llamado desde el endpoint de upload)
+function invalidateKbCache() {
+    kbCache = null;
+    console.log('📚 [KB] Cache invalidada (re-cargará al próximo searchKnowledge)');
+}
+
 // Busca los topK chunks más relevantes para una pregunta
 async function searchKnowledge(query: string, topK = 4): Promise<{ text: string; source: string; score: number }[]> {
     if (!base) return [];
@@ -4536,23 +4856,14 @@ async function searchKnowledge(query: string, topK = 4): Promise<{ text: string;
         const queryEmbedding = await computeEmbedding(query);
         if (!queryEmbedding) return [];
 
-        const records = await base(TABLE_BOT_KNOWLEDGE).select({ maxRecords: 5000 }).all();
-        if (records.length === 0) return [];
+        const chunks = await getKbChunks();
+        if (chunks.length === 0) return [];
 
-        const scored = records.map(r => {
-            const embStr = r.get('embedding') as string;
-            if (!embStr) return null;
-            try {
-                const emb = JSON.parse(embStr);
-                if (!Array.isArray(emb)) return null;
-                const score = cosineSimilarity(queryEmbedding, emb);
-                return {
-                    text: (r.get('chunkText') as string) || '',
-                    source: (r.get('source') as string) || '',
-                    score
-                };
-            } catch { return null; }
-        }).filter((x): x is { text: string; source: string; score: number } => x !== null);
+        const scored = chunks.map(c => ({
+            text: c.text,
+            source: c.source,
+            score: cosineSimilarity(queryEmbedding, c.embedding)
+        }));
 
         scored.sort((a, b) => b.score - a.score);
         // Solo devolvemos resultados con score relevante (>0.5)
@@ -4632,6 +4943,7 @@ app.post('/api/bot/knowledge/upload', upload.single('file'), async (req: any, re
             if (i < chunks.length - 1) await new Promise(r => setTimeout(r, 100));
         }
 
+        invalidateKbCache(); // Cache obsoleto tras nuevo upload
         res.json({
             success: true,
             source: fname,
@@ -4695,6 +5007,7 @@ app.delete('/api/bot/knowledge/:source', async (req, res) => {
             const ids = recordIds.slice(i, i + 10);
             if (ids.length) await base(TABLE_BOT_KNOWLEDGE).destroy(ids).catch(() => { });
         }
+        invalidateKbCache(); // Cache obsoleto tras borrado
         res.json({ success: true, deletedChunks: recordIds.length });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
