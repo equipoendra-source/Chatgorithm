@@ -20,6 +20,7 @@ import { getAuthServerUrl } from './config/api';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
 import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
+import { AlertCenter } from './components/AlertCenter';
 
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -533,6 +534,9 @@ function App() {
 
             {/* Support widget */}
             <SupportWidget />
+
+            {/* Centro de alertas — solo visible para admins. Escucha team_alert por socket. */}
+            <AlertCenter socket={socket} isAdmin={user.role?.toLowerCase() === 'admin'} />
 
             {/* THEME SELECTION - STRICT BLOCKING */}
             {showThemeModal && (

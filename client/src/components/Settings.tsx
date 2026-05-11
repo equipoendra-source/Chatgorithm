@@ -3,7 +3,7 @@ import {
     User, Plus, Briefcase, ArrowLeft, Trash2, ShieldAlert, CheckCircle,
     LayoutList, RefreshCw, Pencil, X, MessageSquare, Tag, Zap, BarChart3,
     Calendar, Bot, Save, Bell, UserPlus, Database, Upload, Clock, Palette, Sun, Moon, Lock,
-    ChevronDown, ChevronUp, ChevronRight, Wrench
+    ChevronDown, ChevronUp, ChevronRight, Wrench, RotateCcw
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -231,6 +231,20 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const openCreateAgent = () => { setModalType('create_agent'); setFormName(''); setFormRole('Ventas'); setFormPass(''); };
     const openEditAgent = (agent: Agent) => { setSelectedItem(agent); setFormName(agent.name); setFormRole(agent.role); setFormPass(''); setModalType('edit_agent'); };
     const openDeleteAgent = (agent: Agent) => { setSelectedItem(agent); setModalType('delete_agent'); };
+
+    // Resetear tours del agente — borra toursSeen de sus preferencias.
+    // En el próximo login del agente, los tutoriales vuelven a salir.
+    // Útil cuando: el usuario perdió un tour por error, o se ha cambiado mucho la UI
+    // y queremos que vuelva a ver la guía actualizada.
+    const handleResetAgentTour = (agent: Agent) => {
+        if (!socket) return;
+        const confirmed = window.confirm(
+            `¿Resetear los tutoriales de "${agent.name}"?\n\nVerá la guía de bienvenida y los tours de cada sección en su próximo inicio de sesión.`
+        );
+        if (!confirmed) return;
+        const newPrefs = { ...(agent.preferences || {}), toursSeen: {} };
+        socket.emit('update_agent', { agentId: agent.id, updates: { name: agent.name, role: agent.role, preferences: newPrefs } });
+    };
     const openAddConfig = (type: string) => { setFormType(type); setFormName(''); setModalType('add_config'); };
     const openEditConfig = (item: ConfigItem) => { setSelectedItem(item); setFormName(item.name); setModalType('edit_config'); };
     const openDeleteConfig = (item: ConfigItem) => { setSelectedItem(item); setModalType('delete_config'); };
@@ -353,7 +367,54 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                 <div className={`flex-1 p-4 md:p-8 overflow-y-auto w-full absolute inset-0 md:static transition-transform duration-300 ${isDark ? 'bg-transparent' : 'bg-slate-50'} ${showMobileMenu ? 'translate-x-full md:translate-x-0' : 'translate-x-0'}`}>
 
                     {/* TEAM */}
-                    {activeTab === 'team' && (<div className={`max-w-3xl mx-auto p-4 md:p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-6"><h2 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Agentes</h2><button onClick={openCreateAgent} className="bg-blue-600 text-white px-3 py-2 rounded-lg font-bold text-sm hover:bg-blue-700 flex items-center gap-2 shadow-md active:scale-95 transition-transform"><Plus className="w-4 h-4" /> Nuevo</button></div><div className="space-y-3">{agents.map(agent => (<div key={agent.id} className={`flex items-center justify-between p-3 rounded-xl border group ${isDark ? 'bg-slate-800/50 border-white/5' : 'bg-slate-50 border-slate-100'}`}><div className="flex items-center gap-3 overflow-hidden"><div className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center text-white font-bold ${agent.role === 'Admin' ? 'bg-purple-500' : 'bg-blue-500'}`}>{agent.name.charAt(0).toUpperCase()}</div><div className="min-w-0"><p className={`font-bold text-sm truncate ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{agent.name}</p><p className="text-xs text-slate-400 truncate">{agent.role}</p></div></div><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity"><button onClick={() => openEditAgent(agent)} className={`p-2 rounded-lg border ${isDark ? 'bg-slate-700 text-slate-300 border-slate-600 hover:text-blue-400' : 'bg-white text-slate-400 border-slate-200 hover:text-blue-500'}`}><Pencil className="w-4 h-4" /></button><button onClick={() => openDeleteAgent(agent)} className={`p-2 rounded-lg border ${isDark ? 'bg-slate-700 text-slate-300 border-slate-600 hover:text-red-400' : 'bg-white text-slate-400 border-slate-200 hover:text-red-500'}`}><Trash2 className="w-4 h-4" /></button></div></div>))}</div></div>)}
+                    {activeTab === 'team' && (
+                        <div className={`max-w-3xl mx-auto p-4 md:p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+                            <div className="flex justify-between items-center mb-6">
+                                <h2 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Agentes</h2>
+                                <button onClick={openCreateAgent} className="bg-blue-600 text-white px-3 py-2 rounded-lg font-bold text-sm hover:bg-blue-700 flex items-center gap-2 shadow-md active:scale-95 transition-transform">
+                                    <Plus className="w-4 h-4" /> Nuevo
+                                </button>
+                            </div>
+                            <div className="space-y-3">
+                                {agents.map(agent => (
+                                    <div key={agent.id} className={`flex items-center justify-between p-3 rounded-xl border group ${isDark ? 'bg-slate-800/50 border-white/5' : 'bg-slate-50 border-slate-100'}`}>
+                                        <div className="flex items-center gap-3 overflow-hidden">
+                                            <div className={`w-9 h-9 rounded-full flex-shrink-0 flex items-center justify-center text-white font-bold ${agent.role === 'Admin' ? 'bg-purple-500' : 'bg-blue-500'}`}>
+                                                {agent.name.charAt(0).toUpperCase()}
+                                            </div>
+                                            <div className="min-w-0">
+                                                <p className={`font-bold text-sm truncate ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{agent.name}</p>
+                                                <p className="text-xs text-slate-400 truncate">{agent.role}</p>
+                                            </div>
+                                        </div>
+                                        <div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
+                                            <button
+                                                onClick={() => handleResetAgentTour(agent)}
+                                                title="Resetear tutoriales — el agente verá la guía de bienvenida en su próximo login"
+                                                className={`p-2 rounded-lg border ${isDark ? 'bg-slate-700 text-slate-300 border-slate-600 hover:text-amber-400' : 'bg-white text-slate-400 border-slate-200 hover:text-amber-500'}`}
+                                            >
+                                                <RotateCcw className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={() => openEditAgent(agent)}
+                                                title="Editar"
+                                                className={`p-2 rounded-lg border ${isDark ? 'bg-slate-700 text-slate-300 border-slate-600 hover:text-blue-400' : 'bg-white text-slate-400 border-slate-200 hover:text-blue-500'}`}
+                                            >
+                                                <Pencil className="w-4 h-4" />
+                                            </button>
+                                            <button
+                                                onClick={() => openDeleteAgent(agent)}
+                                                title="Eliminar"
+                                                className={`p-2 rounded-lg border ${isDark ? 'bg-slate-700 text-slate-300 border-slate-600 hover:text-red-400' : 'bg-white text-slate-400 border-slate-200 hover:text-red-500'}`}
+                                            >
+                                                <Trash2 className="w-4 h-4" />
+                                            </button>
+                                        </div>
+                                    </div>
+                                ))}
+                            </div>
+                        </div>
+                    )}
 
                     {/* QUICK REPLIES */}
                     {activeTab === 'quick_replies' && (
