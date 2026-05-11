@@ -350,19 +350,70 @@ export const startAdminSettingsTour = (onComplete?: () => void) => {
 // ============================================
 // HELPER: Check if tour should be shown
 // ============================================
-export const shouldShowTour = (tourKey: string): boolean => {
-    return localStorage.getItem(`chatgorithm_tour_${tourKey}`) !== 'true';
+// AHORA EL ESTADO DEL TOUR ESTÁ EN preferences.toursSeen DEL USUARIO (servidor),
+// no en localStorage. Esto hace que cada usuario tenga su propio estado y persista
+// entre dispositivos.
+//
+// preferences = {
+//   toursSeen: { main: boolean, chat: boolean, settings_admin: boolean, settings_worker: boolean }
+//   ...otras preferencias
+// }
+
+type TourKey = 'main' | 'chat' | 'settings_admin' | 'settings_worker';
+type Preferences = { toursSeen?: Partial<Record<TourKey, boolean>>;[k: string]: any };
+
+export const shouldShowTour = (tourKey: TourKey, preferences?: Preferences): boolean => {
+    if (!preferences) return true;
+    return !preferences.toursSeen?.[tourKey];
 };
 
-export const markTourAsComplete = (tourKey: string): void => {
-    localStorage.setItem(`chatgorithm_tour_${tourKey}`, 'true');
+// markTourAsComplete ahora necesita una función updater (que viene de App via prop)
+// para que envíe la actualización al servidor. Si no se pasa, hace fallback a localStorage
+// (no debería pasar, pero por seguridad).
+type UpdatePrefsFn = (partial: { toursSeen: Partial<Record<TourKey, boolean>> }) => void;
+export const markTourAsComplete = (tourKey: TourKey, updatePrefs?: UpdatePrefsFn): void => {
+    if (updatePrefs) {
+        updatePrefs({ toursSeen: { [tourKey]: true } });
+    } else {
+        // Fallback de emergencia: localStorage (no se sincroniza con servidor)
+        console.warn('[Tour] markTourAsComplete sin updatePrefs, usando localStorage fallback');
+        localStorage.setItem(`chatgorithm_tour_${tourKey}`, 'true');
+    }
 };
 
-export const resetAllTours = (): void => {
+export const resetAllTours = (updatePrefs?: UpdatePrefsFn): void => {
+    if (updatePrefs) {
+        updatePrefs({ toursSeen: { main: false, chat: false, settings_admin: false, settings_worker: false } });
+    }
+    // También limpiar localStorage legado por si quedan trazas
     const tourKeys = ['main', 'chat', 'settings_worker', 'settings_admin'];
-    tourKeys.forEach(key => {
-        localStorage.removeItem(`chatgorithm_tour_${key}`);
-    });
+    tourKeys.forEach(key => localStorage.removeItem(`chatgorithm_tour_${key}`));
     localStorage.removeItem('chatgorithm_tour_seen');
+};
+
+// Migración: si el usuario tenía tours marcados en localStorage (sistema viejo)
+// y aún no tiene toursSeen en preferencias del servidor, los migramos.
+// Esto evita que usuarios existentes vean los tours otra vez tras el cambio.
+export const migrateTourStateFromLocalStorage = (preferences: Preferences, updatePrefs: UpdatePrefsFn): boolean => {
+    // Si ya hay toursSeen en server, no migramos (servidor tiene la verdad)
+    if (preferences.toursSeen && Object.keys(preferences.toursSeen).length > 0) return false;
+
+    const legacyMain = localStorage.getItem('chatgorithm_tour_seen') === 'true' || localStorage.getItem('chatgorithm_tour_main') === 'true';
+    const legacyChat = localStorage.getItem('chatgorithm_tour_chat') === 'true';
+    const legacyAdmin = localStorage.getItem('chatgorithm_tour_settings_admin') === 'true';
+    const legacyWorker = localStorage.getItem('chatgorithm_tour_settings_worker') === 'true';
+
+    // Solo migrar si hay AL MENOS un tour visto en local
+    if (!legacyMain && !legacyChat && !legacyAdmin && !legacyWorker) return false;
+
+    const migrated: Partial<Record<TourKey, boolean>> = {};
+    if (legacyMain) migrated.main = true;
+    if (legacyChat) migrated.chat = true;
+    if (legacyAdmin) migrated.settings_admin = true;
+    if (legacyWorker) migrated.settings_worker = true;
+
+    updatePrefs({ toursSeen: migrated });
+    console.log('[Tour] Migrados tours de localStorage al servidor:', migrated);
+    return true;
 };
 

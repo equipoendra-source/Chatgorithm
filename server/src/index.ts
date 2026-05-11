@@ -263,6 +263,7 @@ const DESTRUCTIVE_SOCKET_EVENTS = new Set<string>([
     'update_quick_reply',
     'update_contact_info',
     'send_team_message',
+    'update_my_preferences', // El usuario actualiza SUS propias preferencias (tour state, theme, etc.)
 ]);
 
 const onlineUsers = new Map<string, string>();
@@ -3383,7 +3384,8 @@ io.on('connection', (socket) => {
                 socket.data.authenticated = true;
                 socket.data.username = r[0].get('name') as string;
                 socket.data.role = (r[0].get('role') as string) || 'agent';
-                socket.emit('login_success', { username: r[0].get('name'), role: r[0].get('role'), preferences: prefs });
+                socket.data.agentId = r[0].id; // Necesario para update_my_preferences
+                socket.emit('login_success', { id: r[0].id, username: r[0].get('name'), role: r[0].get('role'), preferences: prefs });
             } else {
                 socket.emit('login_error', 'Contraseña incorrecta');
             }
@@ -3394,6 +3396,35 @@ io.on('connection', (socket) => {
     socket.on('create_agent', async (d) => { if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
     socket.on('delete_agent', async (d) => { if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
     socket.on('update_agent', async (d) => { if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
+
+    // El usuario actualiza SOLO SUS preferencias (tour state, theme, etc.).
+    // No requiere agentId del cliente — usamos socket.data.agentId (rellenado en login).
+    // Hace MERGE en lugar de sobreescribir para no perder otras preferencias existentes.
+    socket.on('update_my_preferences', async (partialPrefs: any) => {
+        if (!base) return socket.emit('action_error', 'DB no disponible');
+        const agentId = socket.data.agentId;
+        if (!agentId) return socket.emit('action_error', 'Sesión sin agentId. Vuelve a iniciar sesión.');
+        if (!partialPrefs || typeof partialPrefs !== 'object') return socket.emit('action_error', 'Preferencias inválidas');
+        try {
+            // 1. Cargar preferencias actuales
+            const rec = await base('Agents').find(agentId);
+            const currentRaw = rec.get('Preferences') as string | undefined;
+            const current = currentRaw ? JSON.parse(currentRaw) : {};
+            // 2. Merge profundo (shallow basta para el caso de uso: toursSeen es un objeto)
+            const merged = { ...current, ...partialPrefs };
+            // Si las dos partes tienen toursSeen, mergear ese sub-objeto también
+            if (current.toursSeen && partialPrefs.toursSeen) {
+                merged.toursSeen = { ...current.toursSeen, ...partialPrefs.toursSeen };
+            }
+            // 3. Guardar
+            await base('Agents').update([{ id: agentId, fields: { Preferences: JSON.stringify(merged) } }]);
+            // 4. Confirmar al cliente con las preferencias finales
+            socket.emit('my_preferences_updated', merged);
+        } catch (e: any) {
+            console.error('[update_my_preferences] Error:', e.message);
+            socket.emit('action_error', 'Error guardando preferencias');
+        }
+    });
 
     // REQUEST CONTACTS
     socket.on('request_contacts', async () => {

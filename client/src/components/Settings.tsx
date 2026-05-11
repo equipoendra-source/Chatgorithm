@@ -28,13 +28,14 @@ interface SettingsProps {
     currentUserRole: string;
     quickReplies?: any[];
     currentUser?: any;
+    updateMyPreferences?: (partial: any) => void;
 }
 
 interface Agent { id: string; name: string; role: string; preferences?: any; }
 interface ConfigItem { id: string; name: string; type: string; }
 interface QuickReply { id: string; title: string; content: string; shortcut: string; }
 
-export function Settings({ onBack, socket, currentUserRole, quickReplies = [], currentUser }: SettingsProps) {
+export function Settings({ onBack, socket, currentUserRole, quickReplies = [], currentUser, updateMyPreferences }: SettingsProps) {
     const { theme, setTheme } = useTheme();
     const isDark = theme === 'dark';
     const isAdmin = currentUserRole === 'Admin';
@@ -136,14 +137,16 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
     // --- AUTO-LAUNCH SETTINGS TOUR ON FIRST VISIT ---
     useEffect(() => {
-        const tourKey = isAdmin ? 'settings_admin' : 'settings_worker';
-        if (shouldShowTour(tourKey)) {
+        const tourKey: 'settings_admin' | 'settings_worker' = isAdmin ? 'settings_admin' : 'settings_worker';
+        // Comprueba contra las preferencias del usuario actual (servidor),
+        // no contra localStorage. Cada usuario tiene su propio estado.
+        if (shouldShowTour(tourKey, currentUser?.preferences)) {
             // Wait for DOM to render, then start tour
             const timer = setTimeout(() => {
                 if (isAdmin) {
-                    startAdminSettingsTour(() => markTourAsComplete(tourKey));
+                    startAdminSettingsTour(() => markTourAsComplete(tourKey, updateMyPreferences));
                 } else {
-                    startWorkerSettingsTour(() => markTourAsComplete(tourKey));
+                    startWorkerSettingsTour(() => markTourAsComplete(tourKey, updateMyPreferences));
                 }
             }, 800);
             return () => clearTimeout(timer);

@@ -19,7 +19,7 @@ import { SupportWidget } from './components/SupportWidget';
 import { getAuthServerUrl } from './config/api';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
-import { startProductTour } from './components/ProductTour';
+import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
 
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -66,7 +66,7 @@ function App() {
     const [companyConfig, setCompanyConfig] = useState<CompanyConfig | null>(getSavedCompanyConfig);
 
     // USER AUTH - Second level of auth
-    const [user, setUser] = useState<{ username: string, role: string, preferences?: any } | null>(getSavedUser);
+    const [user, setUser] = useState<{ id?: string, username: string, role: string, preferences?: any } | null>(getSavedUser);
     const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
 
     // VIEW STATE
@@ -96,7 +96,10 @@ function App() {
 
 
     const handleTourComplete = () => {
-        localStorage.setItem('chatgorithm_tour_seen', 'true');
+        // Marcar el tour principal como completado en preferencias del servidor.
+        // Esto se hace cuando el usuario cierra el modal de tema (= inicia el tour).
+        // Marcamos como visto ANTES de iniciar el tour para que no se repita si recarga.
+        markTourAsComplete('main', updateMyPreferences);
         setShowThemeModal(false);
         // Start driver.js tour
         setTimeout(() => startProductTour(), 500);
@@ -129,9 +132,18 @@ function App() {
     }, [companyConfig?.backendUrl]);
 
     useEffect(() => {
-        // Check if tour has been seen
-        const seen = localStorage.getItem('chatgorithm_tour_seen');
-        if (user && socket && !seen) {
+        // El tour ahora se decide por las preferencias del usuario (servidor),
+        // no por localStorage. Así cada usuario tiene su propio estado.
+        if (!user || !socket) return;
+        const prefs = user.preferences || {};
+
+        // PASO 1: si el usuario tiene tours marcados en localStorage (sistema viejo)
+        // y aún no tiene toursSeen en server, migramos para no molestarle con tours repetidos.
+        const migrated = migrateTourStateFromLocalStorage(prefs, updateMyPreferences);
+        if (migrated) return; // El próximo render tendrá las preferencias actualizadas
+
+        // PASO 2: decidir si mostrar el modal de tema + tour principal
+        if (shouldShowTour('main', prefs)) {
             setShowThemeModal(true);
         }
     }, [user, socket]);
@@ -233,11 +245,34 @@ function App() {
         setCompanyConfig(config);
     };
 
-    const handleLogin = (u: string, r: string, p: string, m: boolean, prefs: any = {}) => {
-        const newUser = { username: u, role: r, preferences: prefs };
+    const handleLogin = (u: string, r: string, p: string, m: boolean, prefs: any = {}, id?: string) => {
+        const newUser = { id, username: u, role: r, preferences: prefs };
         setUser(newUser);
         localStorage.setItem('chatgorithm_user', JSON.stringify(newUser));
     };
+
+    // Helper para actualizar mis preferencias en servidor (y en estado local cuando responde).
+    // Se pasa como prop a los componentes que lo necesiten (Settings, ChatWindow, etc.)
+    // Hace MERGE en el servidor — solo pasas los campos que cambian.
+    const updateMyPreferences = (partialPrefs: any) => {
+        if (!socket) return;
+        socket.emit('update_my_preferences', partialPrefs);
+    };
+
+    // Listener: cuando el servidor confirma la actualización, refrescamos el estado local
+    useEffect(() => {
+        if (!socket) return;
+        const onUpdated = (newPrefs: any) => {
+            setUser(prev => {
+                if (!prev) return prev;
+                const updated = { ...prev, preferences: newPrefs };
+                localStorage.setItem('chatgorithm_user', JSON.stringify(updated));
+                return updated;
+            });
+        };
+        socket.on('my_preferences_updated', onUpdated);
+        return () => { socket.off('my_preferences_updated', onUpdated); };
+    }, [socket]);
 
     const handleLogout = () => {
         localStorage.removeItem('chatgorithm_user');
@@ -329,7 +364,7 @@ function App() {
     }
 
     // Settings view
-    if (view === 'settings') return <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} />;
+    if (view === 'settings') return <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} updateMyPreferences={updateMyPreferences} />;
 
     // Calendar view
     if (view === 'calendar') {
@@ -468,6 +503,7 @@ function App() {
                                     onOpenTemplates={() => setShowTemplates(true)}
                                     quickReplies={quickReplies}
                                     currentAccountId={selectedContact.origin_phone_id || selectedAccountId || undefined}
+                                    updateMyPreferences={updateMyPreferences}
                                 />
                             ) : (
                                 <div className="flex flex-col items-center justify-center h-full text-slate-500">

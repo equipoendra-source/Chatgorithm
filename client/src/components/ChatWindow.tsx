@@ -22,7 +22,7 @@ interface QuickReply {
 
 interface ChatWindowProps {
     socket: any;
-    user: { username: string };
+    user: { username: string, preferences?: any };
     contact: Contact;
     config?: { departments: string[]; statuses: string[]; tags: string[] };
     onBack: () => void;
@@ -31,6 +31,7 @@ interface ChatWindowProps {
     onOpenTemplates: () => void;
     quickReplies?: QuickReply[];
     currentAccountId?: string; // Recibimos el ID de origen (Multi-cuenta)
+    updateMyPreferences?: (partial: any) => void;
 }
 
 interface Message {
@@ -68,7 +69,7 @@ const CustomAudioPlayer = ({ src, isMe }: { src: string, isMe: boolean }) => {
     return (<div className={`flex items-start gap-2 p-2 rounded-xl w-full max-w-[320px] select-none transition-colors ${isMe ? 'bg-white/10 backdrop-blur-sm border border-white/10 text-white' : 'bg-white border border-slate-100'}`}> <audio ref={audioRef} src={audioUrl!} onTimeUpdate={onTimeUpdate} onLoadedMetadata={onLoadedMetadata} onEnded={onEnded} className="hidden" /> <button onClick={togglePlay} className={`w-10 h-10 flex items-center justify-center rounded-full transition shadow-sm flex-shrink-0 mt-0.5 ${isMe ? 'bg-white/20 hover:bg-white/30 text-white border border-white/10' : 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'}`}> {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />} </button> <div className="flex-1 flex flex-col gap-1 w-full min-w-0"> <div className="h-5 flex items-center"><input type="range" min="0" max="100" value={progress} onChange={handleSeek} className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer ${isMe ? 'accent-white bg-white/20' : 'accent-indigo-500 bg-indigo-100'}`} /></div> <div className={`flex justify-between items-center text-[10px] font-medium h-5 w-full ${isMe ? 'text-white/80' : 'text-slate-500'}`}> <span className="font-mono tabular-nums min-w-[35px]">{currentTime === 0 && !isPlaying ? formatTime(duration) : formatTime(currentTime)}</span> <div className="flex items-center gap-2"> <button onClick={toggleSpeed} className={`px-1.5 py-0.5 rounded text-[9px] font-bold min-w-[22px] text-center ${isMe ? 'bg-black/20 text-white/90' : 'bg-slate-100 text-slate-600'}`}>{playbackRate}x</button> <div className="relative flex items-center group hidden sm:flex" onMouseEnter={() => setShowVolumeSlider(true)} onMouseLeave={() => setShowVolumeSlider(false)}> <button onClick={toggleMute} className={`p-1 ${isMe ? 'hover:bg-white/10' : 'hover:text-slate-800'}`}><Volume2 className="w-3.5 h-3.5" /></button> {showVolumeSlider && <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-white shadow-xl rounded-lg p-2 z-20"><div className="h-16 w-4 flex items-center justify-center"><input type="range" min="0" max="1" step="0.1" value={isMuted ? 0 : volume} onChange={(e) => { setVolume(parseFloat(e.target.value)); setIsMuted(parseFloat(e.target.value) === 0); }} className="-rotate-90 w-14 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600" /></div></div>} </div> <a href={src} download="audio.webm" target="_blank" rel="noreferrer" className={`p-1 rounded-full ${isMe ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}><Download className="w-3.5 h-3.5" /></a> </div> </div> </div> </div>);
 };
 
-export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers, typingInfo, onOpenTemplates, quickReplies = [], currentAccountId }: ChatWindowProps) {
+export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers, typingInfo, onOpenTemplates, quickReplies = [], currentAccountId, updateMyPreferences }: ChatWindowProps) {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
 
@@ -200,10 +201,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
 
     // --- AUTO-LAUNCH CHAT TOUR ON FIRST CHAT OPENED ---
     useEffect(() => {
-        if (shouldShowTour('chat') && contact.id) {
+        if (shouldShowTour('chat', user?.preferences) && contact.id) {
             // Wait for DOM to render, then start tour
             const timer = setTimeout(() => {
-                startChatTour(() => markTourAsComplete('chat'));
+                startChatTour(() => markTourAsComplete('chat', updateMyPreferences));
             }, 1000);
             return () => clearTimeout(timer);
         }
