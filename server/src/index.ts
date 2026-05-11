@@ -160,6 +160,186 @@ app.get('/api/health', (_req, res) => {
     });
 });
 
+// ==========================================================================
+// ENDPOINTS DE MIGRACIÓN — Solo para admin, protegidos por ADMIN_TOKEN
+// ==========================================================================
+// Útiles cuando se migra el número de WhatsApp a una nueva WABA y hay que:
+//   1) Recrear las plantillas en la nueva cuenta (envía a Meta para aprobación)
+//   2) Actualizar origin_phone_id en notificaciones y campañas pendientes
+//
+// Requieren header `x-admin-token: <ADMIN_TOKEN env var>` para evitar abuso.
+
+function checkAdminToken(req: any, res: any): boolean {
+    const adminTokenEnv = process.env.ADMIN_TOKEN;
+    if (!adminTokenEnv) {
+        res.status(500).json({ error: 'ADMIN_TOKEN no configurado en el servidor. Añádelo a las env vars de Render para usar endpoints de admin.' });
+        return false;
+    }
+    const provided = req.headers['x-admin-token'];
+    if (!provided || provided !== adminTokenEnv) {
+        res.status(403).json({ error: 'Token admin inválido o no provisto. Usa header `x-admin-token`.' });
+        return false;
+    }
+    return true;
+}
+
+// POST /api/admin/migrate-templates
+// Recrea todas las plantillas de Airtable en la WABA actual (waBusinessId).
+// Para cada una hace POST a Graph API y actualiza MetaId+Status en Airtable.
+// Devuelve un reporte con el resultado de cada plantilla.
+app.post('/api/admin/migrate-templates', async (req, res) => {
+    if (!checkAdminToken(req, res)) return;
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    if (!waToken || !waBusinessId) return res.status(500).json({ error: 'Falta waToken o waBusinessId en env' });
+
+    try {
+        const templates = await base(TABLE_TEMPLATES).select().all();
+        const report: any[] = [];
+
+        for (const t of templates) {
+            const name = (t.get('Name') as string) || '';
+            const category = (t.get('Category') as string) || 'UTILITY';
+            const body = (t.get('Body') as string) || '';
+            const language = (t.get('Language') as string) || 'es_ES';
+            const footer = (t.get('Footer') as string) || '';
+            const variableMappingRaw = (t.get('VariableMapping') as string) || '{}';
+            let variableExamples: any = {};
+            try { variableExamples = JSON.parse(variableMappingRaw); } catch { /* ignore */ }
+
+            const item: any = {
+                airtableId: t.id,
+                name,
+                oldMetaId: t.get('MetaId'),
+                oldStatus: t.get('Status'),
+            };
+
+            try {
+                const formattedName = name.trim().toLowerCase().replace(/\s+/g, '_').replace(/[^a-z0-9_]/g, '');
+                const metaPayload: any = {
+                    name: formattedName,
+                    category,
+                    allow_category_change: true,
+                    language,
+                    components: [{ type: 'BODY', text: body }]
+                };
+                if (footer) metaPayload.components.push({ type: 'FOOTER', text: footer });
+
+                const varMatches = body.match(/{{\d+}}/g);
+                if (varMatches && Object.keys(variableExamples).length > 0) {
+                    const examples = [];
+                    const maxVar = Math.max(...varMatches.map((m: string) => parseInt(m.replace(/[^\d]/g, ''))));
+                    for (let i = 1; i <= maxVar; i++) examples.push(variableExamples[String(i)] || 'Ejemplo');
+                    metaPayload.components[0].example = { body_text: [examples] };
+                }
+
+                const metaRes = await axios.post(
+                    `https://graph.facebook.com/v18.0/${waBusinessId}/message_templates`,
+                    metaPayload,
+                    { headers: { Authorization: `Bearer ${waToken}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+                );
+
+                const newMetaId = metaRes.data.id;
+                const newStatus = metaRes.data.status || 'PENDING';
+
+                await base(TABLE_TEMPLATES).update([{
+                    id: t.id,
+                    fields: { MetaId: newMetaId, Status: newStatus }
+                }]);
+
+                item.success = true;
+                item.newMetaId = newMetaId;
+                item.newStatus = newStatus;
+                console.log(`✅ [Migrate] Plantilla "${name}" recreada: ${newMetaId} (${newStatus})`);
+            } catch (e: any) {
+                const metaErr = e.response?.data?.error;
+                item.success = false;
+                item.error = metaErr?.error_user_msg || metaErr?.message || e.message;
+                item.errorCode = metaErr?.code;
+                console.error(`❌ [Migrate] Plantilla "${name}" falló:`, item.error);
+            }
+
+            report.push(item);
+            await delay(300); // No saturar Meta rate limits
+        }
+
+        const successful = report.filter(r => r.success).length;
+        const failed = report.length - successful;
+        res.json({
+            success: true,
+            total: report.length,
+            successful,
+            failed,
+            wabaUsed: waBusinessId,
+            report
+        });
+    } catch (e: any) {
+        console.error('[Migrate templates] Error general:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
+// POST /api/admin/migrate-phoneid
+// Body: { oldPhoneId, newPhoneId }
+// Actualiza origin_phone_id en ScheduledNotifications pendientes y Campaigns
+// activas para que apunten al nuevo número.
+app.post('/api/admin/migrate-phoneid', async (req, res) => {
+    if (!checkAdminToken(req, res)) return;
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+
+    const { oldPhoneId, newPhoneId } = req.body || {};
+    if (!oldPhoneId || !newPhoneId) {
+        return res.status(400).json({ error: 'oldPhoneId y newPhoneId son obligatorios en el body' });
+    }
+
+    try {
+        // ScheduledNotifications: status='pending' y origin_phone_id antiguo
+        const notifs = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND({status} = 'pending', {origin_phone_id} = '${escAt(oldPhoneId)}')`
+        }).all();
+
+        let notifUpdated = 0;
+        for (let i = 0; i < notifs.length; i += 10) {
+            const batch = notifs.slice(i, i + 10).map(n => ({
+                id: n.id,
+                fields: { origin_phone_id: newPhoneId }
+            }));
+            await base(TABLE_SCHEDULED_NOTIFICATIONS).update(batch);
+            notifUpdated += batch.length;
+            await delay(200);
+        }
+
+        // Campaigns activas (no las completed/failed/cancelled) con originPhoneId antiguo
+        const campaigns = await base(TABLE_CAMPAIGNS).select({
+            filterByFormula: `AND(OR({status}='scheduled', {status}='running', {status}='draft', {status}='paused', {status}='recurring'), {originPhoneId} = '${escAt(oldPhoneId)}')`
+        }).all();
+
+        let campUpdated = 0;
+        const campaignNames: string[] = [];
+        for (let i = 0; i < campaigns.length; i += 10) {
+            const batch = campaigns.slice(i, i + 10).map(c => {
+                campaignNames.push(c.get('name') as string || c.id);
+                return { id: c.id, fields: { originPhoneId: newPhoneId } };
+            });
+            await base(TABLE_CAMPAIGNS).update(batch);
+            campUpdated += batch.length;
+            await delay(200);
+        }
+
+        console.log(`✅ [Migrate phoneId] ${oldPhoneId} → ${newPhoneId}. Notifs: ${notifUpdated}, Campañas: ${campUpdated}`);
+        res.json({
+            success: true,
+            from: oldPhoneId,
+            to: newPhoneId,
+            notificationsUpdated: notifUpdated,
+            campaignsUpdated: campUpdated,
+            campaignNames,
+        });
+    } catch (e: any) {
+        console.error('[Migrate phoneId] Error:', e.message);
+        res.status(500).json({ success: false, error: e.message });
+    }
+});
+
 const upload = multer({ storage: multer.memoryStorage() });
 
 // --- STORAGE INTERNO PARA CHAT DE EQUIPO ---
