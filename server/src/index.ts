@@ -1459,6 +1459,35 @@ NO respondas nunca con texto plano. SOLO JSON válido.`;
 
 const DEFAULT_SYSTEM_PROMPT = BASE_SYSTEM_PROMPT;
 
+// =========================================================================
+// FLAG GLOBAL: Laura ACTIVA/INACTIVA
+// =========================================================================
+// Cuando está en false, Laura NO responde automáticamente a ningún mensaje
+// nuevo, pero los mensajes SIGUEN llegando al panel para que un humano los
+// atienda. Se persiste en BotSettings (Setting='bot_globally_enabled').
+// Default: true (Laura responde como hasta ahora).
+let botGloballyEnabled = true;
+
+async function loadBotGloballyEnabled(): Promise<void> {
+    if (!base) return;
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'bot_globally_enabled'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            const v = (r[0].get('Value') as string || '').toLowerCase().trim();
+            botGloballyEnabled = (v === 'true' || v === '1' || v === 'yes');
+            console.log(`🤖 [Bot] Estado global cargado: ${botGloballyEnabled ? 'ACTIVA' : 'DESACTIVADA'}`);
+        } else {
+            // No existe el setting todavía — crear con default true
+            await base('BotSettings').create([{ fields: { Setting: 'bot_globally_enabled', Value: 'true' } }]);
+            console.log('🤖 [Bot] Setting bot_globally_enabled creado con default true');
+        }
+    } catch (e: any) {
+        console.error('[Bot] Error cargando estado global, usando default true:', e.message);
+    }
+}
+// Cargar al arranque (después de que base esté inicializado)
+setTimeout(() => { loadBotGloballyEnabled().catch(() => {}); }, 1000);
+
 async function getSystemPrompt() {
     let promptTemplate = BASE_SYSTEM_PROMPT;
     if (base) {
@@ -3307,6 +3336,39 @@ app.post('/api/team/upload', teamUpload.single('file'), async (req: any, res: an
 app.get('/api/bot-config', async (req, res) => { if (!base) return res.sendStatus(500); try { const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage(); res.json({ prompt: r.length > 0 ? r[0].get('Value') : DEFAULT_SYSTEM_PROMPT }); } catch (e) { res.status(500).json({ error: "Error" }); } });
 app.post('/api/bot-config', async (req, res) => { if (!base) return res.sendStatus(500); try { const { prompt } = req.body; const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage(); if (r.length > 0) await base('BotSettings').update([{ id: r[0].id, fields: { "Value": prompt } }]); else await base('BotSettings').create([{ fields: { "Setting": "system_prompt", "Value": prompt } }]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: "Error" }); } });
 
+// ============================================================
+// ESTADO GLOBAL DE LAURA — toggle ON/OFF para todo el negocio
+// ============================================================
+// GET /api/bot/status -> { enabled: boolean }
+app.get('/api/bot/status', (_req, res) => {
+    res.json({ enabled: botGloballyEnabled });
+});
+// POST /api/bot/status { enabled: boolean } -> persiste en BotSettings y refresca memoria
+app.post('/api/bot/status', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { enabled } = req.body || {};
+    if (typeof enabled !== 'boolean') {
+        return res.status(400).json({ error: 'enabled debe ser boolean' });
+    }
+    try {
+        const valueStr = enabled ? 'true' : 'false';
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'bot_globally_enabled'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            await base('BotSettings').update([{ id: r[0].id, fields: { Value: valueStr } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'bot_globally_enabled', Value: valueStr } }]);
+        }
+        botGloballyEnabled = enabled;
+        console.log(`🤖 [Bot] Estado global cambiado a: ${enabled ? 'ACTIVA' : 'DESACTIVADA'}`);
+        // Notificar a todos los frontends conectados en tiempo real
+        try { io.emit('bot_status_changed', { enabled }); } catch (_) {}
+        res.json({ success: true, enabled });
+    } catch (e: any) {
+        console.error('[Bot status] Error guardando:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ==========================================
 //  WEBHOOKS (CORREGIDO: RECIPIENT EXPLÍCITO)
 // ==========================================
@@ -3464,7 +3526,11 @@ app.post('/webhook', async (req, res) => {
                     ? { mediaId: inboundMediaId, type: inboundType as 'audio' | 'image' | 'video' | 'document' }
                     : undefined;
 
-            if (activeAiChats.has(from)) {
+            // FLAG GLOBAL: si Laura está desactivada, NO se activa para ningún mensaje.
+            // Los mensajes SIGUEN guardándose y notificándose al panel — solo el bot calla.
+            if (!botGloballyEnabled) {
+                console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
+            } else if (activeAiChats.has(from)) {
                 console.log(`🤖 IA activada por sesión activa para ${from}`);
                 processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
             } else if (hasPendingBooking) {

@@ -76,6 +76,10 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
     // Bot Config
     const [botPrompt, setBotPrompt] = useState('');
+    // Estado global de Laura (ON/OFF). Cuando OFF, no responde automáticamente.
+    const [botEnabled, setBotEnabled] = useState<boolean>(true);
+    const [botEnabledLoading, setBotEnabledLoading] = useState<boolean>(false);
+    const [botToggleSaving, setBotToggleSaving] = useState<boolean>(false);
     const [isLoadingPrompt, setIsLoadingPrompt] = useState(false);
 
     // Agenda Config
@@ -122,6 +126,13 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         if (activeTab === 'bot_config') {
             setIsLoadingPrompt(true);
             fetch(`${API_URL}/bot-config`).then(r => r.json()).then(d => { setBotPrompt(d.prompt); setIsLoadingPrompt(false); }).catch(() => setIsLoadingPrompt(false));
+            // Cargar estado global de Laura (ON/OFF)
+            setBotEnabledLoading(true);
+            fetch(`${API_URL}/bot/status`)
+                .then(r => r.json())
+                .then(d => { if (typeof d.enabled === 'boolean') setBotEnabled(d.enabled); })
+                .catch(() => { /* fallback: asumimos true */ })
+                .finally(() => setBotEnabledLoading(false));
         }
         if (activeTab === 'agenda') {
             fetch(`${API_URL}/schedule`).then(r => r.json()).then(d => {
@@ -134,6 +145,53 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             }).catch(() => { });
         }
     }, [activeTab]);
+
+    // Escuchar cambios en tiempo real del estado del bot (si otro admin lo cambia desde otra pestaña)
+    useEffect(() => {
+        if (!socket) return;
+        const handler = (data: { enabled: boolean }) => {
+            if (typeof data?.enabled === 'boolean') setBotEnabled(data.enabled);
+        };
+        socket.on('bot_status_changed', handler);
+        return () => { socket.off('bot_status_changed', handler); };
+    }, [socket]);
+
+    // Toggle del estado global de Laura
+    const handleToggleBotEnabled = async () => {
+        const newState = !botEnabled;
+        // Confirmación si se va a DESACTIVAR
+        if (!newState) {
+            const ok = window.confirm(
+                "¿Seguro que quieres DESACTIVAR a Laura?\n\n" +
+                "Cuando esté desactivada:\n" +
+                "• Los mensajes seguirán llegando al panel\n" +
+                "• Laura NO responderá automáticamente\n" +
+                "• Vuestro equipo tendrá que contestar manualmente\n\n" +
+                "Puedes reactivarla en cualquier momento desde aquí."
+            );
+            if (!ok) return;
+        }
+        setBotToggleSaving(true);
+        try {
+            const r = await fetch(`${API_URL}/bot/status`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: newState })
+            });
+            const data = await r.json();
+            if (data.success) {
+                setBotEnabled(newState);
+                setSuccess(newState ? '✅ Laura ACTIVADA — responderá automáticamente' : '🔇 Laura DESACTIVADA — solo respuestas manuales');
+                setTimeout(() => setSuccess(''), 4000);
+            } else {
+                alert('Error: ' + (data.error || 'desconocido'));
+            }
+        } catch (e: any) {
+            alert('Error de conexión: ' + e.message);
+        } finally {
+            setBotToggleSaving(false);
+        }
+    };
 
     // --- AUTO-LAUNCH SETTINGS TOUR ON FIRST VISIT ---
     useEffect(() => {
@@ -457,6 +515,47 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                     {activeTab === 'agenda' && <CalendarDashboard />}
                     {activeTab === 'bot_config' && (
                         <div className="max-w-4xl mx-auto space-y-6">
+                            {/* ============================================================ */}
+                            {/* TOGGLE GLOBAL DE LAURA — ACTIVAR/DESACTIVAR                  */}
+                            {/* ============================================================ */}
+                            <div className={`p-6 rounded-2xl border-2 shadow-sm ${botEnabled
+                                ? (isDark ? 'bg-emerald-900/20 border-emerald-700/50' : 'bg-emerald-50 border-emerald-200')
+                                : (isDark ? 'bg-slate-800/60 border-slate-700' : 'bg-slate-100 border-slate-300')
+                                }`}>
+                                <div className="flex items-center justify-between gap-4">
+                                    <div className="flex items-start gap-3 flex-1 min-w-0">
+                                        <div className={`p-2.5 rounded-xl shadow-lg flex-shrink-0 ${botEnabled
+                                            ? 'bg-gradient-to-br from-emerald-500 to-green-600'
+                                            : 'bg-gradient-to-br from-slate-500 to-slate-600'
+                                            }`}>
+                                            <Bot className="w-5 h-5 text-white" />
+                                        </div>
+                                        <div className="flex-1 min-w-0">
+                                            <div className="flex items-center gap-2 flex-wrap">
+                                                <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                    Laura está {botEnabled ? '✅ ACTIVA' : '🔇 DESACTIVADA'}
+                                                </h3>
+                                                {botEnabledLoading && <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />}
+                                            </div>
+                                            <p className={`text-sm mt-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>
+                                                {botEnabled
+                                                    ? 'Responde automáticamente a los mensajes entrantes de los clientes.'
+                                                    : 'Los mensajes llegan al panel pero NO se responden solos. Atiéndelos manualmente.'}
+                                            </p>
+                                        </div>
+                                    </div>
+                                    {/* Toggle switch */}
+                                    <button
+                                        onClick={handleToggleBotEnabled}
+                                        disabled={botToggleSaving || botEnabledLoading}
+                                        className={`relative inline-flex h-8 w-14 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${botEnabled ? 'bg-emerald-500 focus:ring-emerald-500' : 'bg-slate-400 focus:ring-slate-400'} ${botToggleSaving ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+                                        aria-label={botEnabled ? 'Desactivar Laura' : 'Activar Laura'}
+                                    >
+                                        <span className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition-transform ${botEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+                                    </button>
+                                </div>
+                            </div>
+
                             {/* Cabecera */}
                             <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
                                 <div className="flex items-start gap-3 mb-4">
