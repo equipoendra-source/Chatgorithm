@@ -80,6 +80,19 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [botEnabled, setBotEnabled] = useState<boolean>(true);
     const [botEnabledLoading, setBotEnabledLoading] = useState<boolean>(false);
     const [botToggleSaving, setBotToggleSaving] = useState<boolean>(false);
+    // Departamentos a los que Laura puede derivar (3 nombres + descripción)
+    const [showDepartmentEditor, setShowDepartmentEditor] = useState<boolean>(false);
+    const [deptLabels, setDeptLabels] = useState<{
+        dept1: { name: string; description: string };
+        dept2: { name: string; description: string };
+        dept3: { name: string; description: string };
+    }>({
+        dept1: { name: '', description: '' },
+        dept2: { name: '', description: '' },
+        dept3: { name: '', description: '' }
+    });
+    const [deptLoading, setDeptLoading] = useState<boolean>(false);
+    const [deptSaving, setDeptSaving] = useState<boolean>(false);
     const [isLoadingPrompt, setIsLoadingPrompt] = useState(false);
 
     // Agenda Config
@@ -133,6 +146,21 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                 .then(d => { if (typeof d.enabled === 'boolean') setBotEnabled(d.enabled); })
                 .catch(() => { /* fallback: asumimos true */ })
                 .finally(() => setBotEnabledLoading(false));
+            // Cargar departamentos configurados (los 3 a los que Laura deriva)
+            setDeptLoading(true);
+            fetch(`${API_URL}/bot/department-labels`)
+                .then(r => r.json())
+                .then(d => {
+                    if (d?.dept1?.name && d?.dept2?.name && d?.dept3?.name) {
+                        setDeptLabels({
+                            dept1: { name: d.dept1.name, description: d.dept1.description || '' },
+                            dept2: { name: d.dept2.name, description: d.dept2.description || '' },
+                            dept3: { name: d.dept3.name, description: d.dept3.description || '' }
+                        });
+                    }
+                })
+                .catch(() => { /* fallback: estado por defecto */ })
+                .finally(() => setDeptLoading(false));
         }
         if (activeTab === 'agenda') {
             fetch(`${API_URL}/schedule`).then(r => r.json()).then(d => {
@@ -155,6 +183,34 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         socket.on('bot_status_changed', handler);
         return () => { socket.off('bot_status_changed', handler); };
     }, [socket]);
+
+    // Guardar departamentos editados
+    const handleSaveDepartments = async () => {
+        // Validar
+        if (!deptLabels.dept1.name.trim() || !deptLabels.dept2.name.trim() || !deptLabels.dept3.name.trim()) {
+            alert('Los 3 nombres de departamento son obligatorios');
+            return;
+        }
+        setDeptSaving(true);
+        try {
+            const r = await fetch(`${API_URL}/bot/department-labels`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(deptLabels)
+            });
+            const data = await r.json();
+            if (data.success) {
+                setSuccess('✅ Departamentos guardados. Laura los aplicará en la próxima conversación.');
+                setTimeout(() => setSuccess(''), 4000);
+            } else {
+                alert('Error: ' + (data.error || 'desconocido'));
+            }
+        } catch (e: any) {
+            alert('Error de conexión: ' + e.message);
+        } finally {
+            setDeptSaving(false);
+        }
+    };
 
     // Toggle del estado global de Laura
     const handleToggleBotEnabled = async () => {
@@ -583,6 +639,80 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                         <ChevronRight className="w-5 h-5" />
                                     </div>
                                 </button>
+                            </div>
+
+                            {/* ============================================================ */}
+                            {/* EDITOR DE DEPARTAMENTOS — donde Laura deriva chats          */}
+                            {/* ============================================================ */}
+                            <div>
+                                <button
+                                    onClick={() => setShowDepartmentEditor(!showDepartmentEditor)}
+                                    className={`w-full flex items-center justify-between gap-2 px-4 py-3 rounded-xl border text-sm font-semibold transition-all ${isDark ? 'bg-slate-800/40 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
+                                    <div className="flex items-center gap-2">
+                                        <Briefcase size={16} className={isDark ? 'text-slate-500' : 'text-slate-400'} />
+                                        <span>Departamentos a los que Laura puede derivar</span>
+                                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>3 dpto</span>
+                                    </div>
+                                    {showDepartmentEditor ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                </button>
+                                {showDepartmentEditor && (
+                                    <div className={`mt-3 p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+                                        <div className={`mb-4 px-3 py-2 rounded-lg text-xs ${isDark ? 'bg-blue-500/10 text-blue-300' : 'bg-blue-50 text-blue-800'}`}>
+                                            💡 Cuando un cliente pide hablar con un humano, Laura deriva el chat a UNO de estos 3 departamentos según el tema. Cuanto más clara sea la descripción, mejor decidirá Laura.
+                                        </div>
+                                        {deptLoading ? (
+                                            <div className="p-6 text-center text-slate-400"><RefreshCw className="animate-spin inline mr-2" /> Cargando...</div>
+                                        ) : (
+                                            <div className="space-y-5">
+                                                {([1, 2, 3] as const).map((n) => {
+                                                    const key = `dept${n}` as 'dept1' | 'dept2' | 'dept3';
+                                                    const colors = n === 1
+                                                        ? 'from-emerald-500 to-teal-600'
+                                                        : n === 2
+                                                            ? 'from-orange-500 to-amber-600'
+                                                            : 'from-purple-500 to-pink-600';
+                                                    return (
+                                                        <div key={key} className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                                            <div className={`text-xs font-bold uppercase mb-2 bg-gradient-to-r ${colors} bg-clip-text text-transparent`}>Departamento {n}</div>
+                                                            <div className="space-y-3">
+                                                                <div>
+                                                                    <label className={`text-xs font-bold uppercase block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Nombre del departamento</label>
+                                                                    <input
+                                                                        type="text"
+                                                                        value={deptLabels[key].name}
+                                                                        onChange={(e) => setDeptLabels({ ...deptLabels, [key]: { ...deptLabels[key], name: e.target.value } })}
+                                                                        placeholder={n === 1 ? "Ventas / Recepción / Información..." : n === 2 ? "Taller / Urgencias / Soporte..." : "Admin / Contabilidad..."}
+                                                                        maxLength={50}
+                                                                        className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 outline-none ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}
+                                                                    />
+                                                                </div>
+                                                                <div>
+                                                                    <label className={`text-xs font-bold uppercase block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Cuándo derivar aquí (descripción para Laura)</label>
+                                                                    <textarea
+                                                                        value={deptLabels[key].description}
+                                                                        onChange={(e) => setDeptLabels({ ...deptLabels, [key]: { ...deptLabels[key], description: e.target.value } })}
+                                                                        placeholder="Ej: para temas comerciales, presupuestos, compra de productos..."
+                                                                        rows={2}
+                                                                        maxLength={300}
+                                                                        className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 outline-none resize-none ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}
+                                                                    />
+                                                                </div>
+                                                            </div>
+                                                        </div>
+                                                    );
+                                                })}
+                                                <div className="flex justify-end">
+                                                    <button
+                                                        onClick={handleSaveDepartments}
+                                                        disabled={deptSaving}
+                                                        className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg active:scale-95 transition-all flex items-center gap-2 disabled:opacity-50">
+                                                        <Save size={18} /> {deptSaving ? 'Guardando...' : 'Guardar departamentos'}
+                                                    </button>
+                                                </div>
+                                            </div>
+                                        )}
+                                    </div>
+                                )}
                             </div>
 
                             {/* Manager de documentos */}

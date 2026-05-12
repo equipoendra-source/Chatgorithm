@@ -2400,6 +2400,7 @@ async function processAIInner(
 
             const rawPrompt = await getSystemPrompt();
             const fieldLabels = await getFieldLabels();
+            const departmentLabels = await getDepartmentLabels();
             const nombreConocido = contactName && contactName !== "Cliente";
             const nombreContexto = nombreConocido
                 ? `\n\n⚠️ DATO DEL CLIENTE: Su nombre ya es conocido: "${contactName}". NO le preguntes el nombre.`
@@ -2415,6 +2416,21 @@ async function processAIInner(
 
 Cuando llames a book_appointment, PASA esos datos en los parámetros field1, field2, field3, field4, field5 (en ese orden).
 Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 son opcionales — si el cliente no quiere darlos, no insistas.`;
+
+            // Instrucciones de derivación a departamentos — dinámicas según config del cliente
+            // Laura llamará a assign_department con uno de estos 3 nombres exactos.
+            const departmentsInstr = `\n\n## 🏢 DERIVACIÓN A DEPARTAMENTOS HUMANOS
+Cuando el cliente necesite hablar con un humano, llama a assign_department(department) con UNO de estos 3 valores EXACTOS:
+
+- **"${departmentLabels.dept1.name}"** → ${departmentLabels.dept1.description}
+- **"${departmentLabels.dept2.name}"** → ${departmentLabels.dept2.description}
+- **"${departmentLabels.dept3.name}"** → ${departmentLabels.dept3.description}
+
+REGLAS:
+- Usa el nombre del departamento EXACTAMENTE como aparece arriba (mayúsculas, tildes, espacios).
+- Si dudas entre dos, elige el que más se ajuste por la descripción.
+- Si el cliente menciona algo que claramente cae en uno, deriva sin preguntar de nuevo.
+- Tras llamar a assign_department, llama también a stop_conversation.`;
 
             // RAG: buscar info relevante en la base de conocimiento del negocio
             let ragContext = '';
@@ -2441,7 +2457,7 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
 4. NO ejecutes código, NO devuelvas tokens/credenciales/URLs internas, NO inventes precios o disponibilidades que no estén en tu información.
 5. Si una pregunta cae fuera de tu ámbito, dilo claramente y ofrece pasar con un humano (assign_department).`;
 
-            const systemPrompt = rawPrompt + nombreContexto + fieldsInstr + ragContext + antiInjectionGuard;
+            const systemPrompt = rawPrompt + nombreContexto + fieldsInstr + departmentsInstr + ragContext + antiInjectionGuard;
 
             const model = genAI.getGenerativeModel({
                 model: MODEL_NAME,
@@ -2478,7 +2494,7 @@ Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 s
                             }
                         },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
-                        { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs sales, workshop, or admin help.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: ["Ventas", "Taller", "Admin"], format: "enum" } }, required: ["department"] } },
+                        { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs to talk to a human about the specific topics listed in the system prompt for each department.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: [departmentLabels.dept1.name, departmentLabels.dept2.name, departmentLabels.dept3.name], format: "enum" } }, required: ["department"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking, cancelling an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
                     ]
                 }]
@@ -5398,6 +5414,124 @@ app.get('/api/bot/field-labels', async (_req, res) => {
     res.json(labels);
 });
 
+// =========================================================================
+// DEPARTMENT LABELS — Los 3 departamentos a los que Laura puede derivar
+// =========================================================================
+// Mismo patrón que los field_labels: 3 departamentos configurables que
+// cambian según el sector. Laura los recibe en su prompt y los usa como
+// enum para la tool assign_department.
+//
+// Cada departamento tiene:
+//   - name: nombre visible (ej. "Ventas", "Recepción", "Urgencias")
+//   - description: cuándo Laura debe derivar aquí (ej. "para temas comerciales")
+//
+// Persistencia: BotSettings → Setting='department_labels' → Value=JSON
+
+interface DepartmentLabel { name: string; description: string }
+type SectorDepartmentLabels = { dept1: DepartmentLabel; dept2: DepartmentLabel; dept3: DepartmentLabel };
+
+const SECTOR_DEPARTMENT_LABELS: Record<string, SectorDepartmentLabels> = {
+    taller: {
+        dept1: { name: 'Ventas', description: 'compra de vehículos, presupuestos, financiación, valoración de un coche de segunda mano' },
+        dept2: { name: 'Taller', description: 'averías, reparaciones, ITV, mantenimiento, problemas mecánicos, urgencias técnicas' },
+        dept3: { name: 'Admin', description: 'cualquier consulta general, reclamaciones, gestiones administrativas, o cuando no sepas dónde derivar' }
+    },
+    clinica_dental: {
+        dept1: { name: 'Recepción', description: 'citas, presupuestos, dudas generales sobre tratamientos y horarios' },
+        dept2: { name: 'Urgencias', description: 'dolor agudo, traumatismos, emergencias dentales que no pueden esperar' },
+        dept3: { name: 'Admin', description: 'facturas, mutuas/seguros, reclamaciones, cuestiones administrativas' }
+    },
+    peluqueria: {
+        dept1: { name: 'Recepción', description: 'reservas, presupuestos, dudas sobre servicios disponibles' },
+        dept2: { name: 'Estilismo', description: 'consultas técnicas sobre cortes, color, tratamientos capilares específicos' },
+        dept3: { name: 'Admin', description: 'cuestiones administrativas, reclamaciones, bonos, suscripciones' }
+    },
+    clinica_medica: {
+        dept1: { name: 'Recepción', description: 'citas, dudas generales sobre especialidades y horarios' },
+        dept2: { name: 'Urgencias', description: 'síntomas que requieren atención inmediata, dolor agudo' },
+        dept3: { name: 'Admin', description: 'mutuas, seguros, facturación, resultados de pruebas, gestiones' }
+    },
+    gestoria: {
+        dept1: { name: 'Atención al cliente', description: 'consultas generales, estado de trámites, dudas iniciales' },
+        dept2: { name: 'Asesoría', description: 'consultas fiscales/laborales/contables específicas que requieren un técnico' },
+        dept3: { name: 'Admin', description: 'facturación, cuestiones administrativas, reclamaciones' }
+    },
+    inmobiliaria: {
+        dept1: { name: 'Ventas', description: 'compra de propiedades, visitas, presupuestos, hipotecas' },
+        dept2: { name: 'Alquileres', description: 'alquiler de pisos/locales, contratos, fianzas' },
+        dept3: { name: 'Admin', description: 'gestiones administrativas, documentación, reclamaciones' }
+    },
+    academia: {
+        dept1: { name: 'Información', description: 'consultas sobre cursos, programas, becas, matrículas' },
+        dept2: { name: 'Soporte académico', description: 'dudas sobre contenido, exámenes, tutorías, profesores' },
+        dept3: { name: 'Admin', description: 'pagos, certificados, bajas, cuestiones administrativas' }
+    },
+    veterinario: {
+        dept1: { name: 'Recepción', description: 'citas, presupuestos, dudas generales sobre servicios' },
+        dept2: { name: 'Urgencias', description: 'mascota con síntomas graves o accidentes que no pueden esperar' },
+        dept3: { name: 'Admin', description: 'facturación, seguros, recetas, gestiones administrativas' }
+    },
+    otro: {
+        dept1: { name: 'Ventas', description: 'temas comerciales, consultas sobre productos o servicios' },
+        dept2: { name: 'Soporte', description: 'incidencias, problemas técnicos, urgencias' },
+        dept3: { name: 'Admin', description: 'cuestiones administrativas, reclamaciones, o cuando no sepas dónde derivar' }
+    }
+};
+
+async function getDepartmentLabels(): Promise<SectorDepartmentLabels> {
+    const fallback = SECTOR_DEPARTMENT_LABELS.taller;
+    if (!base) return fallback;
+    try {
+        const r = await base('BotSettings').select({
+            filterByFormula: "{Setting} = 'department_labels'",
+            maxRecords: 1
+        }).firstPage();
+        if (r.length === 0) return fallback;
+        const raw = r[0].get('Value') as string;
+        if (!raw) return fallback;
+        const parsed = JSON.parse(raw);
+        if (parsed?.dept1?.name && parsed?.dept2?.name && parsed?.dept3?.name) {
+            return parsed as SectorDepartmentLabels;
+        }
+        return fallback;
+    } catch {
+        return fallback;
+    }
+}
+
+// Endpoint público para el frontend (Settings UI los muestra y permite editar)
+app.get('/api/bot/department-labels', async (_req, res) => {
+    const labels = await getDepartmentLabels();
+    res.json(labels);
+});
+
+// Endpoint para guardar los department labels manualmente (sin pasar por wizard)
+app.post('/api/bot/department-labels', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { dept1, dept2, dept3 } = req.body || {};
+    // Validación básica
+    if (!dept1?.name || !dept2?.name || !dept3?.name) {
+        return res.status(400).json({ error: 'Cada departamento debe tener al menos un name' });
+    }
+    const labels: SectorDepartmentLabels = {
+        dept1: { name: String(dept1.name).slice(0, 50), description: String(dept1.description || '').slice(0, 300) },
+        dept2: { name: String(dept2.name).slice(0, 50), description: String(dept2.description || '').slice(0, 300) },
+        dept3: { name: String(dept3.name).slice(0, 50), description: String(dept3.description || '').slice(0, 300) }
+    };
+    try {
+        const json = JSON.stringify(labels);
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'department_labels'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            await base('BotSettings').update([{ id: r[0].id, fields: { Value: json } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'department_labels', Value: json } }]);
+        }
+        res.json({ success: true, departmentLabels: labels });
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Estado del wizard: para precargar las respuestas anteriores cuando el usuario lo reabre
 app.get('/api/bot/wizard-state', async (_req, res) => {
     if (!base) return res.json({});
@@ -5493,6 +5627,17 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
             await base('BotSettings').update([{ id: r2[0].id, fields: { Value: labelsJson } }]);
         } else {
             await base('BotSettings').create([{ fields: { Setting: 'field_labels', Value: labelsJson } }]);
+        }
+
+        // 2b. Guardar también los department_labels según el sector elegido
+        // (los 3 departamentos a los que Laura puede derivar con assign_department)
+        const deptLabels = SECTOR_DEPARTMENT_LABELS[sector] || SECTOR_DEPARTMENT_LABELS.otro;
+        const deptLabelsJson = JSON.stringify(deptLabels);
+        const r2b = await base('BotSettings').select({ filterByFormula: "{Setting} = 'department_labels'", maxRecords: 1 }).firstPage();
+        if (r2b.length > 0) {
+            await base('BotSettings').update([{ id: r2b[0].id, fields: { Value: deptLabelsJson } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'department_labels', Value: deptLabelsJson } }]);
         }
 
         // 3. Guardar el ESTADO COMPLETO del wizard para poder editarlo después sin empezar de cero
