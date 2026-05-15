@@ -3870,6 +3870,14 @@ io.on('connection', (socket) => {
 
     socket.on('trigger_ai_manual', async (data) => { const { phone } = data; const originId = waPhoneId || "default"; if (base) { const clean = cleanNumber(phone); activeAiChats.add(clean); io.emit('ai_active_change', { phone: clean, active: true }); const records = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'` }).firstPage(); const name = (records.length > 0) ? (records[0].get('name') as string) : "Cliente"; const msgs = await base('Messages').select({ filterByFormula: `OR({sender}='${clean}',{recipient}='${clean}')`, sort: [{ field: "timestamp", direction: "desc" }], maxRecords: 1 }).firstPage(); const text = msgs.length > 0 ? (msgs[0].get('text') as string) : "Hola"; processAI(text, clean, name, originId); } });
     socket.on('stop_ai_manual', (d) => { const clean = cleanNumber(d.phone); activeAiChats.delete(clean); io.emit('ai_active_change', { phone: clean, active: false }); });
+    // Consulta del estado real de Laura para un chat concreto.
+    // El ChatWindow lo pide al abrir un chat → el botón de IA arranca sincronizado
+    // con la realidad (activo si Laura está atendiendo ese chat, apagado si no).
+    socket.on('request_ai_status', (d) => {
+        const clean = cleanNumber(d?.phone);
+        if (!clean) return;
+        socket.emit('ai_active_change', { phone: clean, active: activeAiChats.has(clean) });
+    });
     socket.on('register_presence', (u: string) => { if (u) { onlineUsers.set(socket.id, u); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); } });
     socket.on('disconnect', () => { if (onlineUsers.has(socket.id)) { onlineUsers.delete(socket.id); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); } });
     socket.on('typing', (d) => { socket.broadcast.emit('remote_typing', d); });

@@ -230,6 +230,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         socket.on('ai_status', handleAiStatus);
         socket.on('ai_active_change', handleAiActive);
 
+        // Al abrir este chat, preguntar al servidor el estado real de Laura
+        // para que el botón de IA arranque sincronizado (no por defecto en apagado).
+        socket.emit('request_ai_status', { phone: contact.phone });
+
         return () => {
             socket.off('ai_status', handleAiStatus);
             socket.off('ai_active_change', handleAiActive);
