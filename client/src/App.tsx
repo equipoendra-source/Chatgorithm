@@ -24,6 +24,7 @@ import { AlertCenter } from './components/AlertCenter';
 
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
+import { StatusBar, Style } from '@capacitor/status-bar';
 
 // Types
 interface CompanyConfig {
@@ -295,6 +296,22 @@ function App() {
     };
 
     // Android back button handler
+    // Configurar la barra de estado del APK al arrancar.
+    // overlaysWebView(false) → la web NO se mete debajo de la barra de estado,
+    // el SO le reserva su espacio. Así el header del chat no queda tapado.
+    useEffect(() => {
+        if (!Capacitor.isNativePlatform()) return;
+        (async () => {
+            try {
+                await StatusBar.setOverlaysWebView({ overlay: false });
+                await StatusBar.setStyle({ style: Style.Dark });
+                await StatusBar.setBackgroundColor({ color: '#0f172a' });
+            } catch (e) {
+                console.warn('[StatusBar] No se pudo configurar:', e);
+            }
+        })();
+    }, []);
+
     useEffect(() => {
         if (!Capacitor.isNativePlatform()) return;
 
@@ -311,7 +328,7 @@ function App() {
         return () => {
             backButtonListener.then(l => l.remove());
         };
-    }, [view, selectedContact]);
+    }, [view, selectedContact, mobileTeamChatActive]);
 
     // ========================
     // RENDER FLOW

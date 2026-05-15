@@ -679,7 +679,7 @@ export function Sidebar({
 
             {/* FOOTER (Solo visible en chats, en team chat ya ves los usuarios arriba) */}
             {currentView !== 'team_chat' && (
-                <div className={`border-t p-3 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`border-t px-3 pt-3 safe-bottom-2 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="flex justify-between items-center mb-2">
                         <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                             <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>

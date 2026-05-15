@@ -58,8 +58,13 @@ const metaAppSecret = process.env.META_APP_SECRET;
 // Ej: "https://chatgorithm-frontend.onrender.com,http://localhost:5173"
 // Si está vacío, se cae a "*" con warning (peligroso en producción).
 const allowedOriginsEnv = process.env.ALLOWED_ORIGINS;
+// Orígenes del APK Capacitor — SIEMPRE permitidos cuando CORS está restringido.
+// El WebView de Android sirve la app desde https://localhost (o capacitor://localhost
+// según versión). Sin estos orígenes, el APK no puede conectar Socket.IO ni hacer
+// peticiones con header Origin → la app móvil quedaría inservible.
+const CAPACITOR_ORIGINS = ['capacitor://localhost', 'https://localhost', 'http://localhost'];
 const allowedOrigins: string[] | "*" = allowedOriginsEnv
-    ? allowedOriginsEnv.split(',').map(s => s.trim()).filter(Boolean)
+    ? [...allowedOriginsEnv.split(',').map(s => s.trim()).filter(Boolean), ...CAPACITOR_ORIGINS]
     : "*";
 if (allowedOrigins === "*") {
     console.warn("⚠️ [SECURITY] ALLOWED_ORIGINS no configurado. CORS abierto a *. Configúralo en producción.");

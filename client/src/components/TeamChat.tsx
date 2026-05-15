@@ -436,7 +436,7 @@ export function TeamChat({ socket, user, channel }: TeamChatProps) {
             <form
                 onSubmit={sendMessage}
                 onClick={e => e.stopPropagation()}
-                className={`p-4 border-t relative ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}
+                className={`px-4 pt-4 safe-bottom-2 border-t relative ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}
             >
                 {/* Hidden inputs — SEPARATED to control accept per input */}
                 <input type="file" ref={fileInputRef} className="hidden" onChange={handleFileSelect} />

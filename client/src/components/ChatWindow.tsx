@@ -304,7 +304,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         setOptInMarketing(newValue);
         setSavingOptIn(true);
         try {
-            const r = await fetch(`${API_URL}/contacts/${contact.phone}/marketing-opt-in`, {
+            const r = await fetch(`${API_URL}/api/contacts/${contact.phone}/marketing-opt-in`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ optedIn: newValue, source: 'manual_dashboard' })
             });
@@ -324,10 +324,18 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
 
     const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => { if (e.target.files && e.target.files[0]) setPendingFile(e.target.files[0]); };
 
-    const uploadFile = async (file: File) => {
+    // Acepta File o Blob. El parámetro filename es necesario al pasar un Blob
+    // (ej. audio grabado): `new File()` rompe en builds minificadas de Vite
+    // (TypeError: Uf is not a constructor), así que pasamos el Blob directo
+    // con el nombre como 3er argumento de FormData.append.
+    const uploadFile = async (file: File | Blob, filename?: string) => {
         setIsUploading(true);
         const formData = new FormData();
-        formData.append('file', file);
+        if (filename) {
+            formData.append('file', file, filename);
+        } else {
+            formData.append('file', file);
+        }
         formData.append('targetPhone', contact.phone);
         formData.append('senderName', user.username);
         formData.append('originPhoneId', currentAccountId || ''); // ENVÍO DE ORIGEN EN ARCHIVOS
@@ -417,9 +425,9 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                 }
 
                 const audioBlob = new Blob(audioChunksRef.current, { type: finalMimeType });
-                const audioFile = new File([audioBlob], `voice.${finalExt}`, { type: finalMimeType });
-                console.log(`🎤 [Audio] Archivo creado: ${audioFile.name}, tipo: ${audioFile.type}, tamaño: ${audioFile.size} bytes`);
-                await uploadFile(audioFile);
+                // Pasamos el Blob directo (NO new File) — new File rompe en build minificada de Vite
+                console.log(`🎤 [Audio] Blob creado: voice.${finalExt}, tipo: ${finalMimeType}, tamaño: ${audioBlob.size} bytes`);
+                await uploadFile(audioBlob, `voice.${finalExt}`);
                 stream.getTracks().forEach(t => t.stop());
             };
 
@@ -605,7 +613,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                 {/* ... (Resto del Footer con Inputs) ... */}
                 {showEmojiPicker && <div className="absolute bottom-20 left-4 z-50 shadow-2xl rounded-xl animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}><EmojiPicker onEmojiClick={onEmojiClick} width={300} height={400} previewConfig={{ showPreview: false }} /></div>}
 
-                <div className={`p-3 border-t relative z-20 transition-colors duration-300 ${isInternalMode ? 'bg-yellow-900/20 border-yellow-500/30 backdrop-blur-sm' : (isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-slate-200')} ${isAiActive ? 'border-t-4 border-purple-500 bg-purple-900/10' : ''}`}>
+                <div className={`px-3 pt-3 safe-bottom-2 border-t relative z-20 transition-colors duration-300 ${isInternalMode ? 'bg-yellow-900/20 border-yellow-500/30 backdrop-blur-sm' : (isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-slate-200')} ${isAiActive ? 'border-t-4 border-purple-500 bg-purple-900/10' : ''}`}>
 
                     {/* PANEL DE PREVISUALIZACIÓN DE ATAJO */}
                     {matchingQR && (

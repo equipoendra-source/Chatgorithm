@@ -3,6 +3,21 @@
 @tailwind utilities;
 
 @layer utilities {
+  /* ===== SAFE AREAS (APK Android) =====
+     Evitan que el contenido se solape con la barra de estado (arriba)
+     y la barra de gestos de navegación (abajo). Requiere viewport-fit=cover
+     en el meta viewport. En web/escritorio env() vale 0 → sin efecto. */
+  .safe-top {
+    padding-top: env(safe-area-inset-top);
+  }
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  /* Para barras de input fijas: respeta la barra de gestos sumándola al padding existente */
+  .safe-bottom-2 {
+    padding-bottom: calc(env(safe-area-inset-bottom) + 0.5rem);
+  }
+
   .scrollbar-thin::-webkit-scrollbar {
     width: 6px;
     height: 6px;
