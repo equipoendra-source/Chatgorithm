@@ -419,6 +419,7 @@ const io = new Server(httpServer, {
 // El resto SOLO se procesan si socket.data.authenticated === true.
 const PUBLIC_SOCKET_EVENTS = new Set<string>([
     'login_attempt',
+    'authenticate_socket',     // re-autenticación de socket reconectado (con token de sesión)
     'register_presence',
     'typing',
     'disconnect',
@@ -428,8 +429,30 @@ const PUBLIC_SOCKET_EVENTS = new Set<string>([
     'request_contacts',        // lectura
     'request_conversation',    // lectura
     'request_team_history',    // lectura
+    'request_ai_status',       // lectura del estado de IA de un chat
     'mark_read',               // marcar leído (no destructivo)
 ]);
+
+// =========================================================================
+// TOKENS DE SESIÓN — para re-autenticar sockets que se reconectan
+// =========================================================================
+// En móvil el socket se reconecta constantemente (cambio de red, app en
+// segundo plano...). Cada reconexión es un socket NUEVO que pierde
+// socket.data.authenticated. Sin esto, tras la primera reconexión el
+// usuario no podría enviar mensajes aunque siga logueado.
+//
+// Flujo: login_attempt OK → genera sessionToken → cliente lo guarda →
+// en cada (re)conexión el cliente emite authenticate_socket(token) →
+// el socket se vuelve a marcar como autenticado.
+const sessionTokens = new Map<string, { username: string, role: string, agentId: string, createdAt: number }>();
+const SESSION_TOKEN_TTL = 30 * 24 * 60 * 60 * 1000; // 30 días
+function cleanExpiredSessionTokens() {
+    const now = Date.now();
+    for (const [tk, s] of sessionTokens) {
+        if (now - s.createdAt > SESSION_TOKEN_TTL) sessionTokens.delete(tk);
+    }
+}
+setInterval(cleanExpiredSessionTokens, 60 * 60 * 1000); // limpieza cada hora
 
 // Lista de eventos DESTRUCTIVOS o que envían mensajes en nombre del negocio.
 // Nunca deben permitirse sin autenticación.
@@ -3648,12 +3671,18 @@ io.on('connection', (socket) => {
                 }
             }
             if (agentPasswordOk) {
+                const uname = r[0].get('name') as string;
+                const urole = (r[0].get('role') as string) || 'agent';
                 // ✅ Marcar el socket como autenticado para el middleware de eventos destructivos
                 socket.data.authenticated = true;
-                socket.data.username = r[0].get('name') as string;
-                socket.data.role = (r[0].get('role') as string) || 'agent';
+                socket.data.username = uname;
+                socket.data.role = urole;
                 socket.data.agentId = r[0].id; // Necesario para update_my_preferences
-                socket.emit('login_success', { id: r[0].id, username: r[0].get('name'), role: r[0].get('role'), preferences: prefs });
+                // Generar token de sesión para re-autenticar el socket en reconexiones
+                const sessionToken = crypto.randomBytes(24).toString('hex');
+                sessionTokens.set(sessionToken, { username: uname, role: urole, agentId: r[0].id, createdAt: Date.now() });
+                socket.data.sessionToken = sessionToken;
+                socket.emit('login_success', { id: r[0].id, username: uname, role: r[0].get('role'), preferences: prefs, sessionToken });
             } else {
                 socket.emit('login_error', 'Contraseña incorrecta');
             }
@@ -3661,6 +3690,26 @@ io.on('connection', (socket) => {
             socket.emit('login_error', 'Usuario no encontrado');
         }
     });
+    // Re-autenticación de socket reconectado. El cliente emite esto en cada
+    // (re)conexión con el token de sesión recibido en login_success. Sin esto,
+    // tras una reconexión (frecuente en móvil) el socket pierde la auth y se
+    // bloquean chatMessage, stop_ai_manual, etc.
+    socket.on('authenticate_socket', (token: any) => {
+        const tk = typeof token === 'string' ? token : token?.token;
+        const session = tk ? sessionTokens.get(tk) : null;
+        if (session) {
+            socket.data.authenticated = true;
+            socket.data.username = session.username;
+            socket.data.role = session.role;
+            socket.data.agentId = session.agentId;
+            socket.data.sessionToken = tk;
+            socket.emit('socket_authenticated', { ok: true, username: session.username });
+        } else {
+            console.warn(`🚫 [SOCKET] authenticate_socket con token inválido (id=${socket.id})`);
+            socket.emit('socket_authenticated', { ok: false });
+        }
+    });
+
     socket.on('create_agent', async (d) => { if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
     socket.on('delete_agent', async (d) => { if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
     socket.on('update_agent', async (d) => { if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });

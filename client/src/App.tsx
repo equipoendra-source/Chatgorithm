@@ -68,7 +68,7 @@ function App() {
     const [companyConfig, setCompanyConfig] = useState<CompanyConfig | null>(getSavedCompanyConfig);
 
     // USER AUTH - Second level of auth
-    const [user, setUser] = useState<{ id?: string, username: string, role: string, preferences?: any } | null>(getSavedUser);
+    const [user, setUser] = useState<{ id?: string, username: string, role: string, preferences?: any, sessionToken?: string } | null>(getSavedUser);
     const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
 
     // VIEW STATE
@@ -132,6 +132,29 @@ function App() {
         socketRef.current = newSocket;
         return newSocket;
     }, [companyConfig?.backendUrl]);
+
+    // RE-AUTENTICACIÓN DEL SOCKET — crítico en móvil.
+    // El socket se reconecta constantemente (cambio de red, app en segundo
+    // plano). Cada reconexión es un socket nuevo que pierde la autenticación.
+    // En cada evento 'connect' re-enviamos el token de sesión para que el
+    // socket vuelva a estar autenticado y no se bloqueen chatMessage, etc.
+    useEffect(() => {
+        if (!socket) return;
+        const reAuth = () => {
+            // Leemos de localStorage para no depender del estado de React
+            try {
+                const saved = JSON.parse(localStorage.getItem('chatgorithm_user') || '{}');
+                if (saved?.sessionToken) {
+                    socket.emit('authenticate_socket', saved.sessionToken);
+                    console.log('🔑 [Socket] Re-autenticando con token de sesión');
+                }
+            } catch (_) { /* sin token, el login normal autenticará */ }
+        };
+        socket.on('connect', reAuth);
+        // Si el socket ya está conectado al montar este efecto, autenticar ya
+        if (socket.connected) reAuth();
+        return () => { socket.off('connect', reAuth); };
+    }, [socket]);
 
     useEffect(() => {
         // El tour ahora se decide por las preferencias del usuario (servidor),
@@ -247,8 +270,8 @@ function App() {
         setCompanyConfig(config);
     };
 
-    const handleLogin = (u: string, r: string, p: string, m: boolean, prefs: any = {}, id?: string) => {
-        const newUser = { id, username: u, role: r, preferences: prefs };
+    const handleLogin = (u: string, r: string, p: string, m: boolean, prefs: any = {}, id?: string, sessionToken?: string) => {
+        const newUser = { id, username: u, role: r, preferences: prefs, sessionToken };
         setUser(newUser);
         localStorage.setItem('chatgorithm_user', JSON.stringify(newUser));
     };

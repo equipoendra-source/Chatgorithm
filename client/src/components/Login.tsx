@@ -11,7 +11,7 @@ interface Agent {
 }
 
 interface LoginProps {
-    onLogin: (username: string, role: string, password: '', remember: boolean, preferences: any, id?: string) => void;
+    onLogin: (username: string, role: string, password: '', remember: boolean, preferences: any, id?: string, sessionToken?: string) => void;
     socket: any;
     companyName?: string;
     onCompanyLogout?: () => void;
@@ -57,9 +57,9 @@ export function Login({ onLogin, socket, companyName, onCompanyLogout }: LoginPr
 
         socket.emit('login_attempt', { name: agentName, password: pwd });
 
-        socket.once('login_success', (data: { id?: string, username: string, role: string, preferences: any }) => {
+        socket.once('login_success', (data: { id?: string, username: string, role: string, preferences: any, sessionToken?: string }) => {
             setIsLoading(false);
-            onLogin(data.username, data.role, '', remember, data.preferences || {}, data.id);
+            onLogin(data.username, data.role, '', remember, data.preferences || {}, data.id, data.sessionToken);
         });
 
         socket.once('login_error', (msg: string) => {
