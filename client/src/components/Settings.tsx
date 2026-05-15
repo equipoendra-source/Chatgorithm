@@ -80,19 +80,12 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [botEnabled, setBotEnabled] = useState<boolean>(true);
     const [botEnabledLoading, setBotEnabledLoading] = useState<boolean>(false);
     const [botToggleSaving, setBotToggleSaving] = useState<boolean>(false);
-    // Departamentos a los que Laura puede derivar (3 nombres + descripción)
+    // Departamentos a los que Laura puede derivar (lista dinámica, N elementos)
     const [showDepartmentEditor, setShowDepartmentEditor] = useState<boolean>(false);
-    const [deptLabels, setDeptLabels] = useState<{
-        dept1: { name: string; description: string };
-        dept2: { name: string; description: string };
-        dept3: { name: string; description: string };
-    }>({
-        dept1: { name: '', description: '' },
-        dept2: { name: '', description: '' },
-        dept3: { name: '', description: '' }
-    });
+    const [botDepartments, setBotDepartments] = useState<{ name: string; description: string }[]>([]);
     const [deptLoading, setDeptLoading] = useState<boolean>(false);
     const [deptSaving, setDeptSaving] = useState<boolean>(false);
+    const MAX_DEPARTMENTS = 15;
     const [isLoadingPrompt, setIsLoadingPrompt] = useState(false);
 
     // Agenda Config
@@ -146,20 +139,29 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                 .then(d => { if (typeof d.enabled === 'boolean') setBotEnabled(d.enabled); })
                 .catch(() => { /* fallback: asumimos true */ })
                 .finally(() => setBotEnabledLoading(false));
-            // Cargar departamentos configurados (los 3 a los que Laura deriva)
+            // Cargar departamentos configurados (lista dinámica)
             setDeptLoading(true);
             fetch(`${API_URL}/bot/department-labels`)
                 .then(r => r.json())
                 .then(d => {
-                    if (d?.dept1?.name && d?.dept2?.name && d?.dept3?.name) {
-                        setDeptLabels({
-                            dept1: { name: d.dept1.name, description: d.dept1.description || '' },
-                            dept2: { name: d.dept2.name, description: d.dept2.description || '' },
-                            dept3: { name: d.dept3.name, description: d.dept3.description || '' }
+                    // Nuevo formato: { departments: [...] }
+                    if (Array.isArray(d?.departments)) {
+                        setBotDepartments(d.departments.map((dep: any) => ({
+                            name: String(dep?.name || ''),
+                            description: String(dep?.description || '')
+                        })));
+                        return;
+                    }
+                    // Backward compat: formato antiguo { dept1, dept2, dept3 }
+                    if (d?.dept1?.name) {
+                        const arr: { name: string; description: string }[] = [];
+                        ['dept1', 'dept2', 'dept3'].forEach(k => {
+                            if (d[k]?.name) arr.push({ name: d[k].name, description: d[k].description || '' });
                         });
+                        setBotDepartments(arr);
                     }
                 })
-                .catch(() => { /* fallback: estado por defecto */ })
+                .catch(() => { /* fallback: lista vacía, el usuario verá un mensaje */ })
                 .finally(() => setDeptLoading(false));
         }
         if (activeTab === 'agenda') {
@@ -184,11 +186,21 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         return () => { socket.off('bot_status_changed', handler); };
     }, [socket]);
 
-    // Guardar departamentos editados
+    // Guardar departamentos editados (lista dinámica)
     const handleSaveDepartments = async () => {
-        // Validar
-        if (!deptLabels.dept1.name.trim() || !deptLabels.dept2.name.trim() || !deptLabels.dept3.name.trim()) {
-            alert('Los 3 nombres de departamento son obligatorios');
+        // Limpiar antes de validar
+        const cleaned = botDepartments
+            .map(d => ({ name: d.name.trim(), description: d.description.trim() }))
+            .filter(d => d.name); // descartar entradas sin nombre
+        if (cleaned.length === 0) {
+            alert('Necesitas al menos 1 departamento con nombre.');
+            return;
+        }
+        // Comprobar duplicados (case-insensitive)
+        const lowered = cleaned.map(d => d.name.toLowerCase());
+        const duplicates = lowered.filter((n, i) => lowered.indexOf(n) !== i);
+        if (duplicates.length > 0) {
+            alert(`Hay nombres duplicados: "${duplicates[0]}". Cada departamento debe tener un nombre único.`);
             return;
         }
         setDeptSaving(true);
@@ -196,11 +208,12 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             const r = await fetch(`${API_URL}/bot/department-labels`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(deptLabels)
+                body: JSON.stringify({ departments: cleaned })
             });
             const data = await r.json();
             if (data.success) {
-                setSuccess('✅ Departamentos guardados. Laura los aplicará en la próxima conversación.');
+                setBotDepartments(cleaned); // refrescar UI con la versión saneada
+                setSuccess(`✅ ${cleaned.length} departamento${cleaned.length === 1 ? '' : 's'} guardado${cleaned.length === 1 ? '' : 's'}. Laura los aplicará en la próxima conversación.`);
                 setTimeout(() => setSuccess(''), 4000);
             } else {
                 alert('Error: ' + (data.error || 'desconocido'));
@@ -210,6 +223,27 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         } finally {
             setDeptSaving(false);
         }
+    };
+
+    // Helpers para editar la lista dinámica
+    const addDepartment = () => {
+        if (botDepartments.length >= MAX_DEPARTMENTS) {
+            alert(`Máximo ${MAX_DEPARTMENTS} departamentos.`);
+            return;
+        }
+        setBotDepartments([...botDepartments, { name: '', description: '' }]);
+    };
+    const removeDepartment = (index: number) => {
+        if (botDepartments.length <= 1) {
+            alert('Necesitas al menos 1 departamento.');
+            return;
+        }
+        if (window.confirm(`¿Eliminar el departamento "${botDepartments[index].name || '(sin nombre)'}"?`)) {
+            setBotDepartments(botDepartments.filter((_, i) => i !== index));
+        }
+    };
+    const updateDepartment = (index: number, field: 'name' | 'description', value: string) => {
+        setBotDepartments(botDepartments.map((d, i) => i === index ? { ...d, [field]: value } : d));
     };
 
     // Toggle del estado global de Laura
@@ -642,7 +676,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                             </div>
 
                             {/* ============================================================ */}
-                            {/* EDITOR DE DEPARTAMENTOS — donde Laura deriva chats          */}
+                            {/* EDITOR DE DEPARTAMENTOS — donde Laura deriva chats (N dinámico) */}
                             {/* ============================================================ */}
                             <div>
                                 <button
@@ -651,37 +685,58 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                     <div className="flex items-center gap-2">
                                         <Briefcase size={16} className={isDark ? 'text-slate-500' : 'text-slate-400'} />
                                         <span>Departamentos a los que Laura puede derivar</span>
-                                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>3 dpto</span>
+                                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{botDepartments.length} dpto{botDepartments.length === 1 ? '' : 's'}</span>
                                     </div>
                                     {showDepartmentEditor ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
                                 </button>
                                 {showDepartmentEditor && (
                                     <div className={`mt-3 p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
                                         <div className={`mb-4 px-3 py-2 rounded-lg text-xs ${isDark ? 'bg-blue-500/10 text-blue-300' : 'bg-blue-50 text-blue-800'}`}>
-                                            💡 Cuando un cliente pide hablar con un humano, Laura deriva el chat a UNO de estos 3 departamentos según el tema. Cuanto más clara sea la descripción, mejor decidirá Laura.
+                                            💡 Cuando un cliente pide hablar con un humano, Laura deriva el chat a UNO de estos departamentos según el tema. Cuanto más clara sea la descripción, mejor decidirá Laura. Puedes añadir hasta {MAX_DEPARTMENTS}.
                                         </div>
                                         {deptLoading ? (
                                             <div className="p-6 text-center text-slate-400"><RefreshCw className="animate-spin inline mr-2" /> Cargando...</div>
                                         ) : (
                                             <div className="space-y-5">
-                                                {([1, 2, 3] as const).map((n) => {
-                                                    const key = `dept${n}` as 'dept1' | 'dept2' | 'dept3';
-                                                    const colors = n === 1
-                                                        ? 'from-emerald-500 to-teal-600'
-                                                        : n === 2
-                                                            ? 'from-orange-500 to-amber-600'
-                                                            : 'from-purple-500 to-pink-600';
+                                                {botDepartments.length === 0 && (
+                                                    <div className={`p-4 rounded-xl border-2 border-dashed text-center text-sm ${isDark ? 'border-slate-700 text-slate-400' : 'border-slate-300 text-slate-500'}`}>
+                                                        No hay departamentos configurados. Añade el primero abajo.
+                                                    </div>
+                                                )}
+                                                {botDepartments.map((dep, index) => {
+                                                    const gradients = [
+                                                        'from-emerald-500 to-teal-600',
+                                                        'from-orange-500 to-amber-600',
+                                                        'from-purple-500 to-pink-600',
+                                                        'from-blue-500 to-cyan-600',
+                                                        'from-rose-500 to-red-600',
+                                                        'from-yellow-500 to-orange-600',
+                                                    ];
+                                                    const grad = gradients[index % gradients.length];
                                                     return (
-                                                        <div key={key} className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                                                            <div className={`text-xs font-bold uppercase mb-2 bg-gradient-to-r ${colors} bg-clip-text text-transparent`}>Departamento {n}</div>
+                                                        <div key={index} className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                                            <div className="flex items-start justify-between mb-2">
+                                                                <div className={`text-xs font-bold uppercase bg-gradient-to-r ${grad} bg-clip-text text-transparent`}>
+                                                                    Departamento {index + 1}
+                                                                </div>
+                                                                <button
+                                                                    onClick={() => removeDepartment(index)}
+                                                                    disabled={botDepartments.length <= 1}
+                                                                    title={botDepartments.length <= 1 ? 'Necesitas al menos 1 departamento' : 'Eliminar este departamento'}
+                                                                    className={`p-1.5 rounded-lg border transition ${botDepartments.length <= 1
+                                                                        ? 'opacity-30 cursor-not-allowed border-slate-300'
+                                                                        : (isDark ? 'bg-slate-800 border-slate-700 text-slate-400 hover:text-red-400 hover:border-red-500/40' : 'bg-white border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-300')}`}>
+                                                                    <Trash2 className="w-3.5 h-3.5" />
+                                                                </button>
+                                                            </div>
                                                             <div className="space-y-3">
                                                                 <div>
                                                                     <label className={`text-xs font-bold uppercase block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Nombre del departamento</label>
                                                                     <input
                                                                         type="text"
-                                                                        value={deptLabels[key].name}
-                                                                        onChange={(e) => setDeptLabels({ ...deptLabels, [key]: { ...deptLabels[key], name: e.target.value } })}
-                                                                        placeholder={n === 1 ? "Ventas / Recepción / Información..." : n === 2 ? "Taller / Urgencias / Soporte..." : "Admin / Contabilidad..."}
+                                                                        value={dep.name}
+                                                                        onChange={(e) => updateDepartment(index, 'name', e.target.value)}
+                                                                        placeholder="Ej: Ventas, Recepción, Urgencias, Postventa..."
                                                                         maxLength={50}
                                                                         className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 outline-none ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}
                                                                     />
@@ -689,8 +744,8 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                                                 <div>
                                                                     <label className={`text-xs font-bold uppercase block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Cuándo derivar aquí (descripción para Laura)</label>
                                                                     <textarea
-                                                                        value={deptLabels[key].description}
-                                                                        onChange={(e) => setDeptLabels({ ...deptLabels, [key]: { ...deptLabels[key], description: e.target.value } })}
+                                                                        value={dep.description}
+                                                                        onChange={(e) => updateDepartment(index, 'description', e.target.value)}
                                                                         placeholder="Ej: para temas comerciales, presupuestos, compra de productos..."
                                                                         rows={2}
                                                                         maxLength={300}
@@ -701,7 +756,19 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                                         </div>
                                                     );
                                                 })}
-                                                <div className="flex justify-end">
+                                                {/* Botón añadir departamento */}
+                                                <button
+                                                    onClick={addDepartment}
+                                                    disabled={botDepartments.length >= MAX_DEPARTMENTS}
+                                                    className={`w-full p-3 rounded-xl border-2 border-dashed font-semibold text-sm flex items-center justify-center gap-2 transition ${botDepartments.length >= MAX_DEPARTMENTS
+                                                        ? 'opacity-40 cursor-not-allowed border-slate-300 text-slate-400'
+                                                        : (isDark ? 'border-slate-600 text-slate-400 hover:border-teal-500 hover:text-teal-400 hover:bg-teal-500/5' : 'border-slate-300 text-slate-500 hover:border-teal-500 hover:text-teal-600 hover:bg-teal-50')}`}>
+                                                    <Plus className="w-4 h-4" />
+                                                    {botDepartments.length >= MAX_DEPARTMENTS
+                                                        ? `Máximo ${MAX_DEPARTMENTS} departamentos alcanzado`
+                                                        : 'Añadir departamento'}
+                                                </button>
+                                                <div className="flex justify-end pt-2">
                                                     <button
                                                         onClick={handleSaveDepartments}
                                                         disabled={deptSaving}

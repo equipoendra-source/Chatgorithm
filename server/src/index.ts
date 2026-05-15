@@ -2418,17 +2418,18 @@ Cuando llames a book_appointment, PASA esos datos en los parámetros field1, fie
 Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 son opcionales — si el cliente no quiere darlos, no insistas.`;
 
             // Instrucciones de derivación a departamentos — dinámicas según config del cliente
-            // Laura llamará a assign_department con uno de estos 3 nombres exactos.
+            // Laura llamará a assign_department con uno de estos nombres exactos (N dinámico).
+            const deptLines = departmentLabels
+                .map(d => `- **"${d.name}"** → ${d.description || '(sin descripción)'}`)
+                .join('\n');
             const departmentsInstr = `\n\n## 🏢 DERIVACIÓN A DEPARTAMENTOS HUMANOS
-Cuando el cliente necesite hablar con un humano, llama a assign_department(department) con UNO de estos 3 valores EXACTOS:
+Cuando el cliente necesite hablar con un humano, llama a assign_department(department) con UNO de estos valores EXACTOS:
 
-- **"${departmentLabels.dept1.name}"** → ${departmentLabels.dept1.description}
-- **"${departmentLabels.dept2.name}"** → ${departmentLabels.dept2.description}
-- **"${departmentLabels.dept3.name}"** → ${departmentLabels.dept3.description}
+${deptLines}
 
 REGLAS:
 - Usa el nombre del departamento EXACTAMENTE como aparece arriba (mayúsculas, tildes, espacios).
-- Si dudas entre dos, elige el que más se ajuste por la descripción.
+- Si dudas entre varios, elige el que más se ajuste por la descripción.
 - Si el cliente menciona algo que claramente cae en uno, deriva sin preguntar de nuevo.
 - Tras llamar a assign_department, llama también a stop_conversation.`;
 
@@ -2494,7 +2495,7 @@ REGLAS:
                             }
                         },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
-                        { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs to talk to a human about the specific topics listed in the system prompt for each department.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: [departmentLabels.dept1.name, departmentLabels.dept2.name, departmentLabels.dept3.name], format: "enum" } }, required: ["department"] } },
+                        { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs to talk to a human about the specific topics listed in the system prompt for each department.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: departmentLabels.map(d => d.name), format: "enum" } }, required: ["department"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking, cancelling an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
                     ]
                 }]
@@ -5415,70 +5416,91 @@ app.get('/api/bot/field-labels', async (_req, res) => {
 });
 
 // =========================================================================
-// DEPARTMENT LABELS — Los 3 departamentos a los que Laura puede derivar
+// DEPARTMENT LABELS — Departamentos a los que Laura puede derivar (N dinámico)
 // =========================================================================
-// Mismo patrón que los field_labels: 3 departamentos configurables que
-// cambian según el sector. Laura los recibe en su prompt y los usa como
-// enum para la tool assign_department.
-//
-// Cada departamento tiene:
+// El cliente puede tener desde 1 hasta MAX_DEPARTMENTS departamentos. Cada uno:
 //   - name: nombre visible (ej. "Ventas", "Recepción", "Urgencias")
-//   - description: cuándo Laura debe derivar aquí (ej. "para temas comerciales")
+//   - description: cuándo Laura debe derivar aquí
 //
-// Persistencia: BotSettings → Setting='department_labels' → Value=JSON
+// Persistencia: BotSettings → Setting='department_labels' → Value=JSON array
+// Backward compat: si en Airtable está el formato antiguo {dept1, dept2, dept3},
+// se convierte automáticamente a array al leer.
 
 interface DepartmentLabel { name: string; description: string }
-type SectorDepartmentLabels = { dept1: DepartmentLabel; dept2: DepartmentLabel; dept3: DepartmentLabel };
+const MAX_DEPARTMENTS = 15; // Límite razonable. Más de esto, el prompt se infla.
 
-const SECTOR_DEPARTMENT_LABELS: Record<string, SectorDepartmentLabels> = {
-    taller: {
-        dept1: { name: 'Ventas', description: 'compra de vehículos, presupuestos, financiación, valoración de un coche de segunda mano' },
-        dept2: { name: 'Taller', description: 'averías, reparaciones, ITV, mantenimiento, problemas mecánicos, urgencias técnicas' },
-        dept3: { name: 'Admin', description: 'cualquier consulta general, reclamaciones, gestiones administrativas, o cuando no sepas dónde derivar' }
-    },
-    clinica_dental: {
-        dept1: { name: 'Recepción', description: 'citas, presupuestos, dudas generales sobre tratamientos y horarios' },
-        dept2: { name: 'Urgencias', description: 'dolor agudo, traumatismos, emergencias dentales que no pueden esperar' },
-        dept3: { name: 'Admin', description: 'facturas, mutuas/seguros, reclamaciones, cuestiones administrativas' }
-    },
-    peluqueria: {
-        dept1: { name: 'Recepción', description: 'reservas, presupuestos, dudas sobre servicios disponibles' },
-        dept2: { name: 'Estilismo', description: 'consultas técnicas sobre cortes, color, tratamientos capilares específicos' },
-        dept3: { name: 'Admin', description: 'cuestiones administrativas, reclamaciones, bonos, suscripciones' }
-    },
-    clinica_medica: {
-        dept1: { name: 'Recepción', description: 'citas, dudas generales sobre especialidades y horarios' },
-        dept2: { name: 'Urgencias', description: 'síntomas que requieren atención inmediata, dolor agudo' },
-        dept3: { name: 'Admin', description: 'mutuas, seguros, facturación, resultados de pruebas, gestiones' }
-    },
-    gestoria: {
-        dept1: { name: 'Atención al cliente', description: 'consultas generales, estado de trámites, dudas iniciales' },
-        dept2: { name: 'Asesoría', description: 'consultas fiscales/laborales/contables específicas que requieren un técnico' },
-        dept3: { name: 'Admin', description: 'facturación, cuestiones administrativas, reclamaciones' }
-    },
-    inmobiliaria: {
-        dept1: { name: 'Ventas', description: 'compra de propiedades, visitas, presupuestos, hipotecas' },
-        dept2: { name: 'Alquileres', description: 'alquiler de pisos/locales, contratos, fianzas' },
-        dept3: { name: 'Admin', description: 'gestiones administrativas, documentación, reclamaciones' }
-    },
-    academia: {
-        dept1: { name: 'Información', description: 'consultas sobre cursos, programas, becas, matrículas' },
-        dept2: { name: 'Soporte académico', description: 'dudas sobre contenido, exámenes, tutorías, profesores' },
-        dept3: { name: 'Admin', description: 'pagos, certificados, bajas, cuestiones administrativas' }
-    },
-    veterinario: {
-        dept1: { name: 'Recepción', description: 'citas, presupuestos, dudas generales sobre servicios' },
-        dept2: { name: 'Urgencias', description: 'mascota con síntomas graves o accidentes que no pueden esperar' },
-        dept3: { name: 'Admin', description: 'facturación, seguros, recetas, gestiones administrativas' }
-    },
-    otro: {
-        dept1: { name: 'Ventas', description: 'temas comerciales, consultas sobre productos o servicios' },
-        dept2: { name: 'Soporte', description: 'incidencias, problemas técnicos, urgencias' },
-        dept3: { name: 'Admin', description: 'cuestiones administrativas, reclamaciones, o cuando no sepas dónde derivar' }
-    }
+const SECTOR_DEPARTMENT_LABELS: Record<string, DepartmentLabel[]> = {
+    taller: [
+        { name: 'Ventas', description: 'compra de vehículos, presupuestos, financiación, valoración de un coche de segunda mano' },
+        { name: 'Taller', description: 'averías, reparaciones, ITV, mantenimiento, problemas mecánicos, urgencias técnicas' },
+        { name: 'Admin', description: 'cualquier consulta general, reclamaciones, gestiones administrativas, o cuando no sepas dónde derivar' }
+    ],
+    clinica_dental: [
+        { name: 'Recepción', description: 'citas, presupuestos, dudas generales sobre tratamientos y horarios' },
+        { name: 'Urgencias', description: 'dolor agudo, traumatismos, emergencias dentales que no pueden esperar' },
+        { name: 'Admin', description: 'facturas, mutuas/seguros, reclamaciones, cuestiones administrativas' }
+    ],
+    peluqueria: [
+        { name: 'Recepción', description: 'reservas, presupuestos, dudas sobre servicios disponibles' },
+        { name: 'Estilismo', description: 'consultas técnicas sobre cortes, color, tratamientos capilares específicos' },
+        { name: 'Admin', description: 'cuestiones administrativas, reclamaciones, bonos, suscripciones' }
+    ],
+    clinica_medica: [
+        { name: 'Recepción', description: 'citas, dudas generales sobre especialidades y horarios' },
+        { name: 'Urgencias', description: 'síntomas que requieren atención inmediata, dolor agudo' },
+        { name: 'Admin', description: 'mutuas, seguros, facturación, resultados de pruebas, gestiones' }
+    ],
+    gestoria: [
+        { name: 'Atención al cliente', description: 'consultas generales, estado de trámites, dudas iniciales' },
+        { name: 'Asesoría', description: 'consultas fiscales/laborales/contables específicas que requieren un técnico' },
+        { name: 'Admin', description: 'facturación, cuestiones administrativas, reclamaciones' }
+    ],
+    inmobiliaria: [
+        { name: 'Ventas', description: 'compra de propiedades, visitas, presupuestos, hipotecas' },
+        { name: 'Alquileres', description: 'alquiler de pisos/locales, contratos, fianzas' },
+        { name: 'Admin', description: 'gestiones administrativas, documentación, reclamaciones' }
+    ],
+    academia: [
+        { name: 'Información', description: 'consultas sobre cursos, programas, becas, matrículas' },
+        { name: 'Soporte académico', description: 'dudas sobre contenido, exámenes, tutorías, profesores' },
+        { name: 'Admin', description: 'pagos, certificados, bajas, cuestiones administrativas' }
+    ],
+    veterinario: [
+        { name: 'Recepción', description: 'citas, presupuestos, dudas generales sobre servicios' },
+        { name: 'Urgencias', description: 'mascota con síntomas graves o accidentes que no pueden esperar' },
+        { name: 'Admin', description: 'facturación, seguros, recetas, gestiones administrativas' }
+    ],
+    otro: [
+        { name: 'Ventas', description: 'temas comerciales, consultas sobre productos o servicios' },
+        { name: 'Soporte', description: 'incidencias, problemas técnicos, urgencias' },
+        { name: 'Admin', description: 'cuestiones administrativas, reclamaciones, o cuando no sepas dónde derivar' }
+    ]
 };
 
-async function getDepartmentLabels(): Promise<SectorDepartmentLabels> {
+// Normaliza un valor leído de Airtable a array. Acepta:
+//   - Array de DepartmentLabel (formato nuevo)
+//   - Objeto {dept1, dept2, dept3, ...} (formato antiguo) → convierte a array
+function normalizeDeptLabels(parsed: any): DepartmentLabel[] | null {
+    if (Array.isArray(parsed)) {
+        const valid = parsed
+            .filter(d => d && typeof d.name === 'string' && d.name.trim())
+            .map(d => ({ name: String(d.name), description: String(d.description || '') }));
+        return valid.length > 0 ? valid : null;
+    }
+    if (parsed && typeof parsed === 'object') {
+        // Formato antiguo: {dept1:{}, dept2:{}, dept3:{}, ...}
+        const keys = Object.keys(parsed).filter(k => /^dept\d+$/.test(k)).sort();
+        const arr: DepartmentLabel[] = [];
+        for (const k of keys) {
+            const d = parsed[k];
+            if (d?.name) arr.push({ name: String(d.name), description: String(d.description || '') });
+        }
+        return arr.length > 0 ? arr : null;
+    }
+    return null;
+}
+
+async function getDepartmentLabels(): Promise<DepartmentLabel[]> {
     const fallback = SECTOR_DEPARTMENT_LABELS.taller;
     if (!base) return fallback;
     try {
@@ -5490,10 +5512,8 @@ async function getDepartmentLabels(): Promise<SectorDepartmentLabels> {
         const raw = r[0].get('Value') as string;
         if (!raw) return fallback;
         const parsed = JSON.parse(raw);
-        if (parsed?.dept1?.name && parsed?.dept2?.name && parsed?.dept3?.name) {
-            return parsed as SectorDepartmentLabels;
-        }
-        return fallback;
+        const normalized = normalizeDeptLabels(parsed);
+        return normalized || fallback;
     } catch {
         return fallback;
     }
@@ -5502,31 +5522,56 @@ async function getDepartmentLabels(): Promise<SectorDepartmentLabels> {
 // Endpoint público para el frontend (Settings UI los muestra y permite editar)
 app.get('/api/bot/department-labels', async (_req, res) => {
     const labels = await getDepartmentLabels();
-    res.json(labels);
+    res.json({ departments: labels });
 });
 
 // Endpoint para guardar los department labels manualmente (sin pasar por wizard)
+// Body: { departments: DepartmentLabel[] } o (backward compat) {dept1, dept2, dept3}
 app.post('/api/bot/department-labels', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
-    const { dept1, dept2, dept3 } = req.body || {};
-    // Validación básica
-    if (!dept1?.name || !dept2?.name || !dept3?.name) {
-        return res.status(400).json({ error: 'Cada departamento debe tener al menos un name' });
+    const body = req.body || {};
+    // Aceptar tanto el nuevo formato {departments: [...]} como el antiguo {dept1, dept2, dept3}
+    let incoming: any[] = [];
+    if (Array.isArray(body.departments)) {
+        incoming = body.departments;
+    } else if (body.dept1 || body.dept2 || body.dept3) {
+        incoming = [body.dept1, body.dept2, body.dept3].filter(Boolean);
+    } else {
+        return res.status(400).json({ error: 'Falta `departments` (array) en el body' });
     }
-    const labels: SectorDepartmentLabels = {
-        dept1: { name: String(dept1.name).slice(0, 50), description: String(dept1.description || '').slice(0, 300) },
-        dept2: { name: String(dept2.name).slice(0, 50), description: String(dept2.description || '').slice(0, 300) },
-        dept3: { name: String(dept3.name).slice(0, 50), description: String(dept3.description || '').slice(0, 300) }
-    };
+    // Validar y limpiar
+    const cleaned: DepartmentLabel[] = [];
+    for (const d of incoming) {
+        if (!d?.name || typeof d.name !== 'string' || !d.name.trim()) continue;
+        cleaned.push({
+            name: String(d.name).trim().slice(0, 50),
+            description: String(d.description || '').trim().slice(0, 300)
+        });
+    }
+    if (cleaned.length === 0) {
+        return res.status(400).json({ error: 'Necesitas al menos 1 departamento con nombre' });
+    }
+    if (cleaned.length > MAX_DEPARTMENTS) {
+        return res.status(400).json({ error: `Máximo ${MAX_DEPARTMENTS} departamentos. Recibidos: ${cleaned.length}` });
+    }
+    // Comprobar duplicados de nombre (case-insensitive)
+    const seen = new Set<string>();
+    for (const d of cleaned) {
+        const key = d.name.toLowerCase();
+        if (seen.has(key)) {
+            return res.status(400).json({ error: `Departamento duplicado: "${d.name}". Cada nombre debe ser único.` });
+        }
+        seen.add(key);
+    }
     try {
-        const json = JSON.stringify(labels);
+        const json = JSON.stringify(cleaned);
         const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'department_labels'", maxRecords: 1 }).firstPage();
         if (r.length > 0) {
             await base('BotSettings').update([{ id: r[0].id, fields: { Value: json } }]);
         } else {
             await base('BotSettings').create([{ fields: { Setting: 'department_labels', Value: json } }]);
         }
-        res.json({ success: true, departmentLabels: labels });
+        res.json({ success: true, departments: cleaned });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
