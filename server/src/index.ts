@@ -381,11 +381,50 @@ const TABLE_CAMPAIGNS = 'Campaigns';
 const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
+// BUSINESS_ACCOUNTS: phoneId → token. Se puebla desde la tabla WhatsAppAccounts
+// de Airtable + el número de las env vars como fallback/respaldo.
+// ACCOUNT_META: phoneId → { name, businessId } para el selector de líneas y plantillas.
 const BUSINESS_ACCOUNTS: Record<string, string> = {
     [waPhoneId || 'default']: waToken || '',
 };
+const ACCOUNT_META: Record<string, { name: string, businessId: string }> = {
+    [waPhoneId || 'default']: { name: 'Principal', businessId: waBusinessId || '' },
+};
 
 const getToken = (phoneId: string) => BUSINESS_ACCOUNTS[phoneId] || waToken;
+// Devuelve el WABA BusinessId del número (para plantillas). Fallback al de env.
+const getBusinessId = (phoneId: string) => ACCOUNT_META[phoneId]?.businessId || waBusinessId || '';
+
+// Carga (o recarga) las cuentas de WhatsApp desde la tabla WhatsAppAccounts.
+// Cada fila activa añade un número que la app puede usar para recibir y enviar.
+// Si la tabla no existe o está vacía, se mantiene solo el número de las env vars.
+async function loadWhatsAppAccounts(): Promise<void> {
+    if (!base) return;
+    try {
+        const records = await base('WhatsAppAccounts').select().all();
+        let loaded = 0;
+        for (const r of records) {
+            // Saltar números desactivados
+            if (r.get('Active') === false) continue;
+            const phoneId = String(r.get('PhoneId') || '').trim();
+            const token = String(r.get('Token') || '').trim();
+            const name = String(r.get('Name') || '').trim();
+            const businessId = String(r.get('BusinessId') || '').trim();
+            if (!phoneId || !token) {
+                console.warn(`⚠️ [WA Accounts] Fila ignorada: falta PhoneId o Token (Name="${name}")`);
+                continue;
+            }
+            BUSINESS_ACCOUNTS[phoneId] = token;
+            ACCOUNT_META[phoneId] = { name: name || `Línea ${phoneId.slice(-4)}`, businessId };
+            loaded++;
+        }
+        console.log(`📱 [WA Accounts] ${loaded} cuenta(s) cargada(s) desde Airtable. Total disponible: ${Object.keys(BUSINESS_ACCOUNTS).length}`);
+    } catch (e: any) {
+        console.error('[WA Accounts] Error cargando cuentas (se usa solo el número de env vars):', e.message);
+    }
+}
+// Cargar al arranque (con delay para que `base` ya esté inicializado)
+setTimeout(() => { loadWhatsAppAccounts().catch(() => {}); }, 1200);
 
 // --- CONEXIÓN AIRTABLE ---
 let base: Airtable.Base | null = null;
@@ -2995,7 +3034,24 @@ app.get('/api/voice/test-credentials', async (req, res) => {
     }
 });
 
-app.get('/api/accounts', (req, res) => res.json(Object.keys(BUSINESS_ACCOUNTS).map(id => ({ id, name: `Línea ${id.slice(-4)}` }))));
+// Lista de números/líneas de WhatsApp disponibles (para el selector del frontend)
+app.get('/api/accounts', (req, res) => res.json(
+    Object.keys(BUSINESS_ACCOUNTS).map(id => ({
+        id,
+        name: ACCOUNT_META[id]?.name || `Línea ${id.slice(-4)}`
+    }))
+));
+
+// Recarga las cuentas de WhatsApp desde Airtable SIN reiniciar el servidor.
+// Útil tras añadir un número nuevo a la tabla WhatsAppAccounts.
+app.post('/api/admin/reload-accounts', async (req, res) => {
+    if (!checkAdminToken(req, res)) return;
+    await loadWhatsAppAccounts();
+    res.json({
+        success: true,
+        accounts: Object.keys(BUSINESS_ACCOUNTS).map(id => ({ id, name: ACCOUNT_META[id]?.name }))
+    });
+});
 
 // Agenda
 app.get('/api/appointments', async (req, res) => {
