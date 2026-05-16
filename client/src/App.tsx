@@ -15,7 +15,6 @@ import { TeamChat } from './components/TeamChat';
 import { IncomingCallHandler } from './components/IncomingCallHandler';
 import { pushNotificationService } from './services/pushNotifications';
 import ErrorBoundary from './components/ErrorBoundary';
-import { SupportWidget } from './components/SupportWidget';
 import { getAuthServerUrl } from './config/api';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
@@ -571,9 +570,6 @@ function App() {
 
             {/* Incoming call handler */}
             <IncomingCallHandler />
-
-            {/* Support widget */}
-            <SupportWidget />
 
             {/* Centro de alertas — solo visible para admins. Escucha team_alert por socket. */}
             <AlertCenter socket={socket} isAdmin={user.role?.toLowerCase() === 'admin'} />
