@@ -379,6 +379,7 @@ const TABLE_TEAM_MESSAGES = 'TeamMessages';
 const TABLE_SCHEDULED_NOTIFICATIONS = 'ScheduledNotifications';
 const TABLE_CAMPAIGNS = 'Campaigns';
 const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
+const TABLE_VEHICLES = 'Vehicles'; // Vehículos/items registrados por cliente (multi-coche)
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 // BUSINESS_ACCOUNTS: phoneId → token. Se puebla desde la tabla WhatsAppAccounts
@@ -2264,6 +2265,15 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             activeAiChats.delete(cleanedPhone);
             io.emit('ai_active_change', { phone: cleanedPhone, active: false });
             metrics.appointmentsBooked++;
+
+            // Registrar/actualizar el vehículo del cliente en la tabla Vehicles.
+            // Aislado en try/catch propio — si falla, la reserva NO se ve afectada.
+            try {
+                await upsertVehicle(cleanedPhone, field1, field2, field3, field4, field5);
+            } catch (vErr: any) {
+                console.error('⚠️ [Book] No se pudo registrar el vehículo (la reserva SÍ se hizo):', vErr.message);
+            }
+
             console.log(`✅ [Book] Reserva completada para ${humanDate}`);
             return `✅ RESERVA CONFIRMADA para el ${humanDate}.`;
         } catch (e: any) {
@@ -2272,6 +2282,80 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             return "❌ Error técnico al guardar.";
         }
     });
+}
+
+// ==========================================================================
+// VEHÍCULOS DEL CLIENTE — un cliente puede tener varios coches/items
+// ==========================================================================
+// Registra (o actualiza) un vehículo del cliente. Se identifica por la
+// matrícula (field1). Si ya existe un vehículo con esa matrícula para ese
+// cliente, actualiza sus datos; si no, lo crea. Sin matrícula no registra nada.
+async function upsertVehicle(
+    clientPhone: string,
+    field1: string, field2: string, field3: string, field4: string, field5: string
+): Promise<void> {
+    if (!base) return;
+    const clean = cleanNumber(clientPhone);
+    const matricula = (field1 || '').trim();
+    if (!clean || !matricula) return; // sin teléfono o sin matrícula → no registramos
+    try {
+        const existing = await base(TABLE_VEHICLES).select({
+            filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(matricula)}')`,
+            maxRecords: 1
+        }).firstPage();
+        const fields = {
+            ClientPhone: clean,
+            Matricula: matricula,
+            Marca: field2 || '',
+            Modelo: field3 || '',
+            Extra: field4 || '',
+            Notas: field5 || '',
+            Active: true
+        };
+        if (existing.length > 0) {
+            await base(TABLE_VEHICLES).update([{ id: existing[0].id, fields }]);
+            console.log(`🚗 [Vehicles] Vehículo actualizado: ${matricula} (${clean})`);
+        } else {
+            await base(TABLE_VEHICLES).create([{ fields }]);
+            console.log(`🚗 [Vehicles] Vehículo nuevo registrado: ${matricula} (${clean})`);
+        }
+    } catch (e: any) {
+        console.error('[Vehicles] Error en upsertVehicle:', e.message);
+        throw e; // el caller lo captura
+    }
+}
+
+// Devuelve los vehículos activos del cliente como texto para que Gemini los use.
+// Incluye TODOS los campos de cada vehículo para que el bot pueda reutilizarlos
+// directamente en book_appointment si el cliente elige uno existente.
+async function getClientVehicles(clientPhone: string): Promise<string> {
+    if (!base) return "Error DB";
+    const clean = cleanNumber(clientPhone);
+    try {
+        const records = await base(TABLE_VEHICLES).select({
+            filterByFormula: `AND({ClientPhone}='${clean}', {Active}=TRUE())`
+        }).all();
+        if (records.length === 0) {
+            return "El cliente NO tiene vehículos registrados. Pídele los datos para registrar el vehículo de esta cita.";
+        }
+        let out = `El cliente tiene ${records.length} vehículo(s) registrado(s):\n`;
+        records.forEach((r, i) => {
+            const m = (r.get('Matricula') as string) || '';
+            const ma = (r.get('Marca') as string) || '';
+            const mo = (r.get('Modelo') as string) || '';
+            const ex = (r.get('Extra') as string) || '';
+            const no = (r.get('Notas') as string) || '';
+            out += `[Vehículo ${i + 1}] Campo1=${m} | Campo2=${ma} | Campo3=${mo} | Campo4=${ex} | Campo5=${no}\n`;
+        });
+        out += `\nINSTRUCCIONES: Pregunta al cliente para CUÁL de estos vehículos es la cita, o si es un vehículo nuevo. ` +
+            `SIEMPRE confirma el vehículo elegido antes de reservar (aunque solo tenga uno). ` +
+            `Si elige uno de la lista, usa EXACTAMENTE esos Campo1..Campo5 en book_appointment. ` +
+            `Si es un vehículo nuevo, pídele los datos que falten.`;
+        return out;
+    } catch (e: any) {
+        console.error('[Vehicles] Error en getClientVehicles:', e.message);
+        return "Error técnico al consultar los vehículos del cliente. Continúa pidiendo los datos del vehículo normalmente.";
+    }
 }
 
 async function cancelAppointment(clientPhone: string) {
@@ -2482,7 +2566,19 @@ async function processAIInner(
 5. **${fieldLabels.field5.label}** (opcional) — ${fieldLabels.field5.description}
 
 Cuando llames a book_appointment, PASA esos datos en los parámetros field1, field2, field3, field4, field5 (en ese orden).
-Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 son opcionales — si el cliente no quiere darlos, no insistas.`;
+Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 son opcionales — si el cliente no quiere darlos, no insistas.
+
+## 🚗 VEHÍCULOS DEL CLIENTE (un cliente puede tener VARIOS)
+Un mismo cliente puede tener varios vehículos registrados (varias matrículas/unidades).
+FLUJO OBLIGATORIO al reservar una cita:
+1. Cuando el cliente quiera reservar, ANTES de pedir los datos del vehículo, llama a get_client_vehicles().
+2. Si el cliente YA tiene vehículos registrados:
+   - Muéstraselos de forma clara y pregúntale para CUÁL de ellos es la cita, o si es un vehículo nuevo.
+   - Si elige uno de la lista, usa EXACTAMENTE los datos de ese vehículo (Campo1..Campo5) en book_appointment. NO se los vuelvas a preguntar.
+   - SIEMPRE confirma el vehículo elegido antes de reservar, aunque solo tenga uno registrado ("¿Confirmas que la cita es para tu [vehículo]?").
+   - Si dice que es un vehículo nuevo, pídele los datos que falten.
+3. Si el cliente NO tiene vehículos registrados: pídele los datos del vehículo normalmente (los 5 campos de arriba).
+El vehículo se guarda automáticamente al reservar — no tienes que hacer nada extra para registrarlo.`;
 
             // Instrucciones de derivación a departamentos — dinámicas según config del cliente
             // Laura llamará a assign_department con uno de estos nombres exactos (N dinámico).
@@ -2544,6 +2640,7 @@ REGLAS:
                     functionDeclarations: [
                         { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." } }, required: ["date"] } },
+                        { name: "get_client_vehicles", description: "Get the vehicles already registered for this client. Call this when the client wants to book an appointment, BEFORE asking for the vehicle data — the client may already have one or more vehicles registered. A client can have multiple vehicles.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         {
                             name: "book_appointment",
                             description: `Book an appointment using the slot index number. ONLY call this when you have ALL the required data from the client. The 5 custom fields adapt to the sector configured. After booking, ALWAYS call stop_conversation.`,
@@ -2575,6 +2672,7 @@ REGLAS:
 
                 if (call.name === "get_available_days") toolResult = await getAvailableDays();
                 else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
+                else if (call.name === "get_client_vehicles") toolResult = await getClientVehicles(clean);
                 else if (call.name === "book_appointment") toolResult = await bookAppointment(
                     Number(args.optionIndex),
                     clean,
@@ -5122,6 +5220,29 @@ app.post('/api/contacts/:phone/marketing-opt-in', async (req, res) => {
     const ok = await setContactMarketingOptIn(req.params.phone, !!optedIn, source || 'manual');
     if (!ok) return res.status(400).json({ error: 'No se pudo actualizar el opt-in (¿existe el contacto?)' });
     res.json({ success: true });
+});
+
+// Vehículos de un cliente — para el panel de detalles del chat
+app.get('/api/contacts/:phone/vehicles', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const clean = cleanNumber(req.params.phone);
+    try {
+        const records = await base(TABLE_VEHICLES).select({
+            filterByFormula: `AND({ClientPhone}='${clean}', {Active}=TRUE())`
+        }).all();
+        const vehicles = records.map(r => ({
+            id: r.id,
+            matricula: (r.get('Matricula') as string) || '',
+            marca: (r.get('Marca') as string) || '',
+            modelo: (r.get('Modelo') as string) || '',
+            extra: (r.get('Extra') as string) || '',
+            notas: (r.get('Notas') as string) || ''
+        }));
+        res.json({ vehicles });
+    } catch (e: any) {
+        console.error('[Vehicles] Error endpoint:', e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Resumen estadístico global de campañas (para el dashboard)

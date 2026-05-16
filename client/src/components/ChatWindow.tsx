@@ -4,7 +4,7 @@ import {
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
-    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2
+    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
@@ -91,6 +91,9 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const [crmSignupDate, setCrmSignupDate] = useState('');
     const [optInMarketing, setOptInMarketing] = useState<boolean>(!!(contact as any).optInMarketing);
     const [savingOptIn, setSavingOptIn] = useState(false);
+    // Vehículos registrados del cliente (un cliente puede tener varios)
+    const [vehicles, setVehicles] = useState<{ id: string; matricula: string; marca: string; modelo: string; extra: string; notas: string }[]>([]);
+    const [vehiclesLoading, setVehiclesLoading] = useState(false);
 
     const [contactTags, setContactTags] = useState<string[]>(contact.tags || []);
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
@@ -258,6 +261,17 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     // pisaba). El useEffect de arriba (dep [contact.id]) ya sincroniza todos
     // estos campos al abrir cada chat, que es lo correcto.
     useEffect(() => { if (socket) { socket.emit('request_agents'); const handleAgentsList = (list: Agent[]) => setAgents(list); socket.on('agents_list', handleAgentsList); return () => { socket.off('agents_list', handleAgentsList); }; } }, [socket]);
+
+    // Cargar los vehículos del cliente cuando se abre el panel de detalles
+    useEffect(() => {
+        if (!showDetailsPanel || !contact.phone) return;
+        setVehiclesLoading(true);
+        fetch(`${API_URL}/api/contacts/${contact.phone}/vehicles`)
+            .then(r => r.json())
+            .then(d => setVehicles(Array.isArray(d?.vehicles) ? d.vehicles : []))
+            .catch(() => setVehicles([]))
+            .finally(() => setVehiclesLoading(false));
+    }, [showDetailsPanel, contact.phone]);
     useEffect(() => { const handleHistory = (history: Message[]) => setMessages(history); const handleNewMessage = (msg: any) => { if (msg.sender === contact.phone || msg.sender === 'Agente' || msg.sender === 'Bot IA' || msg.recipient === contact.phone) { setMessages((prev) => [...prev, msg]); } }; if (socket) { socket.on('conversation_history', handleHistory); socket.on('message', handleNewMessage); return () => { socket.off('conversation_history', handleHistory); socket.off('message', handleNewMessage); }; } }, [socket, contact.phone]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => { setInput(e.target.value); const now = Date.now(); if (socket && (now - lastTypingTimeRef.current > 2000)) { socket.emit('typing', { user: user.username, phone: contact.phone }); lastTypingTimeRef.current = now; } };
@@ -812,6 +826,41 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                             <div><label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Email</label><div className={`flex items-center gap-2 p-2 rounded-lg border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><Mail className="w-4 h-4 text-slate-400" /><input className={`bg-transparent w-full text-sm outline-none ${isDark ? 'text-white placeholder-slate-500' : 'text-slate-700 placeholder-slate-400'}`} placeholder="cliente@email.com" value={crmEmail} onChange={(e) => setCrmEmail(e.target.value)} onBlur={() => updateCRM('email', crmEmail)} /></div></div>
                             <div><label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Dirección</label><div className={`flex items-center gap-2 p-2 rounded-lg border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><MapPin className="w-4 h-4 text-slate-400" /><input className={`bg-transparent w-full text-sm outline-none ${isDark ? 'text-white placeholder-slate-500' : 'text-slate-700 placeholder-slate-400'}`} placeholder="Calle Ejemplo 123" value={crmAddress} onChange={(e) => setCrmAddress(e.target.value)} onBlur={() => updateCRM('address', crmAddress)} /></div></div>
                             <div><label className="text-xs font-bold text-slate-400 uppercase mb-1 block">Fecha Alta</label><div className={`flex items-center gap-2 p-2 rounded-lg border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}><Calendar className="w-4 h-4 text-slate-400" /><input type="date" className={`bg-transparent w-full text-sm outline-none cursor-pointer ${isDark ? 'text-white scheme-dark' : 'text-slate-700'}`} value={crmSignupDate} onChange={(e) => setCrmSignupDate(e.target.value)} onBlur={() => updateCRM('signup_date', crmSignupDate)} /></div></div>
+
+                            {/* Vehículos del cliente (puede tener varios) */}
+                            <div>
+                                <label className="text-xs font-bold text-slate-400 uppercase mb-1 flex items-center gap-1.5">
+                                    <Car className="w-3.5 h-3.5" /> Vehículos {vehicles.length > 0 && `(${vehicles.length})`}
+                                </label>
+                                {vehiclesLoading ? (
+                                    <div className={`text-xs italic p-2 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Cargando vehículos...</div>
+                                ) : vehicles.length === 0 ? (
+                                    <div className={`text-xs italic p-2 rounded-lg border ${isDark ? 'bg-slate-700/40 border-slate-600 text-slate-500' : 'bg-slate-50 border-slate-200 text-slate-400'}`}>
+                                        Sin vehículos registrados. Se registran solos al reservar una cita.
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {vehicles.map(v => (
+                                            <div key={v.id} className={`p-2.5 rounded-lg border ${isDark ? 'bg-slate-700/50 border-slate-600' : 'bg-slate-50 border-slate-200'}`}>
+                                                <div className="flex items-center gap-2">
+                                                    <Car className={`w-4 h-4 flex-shrink-0 ${isDark ? 'text-indigo-400' : 'text-indigo-500'}`} />
+                                                    <span className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                        {[v.marca, v.modelo].filter(Boolean).join(' ') || 'Vehículo'}
+                                                    </span>
+                                                </div>
+                                                {v.matricula && (
+                                                    <p className={`text-xs mt-0.5 font-mono ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{v.matricula}</p>
+                                                )}
+                                                {(v.extra || v.notas) && (
+                                                    <p className={`text-[11px] mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                        {[v.extra, v.notas].filter(Boolean).join(' · ')}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
+                            </div>
 
                             {/* Opt-in marketing (RGPD) */}
                             <div className={`rounded-xl p-3 border-2 ${optInMarketing ? (isDark ? 'bg-orange-900/10 border-orange-800/40' : 'bg-orange-50 border-orange-200') : (isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-slate-50 border-slate-200')}`}>
