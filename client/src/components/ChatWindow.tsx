@@ -251,7 +251,12 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const handleNextMatch = () => { if (searchMatches.length === 0) return; setCurrentMatchIdx((prev) => (prev + 1) % searchMatches.length); };
     const handlePrevMatch = () => { if (searchMatches.length === 0) return; setCurrentMatchIdx((prev) => (prev - 1 + searchMatches.length) % searchMatches.length); };
 
-    useEffect(() => { if (contact.name) setName(contact.name); if (contact.department) setDepartment(contact.department); if (contact.status) setStatus(contact.status); if (contact.assigned_to) setAssignedTo(contact.assigned_to); if (contact.signup_date) setCrmSignupDate(contact.signup_date); if (contact.tags) setContactTags(contact.tags); if ((contact as any).optInMarketing !== undefined) setOptInMarketing(!!(contact as any).optInMarketing); }, [contact]);
+    // [ELIMINADO] useEffect que re-sincronizaba name/tags/status/department/etc.
+    // con dependencia [contact] — se disparaba en CADA re-render del contacto y
+    // revertía los cambios que el usuario acababa de hacer (bug de los tags: al
+    // seleccionar uno, el contacto se recargaba sin él todavía y este efecto lo
+    // pisaba). El useEffect de arriba (dep [contact.id]) ya sincroniza todos
+    // estos campos al abrir cada chat, que es lo correcto.
     useEffect(() => { if (socket) { socket.emit('request_agents'); const handleAgentsList = (list: Agent[]) => setAgents(list); socket.on('agents_list', handleAgentsList); return () => { socket.off('agents_list', handleAgentsList); }; } }, [socket]);
     useEffect(() => { const handleHistory = (history: Message[]) => setMessages(history); const handleNewMessage = (msg: any) => { if (msg.sender === contact.phone || msg.sender === 'Agente' || msg.sender === 'Bot IA' || msg.recipient === contact.phone) { setMessages((prev) => [...prev, msg]); } }; if (socket) { socket.on('conversation_history', handleHistory); socket.on('message', handleNewMessage); return () => { socket.off('conversation_history', handleHistory); socket.off('message', handleNewMessage); }; } }, [socket, contact.phone]);
 
