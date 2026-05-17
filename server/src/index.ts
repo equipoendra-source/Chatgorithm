@@ -2296,7 +2296,7 @@ async function upsertVehicle(
 ): Promise<void> {
     if (!base) return;
     const clean = cleanNumber(clientPhone);
-    const matricula = (field1 || '').trim();
+    const matricula = (field1 || '').trim().replace(/\s+/g, '').toUpperCase();
     if (!clean || !matricula) return; // sin teléfono o sin matrícula → no registramos
     try {
         const existing = await base(TABLE_VEHICLES).select({
@@ -5222,6 +5222,30 @@ app.post('/api/contacts/:phone/marketing-opt-in', async (req, res) => {
     res.json({ success: true });
 });
 
+// Marcar/desmarcar en lote varios contactos como "no contactar".
+// Activa el campo opted_out_notifications, que ya excluye al cliente
+// tanto de las campañas como de los recordatorios de citas.
+app.post('/api/contacts/bulk-opt-out', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { ids, optedOut } = req.body;
+    if (!Array.isArray(ids) || ids.length === 0) {
+        return res.status(400).json({ error: 'ids debe ser un array no vacío' });
+    }
+    try {
+        const updates = ids
+            .filter((id: any) => typeof id === 'string' && id)
+            .map((id: string) => ({ id, fields: { opted_out_notifications: !!optedOut } }));
+        // Airtable admite como máximo 10 registros por llamada de update
+        for (let i = 0; i < updates.length; i += 10) {
+            await base('Contacts').update(updates.slice(i, i + 10));
+        }
+        res.json({ success: true, updated: updates.length });
+    } catch (e: any) {
+        console.error('[BulkOptOut] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Vehículos de un cliente — para el panel de detalles del chat
 app.get('/api/contacts/:phone/vehicles', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
@@ -5241,6 +5265,18 @@ app.get('/api/contacts/:phone/vehicles', async (req, res) => {
         res.json({ vehicles });
     } catch (e: any) {
         console.error('[Vehicles] Error endpoint:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Desactivar (borrar suave) un vehículo del cliente desde el panel
+app.delete('/api/contacts/:phone/vehicles/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        await base(TABLE_VEHICLES).update([{ id: req.params.id, fields: { Active: false } }]);
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('[Vehicles] Error al desactivar vehículo:', e.message);
         res.status(500).json({ error: e.message });
     }
 });
