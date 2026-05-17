@@ -3,7 +3,7 @@ import {
     Megaphone, Send, Users, Calendar as CalendarIcon, TrendingUp, Plus, Edit3,
     Trash2, Eye, X, ChevronLeft, ChevronRight, Check, Clock, Target, AlertCircle,
     Loader2, Search, Filter, Mail, DollarSign, BarChart3, CheckCircle2, XCircle,
-    PauseCircle, FileText, Sparkles, ArrowLeft, Repeat, Play, Pause, History
+    PauseCircle, FileText, Sparkles, ArrowLeft, Repeat, Play, Pause, History, Ban
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -125,6 +125,7 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
     const [showWizard, setShowWizard] = useState(false);
     const [editingCampaign, setEditingCampaign] = useState<CampaignDetail | null>(null);
     const [viewingCampaignId, setViewingCampaignId] = useState<string | null>(null);
+    const [showExclusionList, setShowExclusionList] = useState(false);
 
     // ----- Cargar datos -----
     // silent=true → no muestra spinner, solo actualiza en segundo plano
@@ -303,6 +304,15 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
                     )}
                     {!readOnly && (
                     <button
+                        onClick={() => setShowExclusionList(true)}
+                        title="Clientes que no recibirán campañas ni recordatorios"
+                        className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-semibold transition active:scale-[0.98] border ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
+                        <Ban className="w-4 h-4" />
+                        Lista de exclusión
+                    </button>
+                )}
+                    {!readOnly && (
+                    <button
                         onClick={handleNew}
                         className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-orange-500 to-pink-600 hover:shadow-lg hover:shadow-orange-500/30 text-white font-semibold transition active:scale-[0.98]">
                         <Plus className="w-4 h-4" />
@@ -401,6 +411,196 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
                     onSaved={() => { setShowWizard(false); setEditingCampaign(null); loadCampaigns(); }}
                 />
             )}
+
+            {/* Modal: lista de exclusión */}
+            {showExclusionList && (
+                <ExclusionListModal
+                    isDark={isDark}
+                    API_URL={API_URL}
+                    onClose={() => setShowExclusionList(false)}
+                />
+            )}
+        </div>
+    );
+};
+
+// ===========================
+//  MODAL: LISTA DE EXCLUSIÓN
+// ===========================
+// Permite marcar/desmarcar varios clientes como "no contactar". El campo
+// opted_out_notifications los excluye tanto de campañas como de recordatorios.
+const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: () => void }> = ({ isDark, API_URL, onClose }) => {
+    const [contacts, setContacts] = useState<ContactForCampaign[]>([]);
+    const [loading, setLoading] = useState(true);
+    const [saving, setSaving] = useState(false);
+    const [search, setSearch] = useState('');
+    const [onlyExcluded, setOnlyExcluded] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+
+    useEffect(() => {
+        setLoading(true);
+        fetch(`${API_URL}/campaigns-contacts`)
+            .then(r => r.json())
+            .then((list: ContactForCampaign[]) => setContacts(Array.isArray(list) ? list : []))
+            .catch(console.error)
+            .finally(() => setLoading(false));
+    }, []);
+
+    const visible = useMemo(() => contacts.filter(c => {
+        if (onlyExcluded && !c.optedOut) return false;
+        if (search) {
+            const q = search.toLowerCase();
+            if (!(c.name?.toLowerCase().includes(q) || c.phone.includes(q))) return false;
+        }
+        return true;
+    }), [contacts, search, onlyExcluded]);
+
+    const excludedCount = useMemo(() => contacts.filter(c => c.optedOut).length, [contacts]);
+
+    const toggle = (id: string) => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (next.has(id)) next.delete(id); else next.add(id);
+            return next;
+        });
+    };
+
+    const allVisibleSelected = visible.length > 0 && visible.every(c => selectedIds.has(c.id));
+    const toggleAll = () => {
+        setSelectedIds(prev => {
+            const next = new Set(prev);
+            if (allVisibleSelected) visible.forEach(c => next.delete(c.id));
+            else visible.forEach(c => next.add(c.id));
+            return next;
+        });
+    };
+
+    const apply = async (optedOut: boolean) => {
+        const ids = Array.from(selectedIds);
+        if (ids.length === 0) return;
+        if (!optedOut && !confirm(`¿Volver a permitir campañas y recordatorios a ${ids.length} cliente(s)?\n\nAviso: si alguno se dio de baja escribiendo "BAJA", volverá a recibir mensajes.`)) return;
+        setSaving(true);
+        try {
+            const r = await fetch(`${API_URL}/contacts/bulk-opt-out`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ ids, optedOut })
+            });
+            const data = await r.json();
+            if (data.success) {
+                const idSet = new Set(ids);
+                setContacts(prev => prev.map(c => idSet.has(c.id) ? { ...c, optedOut } : c));
+                setSelectedIds(new Set());
+            } else {
+                alert('❌ ' + (data.error || 'Error'));
+            }
+        } catch (e: any) {
+            alert('Error: ' + e.message);
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
+            <div
+                onClick={e => e.stopPropagation()}
+                className={`w-full max-w-2xl max-h-[85vh] flex flex-col rounded-2xl shadow-2xl ${isDark ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}`}>
+                {/* Cabecera */}
+                <div className={`flex items-center justify-between px-6 py-4 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                    <div className="flex items-center gap-3">
+                        <div className="p-2 rounded-xl bg-gradient-to-br from-red-500 to-rose-600 shadow-lg shadow-red-500/20">
+                            <Ban className="w-5 h-5 text-white" />
+                        </div>
+                        <div>
+                            <h2 className="text-lg font-bold">Lista de exclusión</h2>
+                            <p className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                                Los clientes marcados no reciben campañas ni recordatorios — {excludedCount} excluido(s)
+                            </p>
+                        </div>
+                    </div>
+                    <button onClick={onClose} className={`p-2 rounded-lg ${isDark ? 'hover:bg-white/5 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}>
+                        <X className="w-5 h-5" />
+                    </button>
+                </div>
+
+                {/* Buscador + filtro */}
+                <div className={`px-6 py-3 border-b flex flex-wrap items-center gap-3 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                    <div className="relative flex-1 min-w-[180px]">
+                        <Search className={`absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} />
+                        <input
+                            type="text"
+                            placeholder="Buscar por nombre o teléfono..."
+                            value={search}
+                            onChange={e => setSearch(e.target.value)}
+                            className={`w-full pl-10 pr-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 focus:ring-red-500/30' : 'bg-white border-slate-200 text-slate-800 focus:ring-red-500/30'}`}
+                        />
+                    </div>
+                    <button
+                        onClick={() => setOnlyExcluded(v => !v)}
+                        className={`px-3 py-2 rounded-lg text-xs font-semibold transition ${onlyExcluded ? 'bg-gradient-to-r from-red-500 to-rose-600 text-white shadow-md' : isDark ? 'bg-white/5 text-slate-400 hover:bg-white/10' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                        Solo excluidos
+                    </button>
+                </div>
+
+                {/* Lista */}
+                <div className="flex-1 overflow-y-auto px-6 py-2">
+                    {loading ? (
+                        <div className="flex items-center justify-center h-40">
+                            <Loader2 className="w-7 h-7 animate-spin text-red-500" />
+                        </div>
+                    ) : visible.length === 0 ? (
+                        <div className={`text-center py-12 text-sm ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                            No hay clientes que coincidan.
+                        </div>
+                    ) : (
+                        <>
+                            <label className={`flex items-center gap-2 py-2 text-xs font-semibold cursor-pointer ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                <input type="checkbox" checked={allVisibleSelected} onChange={toggleAll} className="w-4 h-4 accent-red-500" />
+                                Seleccionar todos ({visible.length})
+                            </label>
+                            <div className="space-y-1">
+                                {visible.map(c => (
+                                    <label
+                                        key={c.id}
+                                        className={`flex items-center gap-3 p-2.5 rounded-lg border cursor-pointer transition ${selectedIds.has(c.id) ? (isDark ? 'bg-red-500/10 border-red-500/40' : 'bg-red-50 border-red-200') : (isDark ? 'border-white/5 hover:bg-white/5' : 'border-slate-100 hover:bg-slate-50')}`}>
+                                        <input type="checkbox" checked={selectedIds.has(c.id)} onChange={() => toggle(c.id)} className="w-4 h-4 accent-red-500" />
+                                        <div className="flex-1 min-w-0">
+                                            <p className="text-sm font-semibold truncate">{c.name || 'Sin nombre'}</p>
+                                            <p className={`text-xs font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{c.phone}</p>
+                                        </div>
+                                        {c.optedOut && (
+                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-500/20 text-red-500 flex-shrink-0">NO CONTACTAR</span>
+                                        )}
+                                    </label>
+                                ))}
+                            </div>
+                        </>
+                    )}
+                </div>
+
+                {/* Acciones */}
+                <div className={`px-6 py-4 border-t flex flex-wrap items-center justify-between gap-3 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                    <span className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                        {selectedIds.size} seleccionado(s)
+                    </span>
+                    <div className="flex gap-2">
+                        <button
+                            onClick={() => apply(false)}
+                            disabled={saving || selectedIds.size === 0}
+                            className={`px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-40 ${isDark ? 'bg-white/5 text-slate-300 hover:bg-white/10' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
+                            Quitar exclusión
+                        </button>
+                        <button
+                            onClick={() => apply(true)}
+                            disabled={saving || selectedIds.size === 0}
+                            className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-red-500 to-rose-600 hover:shadow-lg hover:shadow-red-500/30 transition disabled:opacity-40 flex items-center gap-2">
+                            {saving && <Loader2 className="w-4 h-4 animate-spin" />}
+                            Marcar como no contactar
+                        </button>
+                    </div>
+                </div>
+            </div>
         </div>
     );
 };

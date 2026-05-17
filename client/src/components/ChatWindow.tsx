@@ -4,7 +4,7 @@ import {
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
-    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car
+    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
@@ -272,6 +272,16 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
             .catch(() => setVehicles([]))
             .finally(() => setVehiclesLoading(false));
     }, [showDetailsPanel, contact.phone]);
+
+    const deleteVehicle = async (vehicleId: string) => {
+        try {
+            await fetch(`${API_URL}/api/contacts/${contact.phone}/vehicles/${vehicleId}`, { method: 'DELETE' });
+            setVehicles(prev => prev.filter(v => v.id !== vehicleId));
+        } catch {
+            // fallo silencioso — el vehículo sigue visible
+        }
+    };
+
     useEffect(() => { const handleHistory = (history: Message[]) => setMessages(history); const handleNewMessage = (msg: any) => { if (msg.sender === contact.phone || msg.sender === 'Agente' || msg.sender === 'Bot IA' || msg.recipient === contact.phone) { setMessages((prev) => [...prev, msg]); } }; if (socket) { socket.on('conversation_history', handleHistory); socket.on('message', handleNewMessage); return () => { socket.off('conversation_history', handleHistory); socket.off('message', handleNewMessage); }; } }, [socket, contact.phone]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => { setInput(e.target.value); const now = Date.now(); if (socket && (now - lastTypingTimeRef.current > 2000)) { socket.emit('typing', { user: user.username, phone: contact.phone }); lastTypingTimeRef.current = now; } };
@@ -844,9 +854,16 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                             <div key={v.id} className={`p-2.5 rounded-lg border ${isDark ? 'bg-slate-700/50 border-slate-600' : 'bg-slate-50 border-slate-200'}`}>
                                                 <div className="flex items-center gap-2">
                                                     <Car className={`w-4 h-4 flex-shrink-0 ${isDark ? 'text-indigo-400' : 'text-indigo-500'}`} />
-                                                    <span className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                    <span className={`text-sm font-bold flex-1 ${isDark ? 'text-white' : 'text-slate-800'}`}>
                                                         {[v.marca, v.modelo].filter(Boolean).join(' ') || 'Vehículo'}
                                                     </span>
+                                                    <button
+                                                        onClick={() => deleteVehicle(v.id)}
+                                                        title="Eliminar vehículo"
+                                                        className={`p-1 rounded hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition-colors`}
+                                                    >
+                                                        <Trash2 className="w-3.5 h-3.5" />
+                                                    </button>
                                                 </div>
                                                 {v.matricula && (
                                                     <p className={`text-xs mt-0.5 font-mono ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{v.matricula}</p>
