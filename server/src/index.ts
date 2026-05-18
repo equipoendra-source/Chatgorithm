@@ -1401,6 +1401,51 @@ async function schedulePostSaleSequence(phone: string, clientName: string, vehic
     console.log(`📋 [PostVenta] Secuencia completa programada para ${clean} desde ${now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' })} (4 hitos)`);
 }
 
+// Aplica los efectos secundarios de un cambio de estado de contacto (secuencia postventa).
+// Se llama desde el socket update_contact_info (chat) y desde el endpoint HTTP del calendario,
+// para que marcar "Vehículo Entregado" funcione igual en ambos sitios.
+async function handleContactStatusChange(contactRec: any, oldStatus: string, newStatus: string | undefined, clean: string): Promise<void> {
+    if (!base) return;
+    // Marcar entrega → programar secuencia postventa anclada a este momento
+    if (newStatus === 'Vehículo Entregado' && oldStatus !== 'Vehículo Entregado') {
+        console.log(`🚗 [PostVenta] Trigger: ${clean} cambió a "Vehículo Entregado"`);
+        const clientName = (contactRec.get('name') as string) || 'cliente';
+        const originId = (contactRec.get('origin_phone_id') as string) || waPhoneId || 'default';
+
+        // Guardar fecha de entrega
+        try {
+            await base('Contacts').update([{ id: contactRec.id, fields: { delivery_date: new Date().toISOString() } }]);
+        } catch (e) { console.error('Error guardando delivery_date:', e); }
+
+        // Buscar datos del vehículo en la última cita
+        let vehicleDesc = 'vehículo';
+        try {
+            const appts = await base('Appointments').select({
+                filterByFormula: `AND({ClientPhone}='${clean}', {Status}='Booked')`,
+                sort: [{ field: 'Date', direction: 'desc' }], maxRecords: 1
+            }).firstPage();
+            if (appts.length > 0) {
+                const marca = appts[0].get('Marca') as string;
+                const modelo = appts[0].get('Modelo') as string;
+                if (marca && modelo) vehicleDesc = `${marca} ${modelo}`;
+                else if (marca) vehicleDesc = marca;
+            }
+        } catch (e) { /* usar default */ }
+
+        schedulePostSaleSequence(clean, clientName, vehicleDesc, originId).catch(e =>
+            console.error('❌ [PostVenta] Error programando secuencia:', e)
+        );
+    }
+    // Deshacer entrega → cancelar la secuencia postventa pendiente (evita recordatorios
+    // antes de la entrega real si se marcó por error).
+    else if (oldStatus === 'Vehículo Entregado' && newStatus && newStatus !== 'Vehículo Entregado') {
+        console.log(`🚗 [PostVenta] ${clean} salió de "Vehículo Entregado" → cancelando postventa pendiente`);
+        cancelPendingPostSale(clean).catch(e =>
+            console.error('❌ [PostVenta] Error cancelando secuencia:', e)
+        );
+    }
+}
+
 // --- Opt-out: cliente escribe BAJA ---
 async function handleNotificationOptOut(phone: string, originPhoneId: string): Promise<void> {
     if (!base) return;
@@ -4284,48 +4329,8 @@ io.on('connection', (socket) => {
             const oldStatus = r[0].get('status') as string;
             await base('Contacts').update([{ id: r[0].id, fields: data.updates }], { typecast: true });
             io.emit('contact_updated_notification');
-
-            // --- Trigger post-venta: al cambiar a "Vehículo Entregado" ---
-            if (data.updates.status === 'Vehículo Entregado' && oldStatus !== 'Vehículo Entregado') {
-                console.log(`🚗 [PostVenta] Trigger: ${clean} cambió a "Vehículo Entregado"`);
-                const clientName = (r[0].get('name') as string) || 'cliente';
-                const originId = (r[0].get('origin_phone_id') as string) || waPhoneId || 'default';
-
-                // Guardar fecha de entrega
-                try {
-                    await base('Contacts').update([{ id: r[0].id, fields: { delivery_date: new Date().toISOString() } }]);
-                } catch (e) { console.error('Error guardando delivery_date:', e); }
-
-                // Buscar datos del vehículo en la última cita
-                let vehicleDesc = 'vehículo';
-                try {
-                    const appts = await base('Appointments').select({
-                        filterByFormula: `AND({ClientPhone}='${clean}', {Status}='Booked')`,
-                        sort: [{ field: 'Date', direction: 'desc' }], maxRecords: 1
-                    }).firstPage();
-                    if (appts.length > 0) {
-                        const marca = appts[0].get('Marca') as string;
-                        const modelo = appts[0].get('Modelo') as string;
-                        if (marca && modelo) vehicleDesc = `${marca} ${modelo}`;
-                        else if (marca) vehicleDesc = marca;
-                    }
-                } catch (e) { /* usar default */ }
-
-                // Programar las 4 notificaciones de post-venta
-                schedulePostSaleSequence(clean, clientName, vehicleDesc, originId).catch(e =>
-                    console.error('❌ [PostVenta] Error programando secuencia:', e)
-                );
-            }
-            // --- Deshacer post-venta: si se QUITA el estado "Vehículo Entregado" ---
-            // Si se marcó la entrega por error y luego se corrige el estado, cancelamos
-            // los recordatorios postventa pendientes para que el cliente NO reciba
-            // mensajes de post-venta antes de la entrega real.
-            else if (oldStatus === 'Vehículo Entregado' && data.updates.status && data.updates.status !== 'Vehículo Entregado') {
-                console.log(`🚗 [PostVenta] ${clean} salió de "Vehículo Entregado" → cancelando postventa pendiente`);
-                cancelPendingPostSale(clean).catch(e =>
-                    console.error('❌ [PostVenta] Error cancelando secuencia:', e)
-                );
-            }
+            // Efectos secundarios del cambio de estado (secuencia postventa)
+            await handleContactStatusChange(r[0], oldStatus, data.updates.status, clean);
         }
     });
 
@@ -6662,6 +6667,52 @@ app.post('/api/contacts/import', async (req: any, res: any) => {
     }
 
     res.json({ success: true, created, updated, skipped, failed, errors });
+});
+
+// GET /api/contacts/:phone — datos básicos del contacto (estado actual + nombre).
+// Lo usa el modal del calendario para mostrar el estado del cliente.
+// IMPORTANTE: definido DESPUÉS de /api/contacts/import-template para que esa ruta
+// específica no quede capturada por el parámetro :phone.
+app.get('/api/contacts/:phone', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB' });
+    const clean = cleanNumber(req.params.phone);
+    if (!clean) return res.status(400).json({ error: 'Teléfono inválido' });
+    try {
+        const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'`, maxRecords: 1 }).firstPage();
+        if (r.length === 0) return res.json({ found: false });
+        res.json({
+            found: true,
+            status: (r[0].get('status') as string) || '',
+            name: (r[0].get('name') as string) || ''
+        });
+    } catch (e: any) {
+        console.error('[Contacts] Error leyendo contacto:', e.message);
+        res.status(500).json({ error: 'Error leyendo contacto' });
+    }
+});
+
+// PUT /api/contacts/:phone/status — cambia el estado del contacto desde el calendario.
+// Dispara la MISMA lógica de postventa que el cambio de estado en el chat.
+app.put('/api/contacts/:phone/status', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB' });
+    const clean = cleanNumber(req.params.phone);
+    const newStatus = (req.body?.status ?? '').toString().trim();
+    if (!clean) return res.status(400).json({ error: 'Teléfono inválido' });
+    if (!newStatus) return res.status(400).json({ error: 'Falta el estado' });
+    try {
+        const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'`, maxRecords: 1 }).firstPage();
+        if (r.length === 0) return res.status(404).json({ error: 'Contacto no encontrado' });
+        const oldStatus = (r[0].get('status') as string) || '';
+        if (oldStatus === newStatus) return res.json({ success: true, status: newStatus, unchanged: true });
+        await base('Contacts').update([{ id: r[0].id, fields: { status: newStatus } }], { typecast: true });
+        io.emit('contact_updated_notification');
+        // Efectos secundarios (secuencia postventa) — misma función que usa el chat
+        await handleContactStatusChange(r[0], oldStatus, newStatus, clean);
+        res.json({ success: true, status: newStatus });
+    } catch (e: any) {
+        console.error('[Contacts] Error actualizando estado:', e.message);
+        res.status(500).json({ error: 'Error actualizando estado' });
+    }
 });
 
 // ==========================================

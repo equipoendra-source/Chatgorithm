@@ -72,9 +72,10 @@ const AGENDA_COLORS = ['#8b5cf6', '#0ea5e9', '#f59e0b', '#ec4899', '#10b981', '#
 
 interface CalendarDashboardProps {
     readOnly?: boolean;
+    config?: { departments: string[]; statuses: string[]; tags: string[] };
 }
 
-const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false }) => {
+const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config }) => {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
 
@@ -102,6 +103,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
     const [editModelo, setEditModelo] = useState('');
     const [editExtra, setEditExtra] = useState('');
     const [editNotas, setEditNotas] = useState('');
+    // Estado del CLIENTE (contacto) — distinto del estado de la cita.
+    // Permite marcar "Vehículo Entregado" y demás estados desde el calendario.
+    const [editContactStatus, setEditContactStatus] = useState('');
+    const [originalContactStatus, setOriginalContactStatus] = useState('');
+    const [loadingContactStatus, setLoadingContactStatus] = useState(false);
 
     // Etiquetas dinámicas según sector configurado en el wizard de Laura
     const [fieldLabels, setFieldLabels] = useState<FieldLabels>(DEFAULT_FIELD_LABELS);
@@ -241,6 +247,22 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
         setEditModelo(appt.modelo || appt.field3 || '');
         setEditExtra(appt.extra || appt.field4 || '');
         setEditNotas(appt.notas || appt.field5 || '');
+        // Cargar el estado del contacto (cliente) asociado a esta cita
+        setEditContactStatus('');
+        setOriginalContactStatus('');
+        if (appt.clientPhone) {
+            setLoadingContactStatus(true);
+            fetch(`${API_URL}/contacts/${encodeURIComponent(appt.clientPhone)}`)
+                .then(r => r.ok ? r.json() : null)
+                .then(d => {
+                    if (d && d.found) {
+                        setEditContactStatus(d.status || '');
+                        setOriginalContactStatus(d.status || '');
+                    }
+                })
+                .catch(() => { /* sin estado */ })
+                .finally(() => setLoadingContactStatus(false));
+        }
     };
 
     const handleUpdateAppt = async () => {
@@ -260,10 +282,27 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                     notas: editNotas
                 })
             });
-            if (res.ok) {
-                await fetchData();
-                setSelectedAppt(null);
-            } else alert("Error guardando");
+            if (!res.ok) { alert("Error guardando"); return; }
+
+            // Si cambió el estado del cliente, guardarlo (dispara la lógica de postventa)
+            if (selectedAppt.clientPhone && editContactStatus && editContactStatus !== originalContactStatus) {
+                try {
+                    const resStatus = await fetch(`${API_URL}/contacts/${encodeURIComponent(selectedAppt.clientPhone)}/status`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ status: editContactStatus })
+                    });
+                    if (!resStatus.ok) {
+                        const err = await resStatus.json().catch(() => ({}));
+                        alert('La cita se guardó, pero el estado del cliente no: ' + (err.error || 'error'));
+                    }
+                } catch (e) {
+                    alert('La cita se guardó, pero falló al actualizar el estado del cliente.');
+                }
+            }
+
+            await fetchData();
+            setSelectedAppt(null);
         } catch (e) { alert("Error de conexión"); }
     };
 
@@ -644,6 +683,29 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                             disabled={readOnly}
                                         />
                                     </div>
+                                    {/* Estado del CLIENTE — permite marcar "Vehículo Entregado" y demás */}
+                                    {selectedAppt.clientPhone && (
+                                        <div>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Estado del Cliente</label>
+                                            <select
+                                                value={editContactStatus}
+                                                onChange={(e) => setEditContactStatus(e.target.value)}
+                                                className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                disabled={readOnly || loadingContactStatus}
+                                            >
+                                                {loadingContactStatus && <option value="">Cargando…</option>}
+                                                {!loadingContactStatus && !editContactStatus && <option value="">— Sin estado —</option>}
+                                                {[...new Set([...(config?.statuses || []), editContactStatus].filter(Boolean))].map(s => (
+                                                    <option key={s} value={s}>{s}</option>
+                                                ))}
+                                            </select>
+                                            {editContactStatus === 'Vehículo Entregado' && originalContactStatus !== 'Vehículo Entregado' && (
+                                                <p className="text-[11px] text-emerald-500 mt-1 font-medium">
+                                                    ✓ Al guardar se programarán los recordatorios de postventa desde hoy.
+                                                </p>
+                                            )}
+                                        </div>
+                                    )}
                                     {/* Campo 1 (full width) */}
                                     <div>
                                         <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>{fieldLabels.field1.label}</label>
