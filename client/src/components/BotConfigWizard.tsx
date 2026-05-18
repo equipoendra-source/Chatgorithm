@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import {
     Bot, ChevronLeft, ChevronRight, Loader2, CheckCircle2, X,
-    Sparkles
+    Sparkles, GripVertical
 } from 'lucide-react';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
@@ -11,92 +11,56 @@ interface Props {
     onSaved: (newPrompt: string) => void;
 }
 
-// Sectores predefinidos con datos típicos por defecto para acelerar al cliente
+interface FieldConfig {
+    label: string;
+    required: boolean;
+}
+
+// Sectores predefinidos — solo para el ícono/nombre y sugerencias de campos
 const SECTORS = [
-    {
-        id: 'taller',
-        icon: '🚗',
-        label: 'Taller / Concesionario',
-        defaultData: ['Nombre del cliente', 'Matrícula', 'Marca del vehículo', 'Modelo del vehículo'],
-        defaultServices: 'Cambio de aceite, ITV, mecánica general, electricidad, neumáticos, revisión preventiva.'
-    },
-    {
-        id: 'clinica_dental',
-        icon: '🦷',
-        label: 'Clínica dental',
-        defaultData: ['Nombre del paciente', 'Teléfono de contacto', 'Motivo de la visita'],
-        defaultServices: 'Limpieza dental, ortodoncia, implantes, blanqueamiento, endodoncia, urgencias.'
-    },
-    {
-        id: 'peluqueria',
-        icon: '💅',
-        label: 'Peluquería / Estética',
-        defaultData: ['Nombre del cliente', 'Servicio deseado'],
-        defaultServices: 'Corte, color, mechas, tratamientos capilares, peinados de evento, manicura, pedicura.'
-    },
-    {
-        id: 'clinica_medica',
-        icon: '🩺',
-        label: 'Clínica médica / Fisioterapia',
-        defaultData: ['Nombre del paciente', 'Especialidad o motivo', 'Mutua/seguro (si aplica)'],
-        defaultServices: 'Fisioterapia, traumatología, medicina general, rehabilitación, masajes terapéuticos.'
-    },
-    {
-        id: 'gestoria',
-        icon: '⚖️',
-        label: 'Gestoría / Asesoría',
-        defaultData: ['Nombre completo', 'Tipo de gestión (autónomo, sociedad, particular)', 'NIF/CIF'],
-        defaultServices: 'Declaración de la renta, alta de autónomos, contabilidad, asesoría laboral, fiscal.'
-    },
-    {
-        id: 'inmobiliaria',
-        icon: '🏠',
-        label: 'Inmobiliaria',
-        defaultData: ['Nombre del cliente', 'Tipo de propiedad', 'Zona de interés', 'Presupuesto orientativo'],
-        defaultServices: 'Venta de pisos, alquileres, tasaciones, gestión integral de la propiedad.'
-    },
-    {
-        id: 'academia',
-        icon: '🎓',
-        label: 'Academia / Formación',
-        defaultData: ['Nombre del alumno', 'Curso de interés', 'Edad o nivel'],
-        defaultServices: 'Clases de inglés, refuerzo escolar, oposiciones, cursos online, formación a empresas.'
-    },
-    {
-        id: 'veterinario',
-        icon: '🐶',
-        label: 'Veterinario',
-        defaultData: ['Nombre del propietario', 'Nombre de la mascota', 'Especie/raza', 'Motivo de la visita'],
-        defaultServices: 'Vacunación, revisiones, cirugía, peluquería canina, hospitalización, urgencias 24h.'
-    },
-    {
-        id: 'otro',
-        icon: '✏️',
-        label: 'Otro / Personalizado',
-        defaultData: ['Nombre del cliente', 'Motivo de contacto'],
-        defaultServices: ''
-    }
+    { id: 'taller',        icon: '🚗', label: 'Taller / Concesionario' },
+    { id: 'clinica_dental',icon: '🦷', label: 'Clínica dental' },
+    { id: 'peluqueria',    icon: '💅', label: 'Peluquería / Estética' },
+    { id: 'clinica_medica',icon: '🩺', label: 'Clínica médica / Fisioterapia' },
+    { id: 'gestoria',      icon: '⚖️', label: 'Gestoría / Asesoría' },
+    { id: 'inmobiliaria',  icon: '🏠', label: 'Inmobiliaria' },
+    { id: 'academia',      icon: '🎓', label: 'Academia / Formación' },
+    { id: 'veterinario',   icon: '🐶', label: 'Veterinario' },
+    { id: 'otro',          icon: '✏️', label: 'Otro / Personalizado' },
 ];
 
-const COMMON_DATA_OPTIONS = [
-    'Nombre del cliente',
-    'Teléfono de contacto',
-    'Email',
-    'DNI/NIF',
-    'Dirección',
-    'Matrícula',
-    'Marca del vehículo',
-    'Modelo del vehículo',
-    'Nombre del paciente',
-    'Nombre de la mascota',
-    'Especie/raza',
-    'Motivo de la visita',
-    'Tipo de servicio',
-    'Mutua/seguro',
-    'Fecha de nacimiento',
-    'Presupuesto orientativo',
-    'Zona de interés',
+// Sugerencias de campos por sector (pre-rellenan el paso 6, el usuario puede editarlos)
+const SECTOR_FIELD_DEFAULTS: Record<string, FieldConfig[]> = {
+    taller:         [{ label: 'Matrícula', required: true }, { label: 'Marca del vehículo', required: true }, { label: 'Modelo del vehículo', required: true }, { label: 'Kilómetros', required: true }, { label: 'Notas', required: false }],
+    clinica_dental: [{ label: 'Nombre del paciente', required: true }, { label: 'Tratamiento', required: true }, { label: 'Mutua / Seguro', required: false }, { label: 'Doctor preferido', required: false }, { label: 'Notas', required: false }],
+    peluqueria:     [{ label: 'Nombre del cliente', required: true }, { label: 'Servicio deseado', required: true }, { label: 'Estilista preferido', required: false }, { label: 'Producto / Color', required: false }, { label: 'Notas', required: false }],
+    clinica_medica: [{ label: 'Nombre del paciente', required: true }, { label: 'Especialidad', required: true }, { label: 'Mutua / Seguro', required: false }, { label: 'Doctor preferido', required: false }, { label: 'Notas', required: false }],
+    gestoria:       [{ label: 'Nombre completo', required: true }, { label: 'Tipo de gestión', required: true }, { label: 'NIF / CIF', required: true }, { label: 'Email', required: false }, { label: 'Notas', required: false }],
+    inmobiliaria:   [{ label: 'Nombre del cliente', required: true }, { label: 'Tipo de propiedad', required: true }, { label: 'Zona de interés', required: true }, { label: 'Presupuesto', required: true }, { label: 'Notas', required: false }],
+    academia:       [{ label: 'Nombre del alumno', required: true }, { label: 'Curso de interés', required: true }, { label: 'Nivel / Edad', required: true }, { label: 'Email de contacto', required: false }, { label: 'Notas', required: false }],
+    veterinario:    [{ label: 'Nombre de la mascota', required: true }, { label: 'Especie / Raza', required: true }, { label: 'Motivo de la visita', required: true }, { label: 'Edad de la mascota', required: true }, { label: 'Notas', required: false }],
+    otro:           [{ label: '', required: true }, { label: '', required: true }, { label: '', required: false }, { label: '', required: false }, { label: '', required: false }],
+};
+
+const EMPTY_FIELDS: FieldConfig[] = [
+    { label: '', required: true },
+    { label: '', required: true },
+    { label: '', required: false },
+    { label: '', required: false },
+    { label: '', required: false },
 ];
+
+const SECTOR_SERVICES: Record<string, string> = {
+    taller:         'Cambio de aceite, ITV, mecánica general, electricidad, neumáticos, revisión preventiva.',
+    clinica_dental: 'Limpieza dental, ortodoncia, implantes, blanqueamiento, endodoncia, urgencias.',
+    peluqueria:     'Corte, color, mechas, tratamientos capilares, peinados de evento, manicura, pedicura.',
+    clinica_medica: 'Fisioterapia, traumatología, medicina general, rehabilitación, masajes terapéuticos.',
+    gestoria:       'Declaración de la renta, alta de autónomos, contabilidad, asesoría laboral, fiscal.',
+    inmobiliaria:   'Venta de pisos, alquileres, tasaciones, gestión integral de la propiedad.',
+    academia:       'Clases de inglés, refuerzo escolar, oposiciones, cursos online, formación a empresas.',
+    veterinario:    'Vacunación, revisiones, cirugía, peluquería canina, hospitalización, urgencias 24h.',
+    otro:           '',
+};
 
 export default function BotConfigWizard({ onClose, onSaved }: Props) {
     const { theme } = useTheme();
@@ -113,13 +77,11 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
     const [services, setServices] = useState('');
     const [hours, setHours] = useState('Lunes a viernes 09:00-14:00 y 16:00-20:00. Sábados 09:00-13:00. Domingos cerrado.');
     const [booksAppointments, setBooksAppointments] = useState(true);
-    const [dataToCollect, setDataToCollect] = useState<string[]>([]);
+    const [customFields, setCustomFields] = useState<FieldConfig[]>(EMPTY_FIELDS);
     const [tone, setTone] = useState<'formal' | 'cercano' | 'divertido'>('formal');
     const [extraInfo, setExtraInfo] = useState('');
 
-    const selectedSector = SECTORS.find(s => s.id === sector);
-
-    // Cargar el estado guardado del wizard (si existe) para que el usuario edite en lugar de empezar de cero
+    // Cargar el estado guardado del wizard para que el usuario edite en lugar de empezar de cero
     useEffect(() => {
         let cancelled = false;
         (async () => {
@@ -129,15 +91,19 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                 const data = await r.json();
                 if (cancelled) return;
                 if (data && data.sector) {
-                    // Hay configuración previa: precargamos los valores
                     setSector(data.sector);
                     setBusinessName(data.businessName || '');
                     setServices(data.services || '');
                     if (data.hours) setHours(data.hours);
                     if (typeof data.booksAppointments === 'boolean') setBooksAppointments(data.booksAppointments);
-                    if (Array.isArray(data.dataToCollect)) setDataToCollect(data.dataToCollect);
                     if (data.tone) setTone(data.tone);
                     if (data.extraInfo) setExtraInfo(data.extraInfo);
+                    // Cargar campos personalizados (nuevo formato) o hacer fallback al sector
+                    if (Array.isArray(data.customFields) && data.customFields.length > 0) {
+                        setCustomFields(data.customFields);
+                    } else if (data.sector && SECTOR_FIELD_DEFAULTS[data.sector]) {
+                        setCustomFields(SECTOR_FIELD_DEFAULTS[data.sector]);
+                    }
                     setHasPreviousConfig(true);
                 }
             } catch { /* fallback: empezar de cero */ }
@@ -146,16 +112,17 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
         return () => { cancelled = true; };
     }, []);
 
-    // Auto-rellenar datos típicos al elegir sector
-    const handleSelectSector = (s: typeof SECTORS[number]) => {
-        setSector(s.id);
-        if (dataToCollect.length === 0) setDataToCollect(s.defaultData);
-        if (!services && s.defaultServices) setServices(s.defaultServices);
+    // Al elegir sector: pre-rellenar campos y servicios como sugerencia (solo si están vacíos)
+    const handleSelectSector = (id: string) => {
+        setSector(id);
+        if (!customFields.some(f => f.label.trim())) {
+            setCustomFields(SECTOR_FIELD_DEFAULTS[id] ?? EMPTY_FIELDS);
+        }
+        if (!services && SECTOR_SERVICES[id]) setServices(SECTOR_SERVICES[id]);
     };
 
-    const toggleDataItem = (item: string) => {
-        if (dataToCollect.includes(item)) setDataToCollect(dataToCollect.filter(d => d !== item));
-        else setDataToCollect([...dataToCollect, item]);
+    const updateField = (i: number, patch: Partial<FieldConfig>) => {
+        setCustomFields(prev => prev.map((f, idx) => idx === i ? { ...f, ...patch } : f));
     };
 
     const canNext = (): boolean => {
@@ -164,7 +131,7 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
         if (step === 3) return services.trim().length > 5;
         if (step === 4) return hours.trim().length > 1;
         if (step === 5) return true;
-        if (step === 6) return true;
+        if (step === 6) return customFields.some(f => f.label.trim().length > 0);
         if (step === 7) return true;
         return false;
     };
@@ -176,8 +143,14 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    sector, businessName: businessName.trim(), services: services.trim(),
-                    hours: hours.trim(), booksAppointments, dataToCollect, tone, extraInfo: extraInfo.trim()
+                    sector,
+                    businessName: businessName.trim(),
+                    services: services.trim(),
+                    hours: hours.trim(),
+                    booksAppointments,
+                    customFields,
+                    tone,
+                    extraInfo: extraInfo.trim()
                 })
             });
             const data = await r.json();
@@ -234,17 +207,18 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                             ℹ️ <strong>Editando configuración anterior.</strong> Tus respuestas previas están precargadas. Cambia solo lo que quieras y guarda al final.
                         </div>
                     )}
+
                     {/* PASO 1: Sector */}
                     {step === 1 && (
                         <div className="space-y-4">
                             <div>
                                 <h3 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>¿Qué tipo de negocio es?</h3>
-                                <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Esto ayuda a Laura a entender cómo atender a tus clientes.</p>
+                                <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Esto ayuda a Laura a entender cómo atender a tus clientes y pre-rellena los campos sugeridos.</p>
                             </div>
                             <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
                                 {SECTORS.map(s => (
                                     <button key={s.id}
-                                        onClick={() => handleSelectSector(s)}
+                                        onClick={() => handleSelectSector(s.id)}
                                         className={`p-4 rounded-xl border-2 text-left transition ${sector === s.id
                                             ? 'border-purple-500 bg-purple-500/10'
                                             : isDark ? 'border-white/10 bg-slate-800/30 hover:border-white/20' : 'border-slate-200 bg-white hover:border-slate-300'}`}>
@@ -282,19 +256,19 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                         <div className="space-y-4">
                             <div>
                                 <h3 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>¿Qué servicios ofreces?</h3>
-                                <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Lista los principales servicios que vendes. Laura los usará para orientar a los clientes.</p>
+                                <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Lista los principales servicios. Laura los usará para orientar a los clientes.</p>
                             </div>
                             <textarea
                                 value={services}
                                 onChange={(e) => setServices(e.target.value)}
                                 rows={5}
-                                placeholder={selectedSector?.defaultServices || 'Ej: Limpieza dental, ortodoncia, implantes...'}
+                                placeholder={SECTOR_SERVICES[sector] || 'Ej: Revisiones, reparaciones, diagnóstico...'}
                                 className={`w-full px-4 py-3 rounded-lg text-sm border-2 focus:outline-none focus:ring-2 resize-none ${isDark ? 'bg-slate-800/50 border-white/10 text-white focus:ring-purple-500/40' : 'bg-white border-slate-200 text-slate-900 focus:ring-purple-500/40'}`}
                             />
-                            {selectedSector?.defaultServices && services !== selectedSector.defaultServices && (
-                                <button onClick={() => setServices(selectedSector.defaultServices)}
+                            {SECTOR_SERVICES[sector] && services !== SECTOR_SERVICES[sector] && (
+                                <button onClick={() => setServices(SECTOR_SERVICES[sector])}
                                     className={`text-xs underline ${isDark ? 'text-purple-400' : 'text-purple-600'}`}>
-                                    Usar plantilla típica para {selectedSector.label}
+                                    Usar plantilla típica del sector
                                 </button>
                             )}
                         </div>
@@ -345,29 +319,59 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                         </div>
                     )}
 
-                    {/* PASO 6: Datos a recopilar */}
+                    {/* PASO 6: Campos personalizados */}
                     {step === 6 && (
                         <div className="space-y-4">
                             <div>
-                                <h3 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>¿Qué datos pides al cliente?</h3>
-                                <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Selecciona los datos que Laura debe pedir antes de cerrar una conversación.</p>
+                                <h3 className={`text-xl font-bold mb-1 ${isDark ? 'text-white' : 'text-slate-900'}`}>¿Qué datos pedirá Laura antes de reservar?</h3>
+                                <p className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                    Configura hasta 5 campos. Puedes dejar en blanco los que no necesites.
+                                    Márcalos como <strong>Obligatorio</strong> si el bot no debe reservar sin ese dato.
+                                </p>
                             </div>
-                            <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
-                                {COMMON_DATA_OPTIONS.map(opt => {
-                                    const sel = dataToCollect.includes(opt);
-                                    return (
-                                        <button key={opt} onClick={() => toggleDataItem(opt)}
-                                            className={`p-2.5 rounded-lg text-xs text-left transition border ${sel
-                                                ? 'bg-purple-500 text-white border-purple-500'
-                                                : isDark ? 'bg-slate-800/30 border-white/10 text-slate-300 hover:border-white/20' : 'bg-white border-slate-200 text-slate-700 hover:border-slate-300'}`}>
-                                            {sel && '✓ '}{opt}
+
+                            {/* Botón para restaurar sugerencias del sector */}
+                            {sector && SECTOR_FIELD_DEFAULTS[sector] && (
+                                <button
+                                    onClick={() => setCustomFields(SECTOR_FIELD_DEFAULTS[sector])}
+                                    className={`text-xs px-3 py-1.5 rounded-lg border transition ${isDark ? 'border-white/10 text-slate-400 hover:border-white/20 hover:text-slate-300' : 'border-slate-200 text-slate-500 hover:border-slate-300 hover:text-slate-700'}`}>
+                                    ↩ Restaurar sugerencias para {SECTORS.find(s => s.id === sector)?.label}
+                                </button>
+                            )}
+
+                            {/* Filas de campos */}
+                            <div className="space-y-2">
+                                {customFields.map((field, i) => (
+                                    <div key={i} className={`flex items-center gap-3 p-3 rounded-xl border transition ${isDark ? 'border-white/10 bg-slate-800/30' : 'border-slate-200 bg-slate-50'}`}>
+                                        {/* Número */}
+                                        <div className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold flex-shrink-0 ${field.label.trim() ? (isDark ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-700') : (isDark ? 'bg-slate-700 text-slate-500' : 'bg-slate-200 text-slate-400')}`}>
+                                            {i + 1}
+                                        </div>
+                                        {/* Input nombre del campo */}
+                                        <input
+                                            type="text"
+                                            value={field.label}
+                                            onChange={(e) => updateField(i, { label: e.target.value })}
+                                            placeholder={`Campo ${i + 1} (ej: ${['Matrícula', 'Nombre del cliente', 'Motivo', 'Teléfono', 'Notas'][i]})`}
+                                            className={`flex-1 px-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 ${isDark ? 'bg-slate-800 border-white/10 text-white placeholder-slate-500 focus:ring-purple-500/30' : 'bg-white border-slate-200 text-slate-900 placeholder-slate-400 focus:ring-purple-500/30'}`}
+                                        />
+                                        {/* Toggle Obligatorio / Opcional */}
+                                        <button
+                                            onClick={() => updateField(i, { required: !field.required })}
+                                            className={`flex-shrink-0 px-3 py-1.5 rounded-lg text-xs font-semibold border transition ${field.required
+                                                ? 'bg-green-500/15 border-green-500/40 text-green-600 dark:text-green-400'
+                                                : isDark ? 'bg-slate-700/50 border-white/10 text-slate-400' : 'bg-white border-slate-200 text-slate-400'}`}>
+                                            {field.required ? '✓ Obligatorio' : 'Opcional'}
                                         </button>
-                                    );
-                                })}
+                                    </div>
+                                ))}
                             </div>
-                            {dataToCollect.length > 0 && (
-                                <div className={`p-3 rounded-lg text-xs ${isDark ? 'bg-purple-500/10 text-purple-300' : 'bg-purple-50 text-purple-800'}`}>
-                                    Laura pedirá: <strong>{dataToCollect.join(', ')}</strong>
+
+                            {/* Resumen */}
+                            {customFields.some(f => f.label.trim()) && (
+                                <div className={`p-3 rounded-xl text-xs space-y-1 ${isDark ? 'bg-slate-800/50 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
+                                    <div><strong className={isDark ? 'text-green-400' : 'text-green-700'}>Obligatorios:</strong> {customFields.filter(f => f.label.trim() && f.required).map(f => f.label).join(', ') || '—'}</div>
+                                    <div><strong className={isDark ? 'text-slate-300' : 'text-slate-600'}>Opcionales:</strong> {customFields.filter(f => f.label.trim() && !f.required).map(f => f.label).join(', ') || '—'}</div>
                                 </div>
                             )}
                         </div>
@@ -384,9 +388,9 @@ export default function BotConfigWizard({ onClose, onSaved }: Props) {
                                 <label className={`block text-xs font-bold uppercase mb-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Tono de Laura</label>
                                 <div className="grid grid-cols-3 gap-2">
                                     {[
-                                        { v: 'formal', label: 'Formal', desc: 'Trato de usted, profesional' },
-                                        { v: 'cercano', label: 'Cercano', desc: 'Tutea, amigable' },
-                                        { v: 'divertido', label: 'Divertido', desc: 'Emojis, desenfadado' }
+                                        { v: 'formal',   label: 'Formal',    desc: 'Trato de usted, profesional' },
+                                        { v: 'cercano',  label: 'Cercano',   desc: 'Tutea, amigable' },
+                                        { v: 'divertido',label: 'Divertido', desc: 'Emojis, desenfadado' }
                                     ].map(t => (
                                         <button key={t.v} onClick={() => setTone(t.v as any)}
                                             className={`p-3 rounded-lg border-2 text-center transition ${tone === t.v

@@ -5912,7 +5912,7 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     const {
         sector, businessName, services, hours, booksAppointments,
-        dataToCollect, tone, extraInfo
+        customFields, tone, extraInfo
     } = req.body || {};
 
     if (!sector || !businessName) {
@@ -5937,9 +5937,9 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
         tone === 'divertido' ? 'Tu tono es divertido y desenfadado, con emojis frecuentes.' :
             'Tu tono es formal y profesional. Trata al cliente de usted.';
 
-    const dataInstr = (dataToCollect && Array.isArray(dataToCollect) && dataToCollect.length > 0)
-        ? `\n\n## 📋 DATOS QUE DEBES PEDIR ANTES DE RESERVAR/CONFIRMAR:\n${dataToCollect.map((d: string, i: number) => `${i + 1}. ${d}`).join('\n')}`
-        : '';
+    // Los campos que el bot pide se inyectan dinámicamente desde field_labels en cada llamada.
+    // No los incluimos aquí para evitar duplicados y asegurar que siempre están actualizados.
+    const dataInstr = '';
 
     const servicesInstr = services && services.trim()
         ? `\n\n## 🛠️ SERVICIOS QUE OFRECEMOS:\n${services.trim()}`
@@ -5954,7 +5954,7 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
         : '';
 
     const bookingFlow = booksAppointments
-        ? `\n\n## 📅 GESTIÓN DE CITAS\n- Si el cliente pide cita: llama get_available_days() para ver días disponibles\n- Tras seleccionar día: llama get_available_appointments(date)\n- Pide los datos necesarios uno a uno\n- Llama book_appointment() cuando tengas todos los datos\n- Tras reservar, llama stop_conversation()`
+        ? `\n\n## 📅 GESTIÓN DE CITAS\n- Si el cliente pide cita: llama get_available_days() para ver días disponibles\n- Tras seleccionar día: llama get_available_appointments(date)\n- Pide todos los datos que falten de golpe en un único mensaje (nunca uno a uno)\n- Llama book_appointment() cuando tengas todos los datos\n- Tras reservar, llama stop_conversation()`
         : `\n\n## ❌ NO GESTIONAS CITAS\nEste negocio NO usa la agenda automática. Si un cliente pide cita, pásalo a humano con assign_department("Admin").`;
 
     const baseRules = `\n\n## 🚨 REGLAS ABSOLUTAS\n- NUNCA muestres IDs internos o códigos técnicos (ej: rec-XXXXX).\n- NUNCA inventes datos. Si no sabes algo, pásalo a humano con assign_department("Admin").\n- SIEMPRE saluda en tu primer mensaje.\n- Si te preguntan algo del negocio, busca primero en la información disponible. Si no aparece, dilo claramente.`;
@@ -5973,8 +5973,28 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
             await base('BotSettings').create([{ fields: { Setting: 'system_prompt', Value: fullPrompt } }]);
         }
 
-        // 2. Guardar también los field_labels según el sector elegido
-        const labels = SECTOR_FIELD_LABELS[sector] || SECTOR_FIELD_LABELS.otro;
+        // 2. Guardar field_labels desde los campos personalizados del wizard.
+        // Si el usuario configuró sus propios campos (customFields), se usan directamente.
+        // Si no, se usa la plantilla del sector como fallback.
+        let labels: SectorFieldLabels;
+        if (Array.isArray(customFields) && customFields.length > 0) {
+            const fKeys = ['field1', 'field2', 'field3', 'field4', 'field5'] as const;
+            const defaultPlaceholders = ['Ej: 1234ABC', 'Ej: Ford', 'Ej: Focus', 'Ej: 80.000 km', ''];
+            labels = fKeys.reduce((acc, k, i) => {
+                const cf = customFields[i] as { label?: string; required?: boolean } | undefined;
+                const lbl = (cf?.label || '').trim() || `Campo ${i + 1}`;
+                acc[k] = {
+                    label: lbl,
+                    placeholder: defaultPlaceholders[i] || lbl,
+                    key: k,
+                    description: lbl,
+                    required: typeof cf?.required === 'boolean' ? cf.required : i < 3
+                };
+                return acc;
+            }, {} as SectorFieldLabels);
+        } else {
+            labels = SECTOR_FIELD_LABELS[sector] || SECTOR_FIELD_LABELS.otro;
+        }
         const labelsJson = JSON.stringify(labels);
         const r2 = await base('BotSettings').select({ filterByFormula: "{Setting} = 'field_labels'", maxRecords: 1 }).firstPage();
         if (r2.length > 0) {
@@ -5997,7 +6017,7 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
         // 3. Guardar el ESTADO COMPLETO del wizard para poder editarlo después sin empezar de cero
         const stateJson = JSON.stringify({
             sector, businessName, services, hours, booksAppointments,
-            dataToCollect: dataToCollect || [], tone, extraInfo: extraInfo || '',
+            customFields: customFields || [], tone, extraInfo: extraInfo || '',
             savedAt: new Date().toISOString()
         });
         const r3 = await base('BotSettings').select({ filterByFormula: "{Setting} = 'wizard_state'", maxRecords: 1 }).firstPage();
