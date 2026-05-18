@@ -1128,6 +1128,7 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 interface Agenda {
     id: string;
     name: string;
+    description: string;   // qué servicios cubre — ayuda al bot a deducir la agenda
     days: number[];
     startTime: string;
     endTime: string;
@@ -1148,6 +1149,7 @@ async function getAgendas(): Promise<Agenda[]> {
                 .map((a: any, i: number) => ({
                     id: String(a.id || `ag${i + 1}`),
                     name: String(a.name),
+                    description: String(a.description || ''),
                     days: a.days,
                     startTime: a.startTime || '09:00',
                     endTime: a.endTime || '18:00',
@@ -1156,7 +1158,7 @@ async function getAgendas(): Promise<Agenda[]> {
         }
         // Formato antiguo: { days, startTime, endTime, duration } → una agenda "General"
         if (parsed && Array.isArray(parsed.days)) {
-            return [{ id: 'general', name: 'General', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: Number(parsed.duration) || 60 }];
+            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: Number(parsed.duration) || 60 }];
         }
         return [];
     } catch (e) {
@@ -2680,13 +2682,14 @@ REGLAS:
             // Con una sola agenda (o ninguna) el bot funciona como siempre, sin preguntar nada.
             let agendasInstr = '';
             if (agendas.length > 1) {
-                const agendaLines = agendas.map(a => `- "${a.name}"`).join('\n');
+                const agendaLines = agendas.map(a => `- "${a.name}"${a.description ? `: ${a.description}` : ''}`).join('\n');
                 agendasInstr = `\n\n## 🗂️ AGENDAS / LÍNEAS DE CITA
-Este negocio tiene VARIAS agendas de citas independientes, cada una con su propio horario:
+Este negocio tiene VARIAS agendas de citas independientes, cada una con su propio horario.
+Cada agenda lleva (tras los dos puntos) una descripción de los servicios que cubre:
 ${agendaLines}
 
 Cuando un cliente quiera reservar una cita:
-1. DEDUCE de la conversación a qué agenda corresponde su petición (por el servicio que menciona).
+1. DEDUCE de la conversación a qué agenda corresponde su petición, usando la descripción de cada agenda para emparejar el servicio que menciona el cliente.
 2. Si NO lo tienes claro, PREGÚNTALE para cuál de las agendas quiere la cita, mencionándoselas por su nombre.
 3. Pasa SIEMPRE el nombre EXACTO de la agenda elegida (tal cual aparece arriba) en el parámetro \`agenda\` de get_available_days y get_available_appointments.
 NUNCA muestres huecos sin haber determinado primero la agenda.`;
@@ -3346,6 +3349,7 @@ app.post('/api/schedule', async (req, res) => {
         .map((a: any, i: number) => ({
             id: String(a.id || `ag${i + 1}`),
             name: String(a.name).trim(),
+            description: String(a.description || '').trim(),
             days: a.days.map((d: any) => Number(d)),
             startTime: a.startTime || '09:00',
             endTime: a.endTime || '18:00',

@@ -46,6 +46,7 @@ const DEFAULT_FIELD_LABELS: FieldLabels = {
 interface Agenda {
     id: string;
     name: string;
+    description: string;   // servicios que cubre — ayuda al bot a deducir la agenda
     days: number[];        // 0=Domingo, 1=Lunes ... 6=Sábado
     startTime: string;
     endTime: string;
@@ -150,13 +151,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
         // Si no hay agendas, arrancamos con una por defecto
         setDraftAgendas(agendas.length > 0
             ? JSON.parse(JSON.stringify(agendas))
-            : [{ id: 'ag1', name: 'General', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60 }]);
+            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60 }]);
         setShowAgendaModal(true);
     };
 
     const addDraftAgenda = () => {
         setDraftAgendas(prev => [...prev, {
-            id: `ag${Date.now()}`, name: '', days: [1, 2, 3, 4, 5],
+            id: `ag${Date.now()}`, name: '', description: '', days: [1, 2, 3, 4, 5],
             startTime: '09:00', endTime: '18:00', duration: 60
         }]);
     };
@@ -737,6 +738,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                             <Trash2 size={16} />
                                         </button>
                                     </div>
+
+                                    {/* Descripción — ayuda al bot a deducir la agenda */}
+                                    <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Servicios que cubre <span className="font-normal lowercase">(ayuda al bot a deducir)</span></label>
+                                    <textarea
+                                        value={ag.description}
+                                        onChange={e => updateDraftAgenda(i, { description: e.target.value })}
+                                        rows={2}
+                                        placeholder="Ej: revisiones, ITV, cambios de aceite, reparaciones, neumáticos, averías..."
+                                        className={`w-full p-2 border rounded-lg text-sm mb-3 outline-none focus:ring-2 focus:ring-purple-500 resize-none ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`}
+                                    />
 
                                     {/* Días */}
                                     <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Días</label>
