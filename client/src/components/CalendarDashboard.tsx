@@ -85,6 +85,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [loading, setLoading] = useState(true);
     const [currentDate, setCurrentDate] = useState(new Date());
     const [slotDuration, setSlotDuration] = useState(60);
+    // Vista activa del calendario: día / semana / mes
+    const [viewMode, setViewMode] = useState<'month' | 'week' | 'day'>('month');
 
     // Agendas (líneas de cita independientes)
     const [agendas, setAgendas] = useState<Agenda[]>([]);
@@ -402,41 +404,152 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         return weekDays[idx];
     };
 
+    // ───────── Vistas rápidas (Día / Semana) ─────────
+    const today = new Date();
+
+    const toIsoDate = (d: Date) =>
+        `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+    const isSameDay = (a: Date, b: Date) =>
+        a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+
+    const fmtTime = (iso: string) => {
+        try { return new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }); }
+        catch { return '--:--'; }
+    };
+
+    // Lunes de la semana que contiene `date`
+    const getWeekStart = (date: Date) => {
+        const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+        const dow = d.getDay() === 0 ? 6 : d.getDay() - 1; // 0 = Lunes
+        d.setDate(d.getDate() - dow);
+        return d;
+    };
+
+    // Citas de una fecha concreta (objeto Date), aplicando el filtro de agenda
+    const getSlotsForDate = (dateObj: Date) =>
+        appointments
+            .filter(a => {
+                const d = new Date(a.date);
+                if (!isSameDay(d, dateObj)) return false;
+                if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
+                return true;
+            })
+            .sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+
+    // Las 7 fechas (Lun..Dom) de la semana que contiene currentDate
+    const weekDates: Date[] = (() => {
+        const ws = getWeekStart(currentDate);
+        return Array.from({ length: 7 }, (_, i) => {
+            const d = new Date(ws);
+            d.setDate(ws.getDate() + i);
+            return d;
+        });
+    })();
+
+    // Navegación contextual: avanza/retrocede según la vista activa
+    const shiftDate = (dir: number) => {
+        setCurrentDate(prev => {
+            const d = new Date(prev);
+            if (viewMode === 'month') d.setMonth(d.getMonth() + dir);
+            else if (viewMode === 'week') d.setDate(d.getDate() + dir * 7);
+            else d.setDate(d.getDate() + dir);
+            return d;
+        });
+    };
+
+    const goToday = () => setCurrentDate(new Date());
+
+    // Abrir la vista de día concreto al pulsar un día en mes/semana
+    const openDayView = (d: Date) => { setCurrentDate(new Date(d)); setViewMode('day'); };
+
+    // Título de la cabecera según la vista activa
+    const headerTitle: string = (() => {
+        if (viewMode === 'day') {
+            return currentDate.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' });
+        }
+        if (viewMode === 'week') {
+            const ws = weekDates[0], we = weekDates[6];
+            return ws.getMonth() === we.getMonth()
+                ? `${ws.getDate()} – ${we.getDate()} ${monthNames[ws.getMonth()]} ${we.getFullYear()}`
+                : `${ws.getDate()} ${monthNames[ws.getMonth()].slice(0, 3)} – ${we.getDate()} ${monthNames[we.getMonth()].slice(0, 3)} ${we.getFullYear()}`;
+        }
+        return `${monthNames[currentDate.getMonth()]} ${currentDate.getFullYear()}`;
+    })();
+
+    // Chip compacto de cita — usado en la vista de Semana
+    const renderChip = (s: Appointment) => (
+        <div
+            key={s.id}
+            onClick={() => handleOpenEdit(s)}
+            className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${s.status === 'Booked'
+                ? (isDark ? 'bg-purple-900/40 border-purple-800 text-purple-200 hover:bg-purple-900/60' : 'bg-purple-50 border-purple-100 text-purple-700 hover:bg-purple-100')
+                : (isDark ? 'bg-green-900/30 border-green-800/60 text-green-300 hover:bg-green-900/50' : 'bg-green-50 border-green-100 text-green-700 hover:bg-green-100')
+                }`}
+        >
+            {agendas.length > 1 && s.agenda && (
+                <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agendaColor(s.agenda) }} title={s.agenda} />
+            )}
+            <span className="font-bold font-mono flex-shrink-0">{fmtTime(s.date)}</span>
+            {s.status === 'Booked'
+                ? <span className="truncate font-medium">{s.clientName || 'Cliente'}</span>
+                : <span className="opacity-60">Libre</span>}
+        </div>
+    );
+
     return (
         <div className={`p-4 md:p-8 h-full overflow-y-auto relative pb-20 md:pb-8 ${isDark ? 'bg-transparent' : 'bg-slate-50'}`}>
             <div className="max-w-6xl mx-auto space-y-6">
 
                 {/* HEADER RESPONSIVE */}
-                <div className={`flex flex-col md:flex-row justify-between items-center p-4 rounded-2xl shadow-sm border gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
-                    <div className="flex items-center gap-4 w-full md:w-auto justify-between md:justify-start">
-                        <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() - 1)))} className={`p-2 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-300' : 'hover:bg-slate-100 text-slate-600'}`}><ChevronLeft /></button>
-                        <h2 className={`text-lg md:text-xl font-bold text-center capitalize ${isDark ? 'text-white' : 'text-slate-800'}`}>{monthNames[currentDate.getMonth()]} {currentDate.getFullYear()}</h2>
-                        <button onClick={() => setCurrentDate(new Date(currentDate.setMonth(currentDate.getMonth() + 1)))} className={`p-2 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-300' : 'hover:bg-slate-100 text-slate-600'}`}><ChevronRight /></button>
+                <div className={`flex flex-col gap-3 p-4 rounded-2xl shadow-sm border ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+                    {/* Fila 1: navegación + acciones */}
+                    <div className="flex flex-col md:flex-row justify-between items-center gap-3">
+                        <div className="flex items-center gap-1.5 w-full md:w-auto justify-between md:justify-start">
+                            <button onClick={() => shiftDate(-1)} className={`p-2 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-300' : 'hover:bg-slate-100 text-slate-600'}`}><ChevronLeft /></button>
+                            <h2 className={`text-base md:text-xl font-bold text-center capitalize md:min-w-[200px] ${isDark ? 'text-white' : 'text-slate-800'}`}>{headerTitle}</h2>
+                            <button onClick={() => shiftDate(1)} className={`p-2 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-300' : 'hover:bg-slate-100 text-slate-600'}`}><ChevronRight /></button>
+                            <button onClick={goToday} className={`ml-1 px-3 py-1.5 rounded-xl text-xs font-bold transition ${isDark ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Hoy</button>
+                        </div>
+
+                        <div className="flex gap-2 w-full md:w-auto justify-end items-center">
+                            {/* Filtro por agenda */}
+                            {agendas.length > 1 && (
+                                <select
+                                    value={agendaFilter}
+                                    onChange={e => setAgendaFilter(e.target.value)}
+                                    className={`p-2 rounded-xl text-sm border outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-slate-100 border-slate-200 text-slate-700'}`}
+                                    title="Filtrar por agenda"
+                                >
+                                    <option value="">Todas las agendas</option>
+                                    {agendas.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
+                                </select>
+                            )}
+                            {/* Configurar agendas */}
+                            {!readOnly && (
+                                <button onClick={openAgendaModal} className={`px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-purple-300 bg-purple-900/30 hover:bg-purple-900/50' : 'text-purple-700 bg-purple-50 hover:bg-purple-100'}`} title="Configurar agendas y horarios">
+                                    <Layers size={18} />
+                                    <span className="hidden md:inline">Agendas</span>
+                                </button>
+                            )}
+                            <button onClick={fetchData} className={`p-2 rounded-xl transition ${isDark ? 'text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600' : 'text-slate-400 hover:text-blue-600 bg-slate-100 hover:bg-blue-50'}`} title="Refrescar">
+                                <RefreshCw size={20} className={loading ? "animate-spin" : ""} />
+                            </button>
+                        </div>
                     </div>
 
-                    <div className="flex gap-2 w-full md:w-auto justify-end items-center">
-                        {/* Filtro por agenda */}
-                        {agendas.length > 1 && (
-                            <select
-                                value={agendaFilter}
-                                onChange={e => setAgendaFilter(e.target.value)}
-                                className={`p-2 rounded-xl text-sm border outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-slate-100 border-slate-200 text-slate-700'}`}
-                                title="Filtrar por agenda"
-                            >
-                                <option value="">Todas las agendas</option>
-                                {agendas.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
-                            </select>
-                        )}
-                        {/* Configurar agendas */}
-                        {!readOnly && (
-                            <button onClick={openAgendaModal} className={`px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-purple-300 bg-purple-900/30 hover:bg-purple-900/50' : 'text-purple-700 bg-purple-50 hover:bg-purple-100'}`} title="Configurar agendas y horarios">
-                                <Layers size={18} />
-                                <span className="hidden md:inline">Agendas</span>
-                            </button>
-                        )}
-                        <button onClick={fetchData} className={`p-2 rounded-xl transition ${isDark ? 'text-slate-400 hover:text-blue-400 bg-slate-700 hover:bg-slate-600' : 'text-slate-400 hover:text-blue-600 bg-slate-100 hover:bg-blue-50'}`} title="Refrescar">
-                            <RefreshCw size={20} className={loading ? "animate-spin" : ""} />
-                        </button>
+                    {/* Fila 2: selector de vista (Día / Semana / Mes) */}
+                    <div className={`flex gap-1 p-1 rounded-xl ${isDark ? 'bg-slate-900/50' : 'bg-slate-100'}`}>
+                        {([['day', 'Día'], ['week', 'Semana'], ['month', 'Mes']] as const).map(([mode, label]) => (
+                            <button
+                                key={mode}
+                                onClick={() => setViewMode(mode)}
+                                className={`flex-1 py-2 rounded-lg text-sm font-bold transition ${viewMode === mode
+                                    ? (isDark ? 'bg-purple-600 text-white shadow' : 'bg-white text-purple-700 shadow-sm')
+                                    : (isDark ? 'text-slate-400 hover:text-slate-200' : 'text-slate-500 hover:text-slate-700')
+                                    }`}
+                            >{label}</button>
+                        ))}
                     </div>
                 </div>
 
@@ -494,8 +607,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     </div>
                 )}
 
-                {/* CALENDARIO ADAPTATIVO */}
+                {/* ═══════════ VISTA MES ═══════════ */}
                 {/* En móvil: Lista vertical (flex-col). En Desktop: Grid (grid-cols-7) */}
+                {viewMode === 'month' && (
                 <div className={`flex flex-col md:grid md:grid-cols-7 bg-transparent rounded-none md:rounded-2xl shadow-none md:shadow-sm border-none md:border md:overflow-hidden gap-3 md:gap-0 ${isDark ? 'md:bg-slate-800 md:border-slate-700' : 'md:bg-white md:border-slate-200'}`}>
 
                     {/* Cabecera Días (Solo Desktop) */}
@@ -525,7 +639,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     {/* Cabecera del Día */}
                                     <div className="flex justify-between items-center md:items-start mb-3 md:mb-2">
                                         <div className="flex items-center gap-2">
-                                            <span className={`text-sm font-bold w-8 h-8 md:w-6 md:h-6 flex items-center justify-center rounded-full ${slots.length > 0 ? (isDark ? 'bg-purple-600 text-white' : 'bg-slate-800 text-white') : (isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-100 text-slate-400')}`}>
+                                            <span
+                                                onClick={(e) => { e.stopPropagation(); openDayView(new Date(currentDate.getFullYear(), currentDate.getMonth(), day)); }}
+                                                title="Ver este día"
+                                                className={`text-sm font-bold w-8 h-8 md:w-6 md:h-6 flex items-center justify-center rounded-full cursor-pointer ${slots.length > 0 ? (isDark ? 'bg-purple-600 text-white' : 'bg-slate-800 text-white') : (isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-100 text-slate-400')}`}>
                                                 {day}
                                             </span>
                                             {/* Nombre del día (Solo visible en Móvil) */}
@@ -621,6 +738,165 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                         })}
                     </div>
                 </div>
+                )}
+
+                {/* ═══════════ VISTA SEMANA ═══════════ */}
+                {viewMode === 'week' && (
+                    <div className="grid grid-cols-1 md:grid-cols-7 gap-3">
+                        {weekDates.map(d => {
+                            const slots = getSlotsForDate(d);
+                            const booked = slots.filter(s => s.status === 'Booked').length;
+                            const isToday = isSameDay(d, today);
+                            const dowIdx = d.getDay() === 0 ? 6 : d.getDay() - 1;
+                            return (
+                                <div key={d.toISOString()} className={`rounded-2xl border p-3 flex flex-col min-h-[120px] ${isToday
+                                    ? (isDark ? 'bg-purple-900/20 border-purple-700' : 'bg-purple-50 border-purple-300')
+                                    : (isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200')
+                                    }`}>
+                                    {/* Cabecera del día (pulsable → vista de día) */}
+                                    <button onClick={() => openDayView(d)} className="flex items-center justify-between mb-2 w-full">
+                                        <div className="flex items-center gap-2">
+                                            <span className={`w-8 h-8 flex items-center justify-center rounded-full text-sm font-bold ${isToday ? 'bg-purple-600 text-white'
+                                                : slots.length > 0 ? (isDark ? 'bg-slate-700 text-white' : 'bg-slate-800 text-white')
+                                                    : (isDark ? 'bg-slate-700/50 text-slate-500' : 'bg-slate-100 text-slate-400')
+                                                }`}>{d.getDate()}</span>
+                                            <span className={`text-sm font-bold capitalize ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{weekDays[dowIdx]}</span>
+                                        </div>
+                                        {slots.length > 0 && (
+                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${booked === slots.length
+                                                ? (isDark ? 'bg-red-900/30 text-red-400' : 'bg-red-100 text-red-600')
+                                                : (isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600')
+                                                }`}>{booked}/{slots.length}</span>
+                                        )}
+                                    </button>
+                                    {/* Citas del día */}
+                                    <div className="space-y-1.5 flex-1">
+                                        {slots.length === 0 && (
+                                            <p className={`text-xs italic ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas</p>
+                                        )}
+                                        {slots.map(renderChip)}
+                                    </div>
+                                    {!readOnly && (
+                                        <button
+                                            onClick={() => handleQuickAddDate(toIsoDate(d))}
+                                            className={`mt-2 w-full py-1.5 rounded-lg border border-dashed text-xs font-semibold flex items-center justify-center gap-1 transition ${isDark
+                                                ? 'border-slate-600 text-slate-400 hover:border-purple-500 hover:text-purple-300'
+                                                : 'border-slate-300 text-slate-400 hover:border-purple-400 hover:text-purple-600'}`}
+                                        >
+                                            <Plus size={12} /> Añadir
+                                        </button>
+                                    )}
+                                </div>
+                            );
+                        })}
+                    </div>
+                )}
+
+                {/* ═══════════ VISTA DÍA ═══════════ */}
+                {viewMode === 'day' && (() => {
+                    const slots = getSlotsForDate(currentDate);
+                    const booked = slots.filter(s => s.status === 'Booked').length;
+                    const free = slots.length - booked;
+                    return (
+                        <div className="space-y-3">
+                            {/* Resumen del día */}
+                            <div className="grid grid-cols-3 gap-3">
+                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+                                    <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{slots.length}</div>
+                                    <div className="text-[11px] font-semibold uppercase text-slate-400">Huecos</div>
+                                </div>
+                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-purple-900/20 border-purple-800' : 'bg-purple-50 border-purple-100'}`}>
+                                    <div className="text-2xl font-bold text-purple-500">{booked}</div>
+                                    <div className="text-[11px] font-semibold uppercase text-purple-400">Reservadas</div>
+                                </div>
+                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-green-900/20 border-green-800' : 'bg-green-50 border-green-100'}`}>
+                                    <div className="text-2xl font-bold text-green-500">{free}</div>
+                                    <div className="text-[11px] font-semibold uppercase text-green-400">Libres</div>
+                                </div>
+                            </div>
+
+                            {/* Estado vacío */}
+                            {slots.length === 0 && (
+                                <div className={`p-10 rounded-2xl border text-center ${isDark ? 'bg-slate-800 border-slate-700 text-slate-500' : 'bg-white border-slate-200 text-slate-400'}`}>
+                                    <CalendarIcon size={36} className="mx-auto mb-2 opacity-40" />
+                                    <p className="text-sm font-medium">No hay huecos este día</p>
+                                </div>
+                            )}
+
+                            {/* Lista de citas del día */}
+                            <div className="space-y-2">
+                                {slots.map(s => {
+                                    const start = new Date(s.date);
+                                    const end = new Date(start.getTime() + slotDuration * 60000);
+                                    const isBooked = s.status === 'Booked';
+                                    return (
+                                        <div
+                                            key={s.id}
+                                            onClick={() => handleOpenEdit(s)}
+                                            className={`flex items-stretch gap-3 p-3 rounded-2xl border cursor-pointer transition ${isBooked
+                                                ? (isDark ? 'bg-purple-900/25 border-purple-800 hover:bg-purple-900/40' : 'bg-purple-50 border-purple-100 hover:bg-purple-100')
+                                                : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
+                                                }`}
+                                        >
+                                            {/* Bloque horario */}
+                                            <div className="flex flex-col items-center justify-center min-w-[64px]">
+                                                <span className={`text-lg font-bold font-mono leading-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                    {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                </span>
+                                                <span className="text-[11px] font-mono text-slate-400">
+                                                    {end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                                                </span>
+                                            </div>
+                                            {/* Barra de color de la agenda */}
+                                            <div className="w-1.5 rounded-full self-stretch flex-shrink-0" style={{ backgroundColor: isBooked ? agendaColor(s.agenda) : (isDark ? '#334155' : '#e2e8f0') }} />
+                                            {/* Contenido */}
+                                            <div className="flex-1 min-w-0 flex flex-col justify-center">
+                                                {isBooked ? (
+                                                    <>
+                                                        <span className={`font-bold text-sm truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                            {s.clientName || 'Cliente'}
+                                                        </span>
+                                                        <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5 flex-wrap">
+                                                            {s.clientPhone && <span className="flex items-center gap-1"><Phone size={11} />{s.clientPhone}</span>}
+                                                            {agendas.length > 1 && s.agenda && (
+                                                                <span className="flex items-center gap-1">
+                                                                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: agendaColor(s.agenda) }} />
+                                                                    {s.agenda}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </>
+                                                ) : (
+                                                    <span className={`text-sm font-semibold ${isDark ? 'text-green-400' : 'text-green-600'}`}>
+                                                        Hueco libre{agendas.length > 1 && s.agenda ? ` · ${s.agenda}` : ''}
+                                                    </span>
+                                                )}
+                                            </div>
+                                            {/* Etiqueta de estado */}
+                                            <div className="flex items-center flex-shrink-0">
+                                                {isBooked
+                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-purple-800/50 text-purple-200' : 'bg-purple-100 text-purple-700'}`}><User size={11} />Reservada</span>
+                                                    : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-green-800/40 text-green-300' : 'bg-green-100 text-green-700'}`}>Libre</span>}
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+
+                            {/* Añadir hueco al día */}
+                            {!readOnly && (
+                                <button
+                                    onClick={() => handleQuickAddDate(toIsoDate(currentDate))}
+                                    className={`w-full py-3 rounded-2xl border-2 border-dashed font-semibold text-sm flex items-center justify-center gap-2 transition ${isDark
+                                        ? 'border-slate-600 text-slate-400 hover:border-purple-500 hover:text-purple-300'
+                                        : 'border-slate-300 text-slate-500 hover:border-purple-400 hover:text-purple-600'}`}
+                                >
+                                    <Plus size={16} /> Añadir hueco a este día
+                                </button>
+                            )}
+                        </div>
+                    );
+                })()}
 
             </div>
 
