@@ -1341,8 +1341,41 @@ async function scheduleNotification(params: {
 }
 
 // --- Programar secuencia post-venta completa ---
+// Cancela TODOS los recordatorios postventa pendientes de un cliente.
+// Se usa para (a) re-anclar la secuencia al volver a marcar la entrega y
+// (b) deshacer la secuencia si se quita el estado "Vehículo Entregado" por error.
+async function cancelPendingPostSale(phone: string): Promise<number> {
+    if (!base) return 0;
+    const clean = cleanNumber(phone);
+    try {
+        const stale = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            // FIND('postventa', {type})>0 → solo recordatorios postventa_* (no toca recordatorios de cita)
+            filterByFormula: `AND({phone}='${clean}', {status}='pending', FIND('postventa', {type})>0)`
+        }).all();
+        for (let i = 0; i < stale.length; i += 10) {
+            await base(TABLE_SCHEDULED_NOTIFICATIONS).update(
+                stale.slice(i, i + 10).map(r => ({ id: r.id, fields: { status: 'cancelled' as const } }))
+            );
+            await delay(200);
+        }
+        if (stale.length > 0) console.log(`📋 [PostVenta] ${stale.length} recordatorio(s) postventa pendiente(s) cancelado(s) para ${clean}`);
+        return stale.length;
+    } catch (e) {
+        console.error('[PostVenta] Error cancelando postventa pendiente:', e);
+        return 0;
+    }
+}
+
 async function schedulePostSaleSequence(phone: string, clientName: string, vehicleDesc: string, originPhoneId: string): Promise<void> {
     const now = new Date();
+    const clean = cleanNumber(phone);
+
+    // RE-ANCLAJE: antes de programar, cancelamos cualquier secuencia postventa previa
+    // pendiente de este cliente. Así, si se marca "Vehículo Entregado" antes de tiempo
+    // y luego se vuelve a marcar al entregar de verdad, el contador siempre arranca
+    // desde la ÚLTIMA entrega — y nunca se envían recordatorios duplicados.
+    await cancelPendingPostSale(clean);
+
     const milestones = [
         { type: 'postventa_7d',  days: 7,   template: 'postventa_dia7_v2' },
         { type: 'postventa_30d', days: 30,  template: 'postventa_dia30_v2' },
@@ -1357,7 +1390,7 @@ async function schedulePostSaleSequence(phone: string, clientName: string, vehic
 
         await scheduleNotification({
             type: m.type,
-            phone: cleanNumber(phone),
+            phone: clean,
             templateName: m.template,
             variables: JSON.stringify([clientName, vehicleDesc]),
             scheduledFor: sendDate.toISOString(),
@@ -1365,7 +1398,7 @@ async function schedulePostSaleSequence(phone: string, clientName: string, vehic
         });
         await delay(200);
     }
-    console.log(`📋 [PostVenta] Secuencia completa programada para ${phone} (4 hitos)`);
+    console.log(`📋 [PostVenta] Secuencia completa programada para ${clean} desde ${now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' })} (4 hitos)`);
 }
 
 // --- Opt-out: cliente escribe BAJA ---
@@ -4281,6 +4314,16 @@ io.on('connection', (socket) => {
                 // Programar las 4 notificaciones de post-venta
                 schedulePostSaleSequence(clean, clientName, vehicleDesc, originId).catch(e =>
                     console.error('❌ [PostVenta] Error programando secuencia:', e)
+                );
+            }
+            // --- Deshacer post-venta: si se QUITA el estado "Vehículo Entregado" ---
+            // Si se marcó la entrega por error y luego se corrige el estado, cancelamos
+            // los recordatorios postventa pendientes para que el cliente NO reciba
+            // mensajes de post-venta antes de la entrega real.
+            else if (oldStatus === 'Vehículo Entregado' && data.updates.status && data.updates.status !== 'Vehículo Entregado') {
+                console.log(`🚗 [PostVenta] ${clean} salió de "Vehículo Entregado" → cancelando postventa pendiente`);
+                cancelPendingPostSale(clean).catch(e =>
+                    console.error('❌ [PostVenta] Error cancelando secuencia:', e)
                 );
             }
         }
