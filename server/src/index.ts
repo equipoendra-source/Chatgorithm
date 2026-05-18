@@ -2211,7 +2211,7 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
                             interactive: {
                                 type: "list",
                                 header: { type: "text", text: agenda ? `📅 Citas · ${agenda}`.slice(0, 60) : "📅 Citas Disponibles" },
-                                body: { text: `Horarios${agenda ? ` de ${agenda}` : ''} para ${dateFilter || 'próximamente'}:` },
+                                body: { text: `Horarios${serviceLabel ? ` para ${serviceLabel}` : agenda ? ` de ${agenda}` : ''} para ${dateFilter || 'próximamente'}:` },
                                 footer: { text: "Reserva inmediata" },
                                 action: { button: "Ver Horarios", sections: [{ title: "Huecos", rows }] }
                             }
@@ -2333,43 +2333,56 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
     // a la vez, el 2º espera al 1º y verá Status=Booked, devolviendo "ya ocupada".
     return withAppointmentLock(realId, async () => {
         try {
-            console.log(`📅 [Book] Buscando registro ${realId}...`);
-            const record = await base!.table('Appointments').find(realId);
+            console.log(`📅 [Book] Cargando ${slotIds.length} slot(s) del bloque...`);
+            // Cargar TODOS los slots del bloque de una vez (1 para citas cortas, N para largas)
+            const idFormula = `OR(${slotIds.map(id => `RECORD_ID()='${id}'`).join(',')})`;
+            const fetched = await base!.table('Appointments').select({ filterByFormula: idFormula }).all();
+            // Reordenar según slotIds (orden cronológico definido al mostrar los huecos)
+            const slotRecords = slotIds.map(id => fetched.find(r => r.id === id));
 
-            if (!record) {
-                console.error(`❌ [Book] Registro ${realId} no encontrado`);
+            const leadRecord = slotRecords[0];
+            if (!leadRecord) {
+                console.error(`❌ [Book] Slot líder ${realId} no encontrado`);
                 return "❌ Vaya, esa hora ya no existe.";
             }
 
-            const currentStatus = record.get('Status');
-            console.log(`📅 [Book] Status actual: ${currentStatus}`);
-
-            if (currentStatus !== 'Available') {
-                console.warn(`⚠️ [Book] Race detectada: ${realId} ya estaba en estado "${currentStatus}" cuando llegamos al lock.`);
-                metrics.appointmentRaceLosses++;
-                notifyTeam('appointment_race', 'warning', `Race detectada en cita ${realId}: cliente ${cleanedPhone} llegó tarde, cita ya estaba "${currentStatus}".`, { realId, phone: cleanedPhone, currentStatus });
-                return "❌ Vaya, esa hora acaba de ocuparse. ¿Quieres ver otra?";
+            // CRÍTICO: verificar que TODOS los slots del bloque siguen Disponibles.
+            // Si alguno fue reservado por otro cliente (o borrado), abortamos SIN escribir nada
+            // — así nunca pisamos la cita de otro cliente.
+            for (let k = 0; k < slotRecords.length; k++) {
+                const sr = slotRecords[k];
+                const st = sr ? sr.get('Status') : 'borrado';
+                if (!sr || st !== 'Available') {
+                    console.warn(`⚠️ [Book] Conflicto: slot ${slotIds[k]} en estado "${st}".`);
+                    metrics.appointmentRaceLosses++;
+                    notifyTeam('appointment_race', 'warning', `Conflicto reservando bloque para ${cleanedPhone}: slot ${slotIds[k]} estaba "${st}".`, { slotId: slotIds[k], phone: cleanedPhone, state: st });
+                    return "❌ Vaya, ese horario acaba de ocuparse. ¿Quieres ver otro?";
+                }
             }
 
-            const dateVal = new Date(record.get('Date') as string);
+            const dateVal = new Date(leadRecord.get('Date') as string);
             const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
-            console.log(`📅 [Book] Actualizando cita a Booked...`);
-
-            // Calcular duración total de la cita (en minutos) para guardar en DurationMin
-            // Si hay varios slots, la duración total es slotIds.length × granularidad de la agenda.
-            // Esto permite a cancelAppointment liberar TODOS los slots del bloque.
-            const allAgendas = await getAgendas();
-            const slotAgendaName = (record.get('Agenda') as string) || '';
-            const matchedAg = slotAgendaName ? allAgendas.find(a => a.name === slotAgendaName) : allAgendas[0];
-            const granularity = matchedAg?.duration || 60;
-            // Prioridad: (a) servicio seleccionado, (b) slotIds.length × granularity, (c) granularity
-            let durationMin = slotIds.length > 1 ? slotIds.length * granularity : granularity;
-            if (service && matchedAg) {
-                const svc = matchedAg.services.find(s => s.name === service);
-                if (svc) durationMin = svc.durationMin;
+            // Duración total = nº de slots × granularidad REAL del bloque.
+            // La granularidad se mide del hueco entre los dos primeros slots (fiable aunque
+            // la agenda se haya renombrado/borrado). Con 1 solo slot se usa la duración de la agenda.
+            // IMPORTANTE: se deriva SIEMPRE de los slots reales — nunca del servicio — para que
+            // DurationMin sea coherente con lo reservado y cancelAppointment libere el rango exacto.
+            let granularity: number;
+            if (slotRecords.length > 1) {
+                const t0 = dateVal.getTime();
+                const t1 = new Date(slotRecords[1]!.get('Date') as string).getTime();
+                granularity = Math.max(1, Math.round((t1 - t0) / 60000));
+            } else {
+                const allAgendas = await getAgendas();
+                const agName = (leadRecord.get('Agenda') as string) || '';
+                const ag = agName ? allAgendas.find(a => a.name === agName) : allAgendas[0];
+                granularity = ag?.duration || 60;
             }
+            const durationMin = slotIds.length * granularity;
+            console.log(`📅 [Book] Bloque: ${slotIds.length} slot(s) × ${granularity}min = ${durationMin}min total${service ? ` (servicio: ${service})` : ''}`);
 
+            console.log(`📅 [Book] Actualizando cita a Booked...`);
             // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
             // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra, Notas) por compatibilidad,
             // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels
@@ -2389,7 +2402,7 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             }]);
 
             // Si la cita ocupa múltiples slots, marcar los secundarios como Booked también.
-            // No guardan datos del cliente — solo Status=Booked para bloquear el hueco.
+            // No guardan datos del cliente — solo Status=Booked + ClientPhone para bloquear el hueco.
             if (slotIds.length > 1) {
                 const secondaryIds = slotIds.slice(1);
                 for (let i = 0; i < secondaryIds.length; i += 10) {
@@ -2550,8 +2563,9 @@ async function cancelAppointment(clientPhone: string) {
         const leadDate = new Date(record.get('Date') as string);
         const humanDate = leadDate.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
-        // Leer DurationMin para saber cuántos slots ocupa el bloque
+        // Leer DurationMin para saber cuántos slots ocupa el bloque, y la agenda del líder
         const durationMin = Number(record.get('DurationMin') || 0);
+        const leadAgenda = (record.get('Agenda') as string) || '';
 
         // Resetear slot líder
         await base('Appointments').update([{
@@ -2559,12 +2573,13 @@ async function cancelAppointment(clientPhone: string) {
             fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "", "Notas": "", "DurationMin": 0 }
         }]);
 
-        // Si la cita ocupa múltiples slots, liberar también los secundarios
-        // (están en el rango [leadDate, leadDate + durationMin) con Status=Booked y mismo ClientPhone)
+        // Si la cita ocupa múltiples slots, liberar también los secundarios.
+        // Filtramos por: mismo cliente, MISMA agenda (clave: evita liberar citas del cliente
+        // en OTRAS agendas que solapen en horario) y rango [leadDate, leadDate + durationMin).
         if (durationMin > 0) {
             const endDate = new Date(leadDate.getTime() + durationMin * 60000).toISOString();
             const secondaries = await base('Appointments').select({
-                filterByFormula: `AND({Status}='Booked', {ClientPhone}='${clean}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`,
+                filterByFormula: `AND({Status}='Booked', {ClientPhone}='${clean}', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`,
                 fields: []
             }).all();
             if (secondaries.length > 0) {
