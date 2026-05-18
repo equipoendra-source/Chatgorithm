@@ -1122,56 +1122,109 @@ function setMadridTime(baseDate: Date, hour: number, minute: number): Date {
 
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- AGENDAS / LÍNEAS DE CITA ---
+// Una "agenda" es una línea de citas independiente (ej: Taller, Ventas, Odontología)
+// con su propio horario y duración. Se guardan todas en BotSettings → schedule_config.
+interface Agenda {
+    id: string;
+    name: string;
+    days: number[];
+    startTime: string;
+    endTime: string;
+    duration: number;
+}
+
+// Lee las agendas configuradas. Soporta el formato antiguo (un único horario sin
+// nombre) convirtiéndolo a una sola agenda "General" para no romper instalaciones previas.
+async function getAgendas(): Promise<Agenda[]> {
+    if (!base) return [];
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'schedule_config'", maxRecords: 1 }).firstPage();
+        if (r.length === 0) return [];
+        const parsed = JSON.parse(r[0].get('Value') as string);
+        if (parsed && Array.isArray(parsed.agendas)) {
+            return parsed.agendas
+                .filter((a: any) => a && a.name && Array.isArray(a.days))
+                .map((a: any, i: number) => ({
+                    id: String(a.id || `ag${i + 1}`),
+                    name: String(a.name),
+                    days: a.days,
+                    startTime: a.startTime || '09:00',
+                    endTime: a.endTime || '18:00',
+                    duration: Number(a.duration) || 60
+                }));
+        }
+        // Formato antiguo: { days, startTime, endTime, duration } → una agenda "General"
+        if (parsed && Array.isArray(parsed.days)) {
+            return [{ id: 'general', name: 'General', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: Number(parsed.duration) || 60 }];
+        }
+        return [];
+    } catch (e) {
+        console.error('[Agendas] Error leyendo schedule_config:', e);
+        return [];
+    }
+}
+
 // --- MANTENIMIENTO AUTOMÁTICO AGENDA ---
 async function runScheduleMaintenance() {
     if (!base) return;
     try {
-        const configRecord = await base('BotSettings').select({ filterByFormula: "{Setting} = 'schedule_config'", maxRecords: 1 }).firstPage();
-        if (configRecord.length === 0) return;
-
-        const config = JSON.parse(configRecord[0].get('Value') as string);
-        const { days, startTime, endTime, duration } = config;
+        const agendas = await getAgendas();
+        if (agendas.length === 0) return;
 
         const now = new Date();
         const nowISO = now.toISOString();
-        const pastSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} < '${nowISO}')`, fields: [] }).all();
 
+        // 1. Borrar huecos DISPONIBLES ya pasados
+        const pastSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} < '${nowISO}')`, fields: [] }).all();
         for (let i = 0; i < pastSlots.length; i += 10) {
-            const batch = pastSlots.slice(i, i + 10).map(r => r.id);
-            await base('Appointments').destroy(batch);
+            await base('Appointments').destroy(pastSlots.slice(i, i + 10).map(r => r.id));
             await delay(200);
         }
 
+        // 2. Leer huecos futuros disponibles (para no duplicar)
         const endDate = new Date();
         endDate.setDate(now.getDate() + 90);
-        const futureSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} > '${nowISO}')`, fields: ['Date'] }).all();
-        const existingDates = new Set(futureSlots.map(r => new Date(r.get('Date') as string).toISOString()));
-        const newSlotsToCreate = [];
+        const futureSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} > '${nowISO}')`, fields: ['Date', 'Agenda'] }).all();
+        // Clave de deduplicación: agenda + fecha ISO
+        const existing = new Set(futureSlots.map(r => `${(r.get('Agenda') as string) || ''}|${new Date(r.get('Date') as string).toISOString()}`));
 
-        for (let d = new Date(now); d <= endDate; d.setDate(d.getDate() + 1)) {
-            if (days.includes(d.getDay())) {
-                const [startH, startM] = startTime.split(':').map(Number);
-                const [endH, endM] = endTime.split(':').map(Number);
+        // 3. Limpiar huecos disponibles de agendas que ya no existen
+        const agendaNames = new Set(agendas.map(a => a.name));
+        const orphans = futureSlots
+            .filter(r => { const ag = (r.get('Agenda') as string) || ''; return ag && !agendaNames.has(ag); })
+            .map(r => r.id);
+        for (let i = 0; i < orphans.length; i += 10) {
+            await base('Appointments').destroy(orphans.slice(i, i + 10));
+            await delay(200);
+        }
+
+        // 4. Generar huecos nuevos para cada agenda
+        const newSlotsToCreate: any[] = [];
+        for (const ag of agendas) {
+            for (let d = new Date(now); d <= endDate; d.setDate(d.getDate() + 1)) {
+                if (!ag.days.includes(d.getDay())) continue;
+                const [startH, startM] = ag.startTime.split(':').map(Number);
+                const [endH, endM] = ag.endTime.split(':').map(Number);
                 let start = setMadridTime(d, startH, startM);
                 const end = setMadridTime(d, endH, endM);
-
-                while (start.getTime() + duration * 60000 <= end.getTime()) {
+                while (start.getTime() + ag.duration * 60000 <= end.getTime()) {
                     if (start > now) {
                         const iso = start.toISOString();
-                        if (!existingDates.has(iso)) {
-                            newSlotsToCreate.push({ fields: { "Date": iso, "Status": "Available" } });
+                        if (!existing.has(`${ag.name}|${iso}`)) {
+                            newSlotsToCreate.push({ fields: { "Date": iso, "Status": "Available", "Agenda": ag.name } });
                         }
                     }
-                    start = new Date(start.getTime() + duration * 60000);
+                    start = new Date(start.getTime() + ag.duration * 60000);
                 }
             }
         }
 
         for (let i = 0; i < newSlotsToCreate.length; i += 10) {
-            const batch = newSlotsToCreate.slice(i, i + 10);
-            await base('Appointments').create(batch);
+            await base('Appointments').create(newSlotsToCreate.slice(i, i + 10));
             await delay(200);
         }
+        console.log(`📅 [Agendas] Mantenimiento OK. ${agendas.length} agenda(s), ${newSlotsToCreate.length} huecos nuevos.`);
     } catch (e) { console.error("Error mantenimiento agenda:", e); }
 }
 
@@ -2022,11 +2075,12 @@ async function sendWhatsAppText(to: string, body: string, originPhoneId: string)
 // ==========================================
 //  HELPERS IA
 // ==========================================
-async function getAvailableAppointments(userPhone: string, originPhoneId: string, dateFilter?: string) {
+async function getAvailableAppointments(userPhone: string, originPhoneId: string, dateFilter?: string, agendaName?: string) {
     if (!base) return "Error DB";
 
     // CRÍTICO: Usar siempre el número limpio para el cache
     const cleanPhone = cleanNumber(userPhone);
+    const agenda = (agendaName || '').trim();
 
     try {
         if (cleanPhone) appointmentOptionsCache.delete(cleanPhone);
@@ -2036,13 +2090,16 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         const records = await base('Appointments').select({
             filterByFormula: `AND({Status} = 'Available', {Date} >= '${todayStr}')`,
             sort: [{ field: "Date", direction: "asc" }],
-            maxRecords: 100
+            maxRecords: 500
         }).all();
 
         const now = new Date();
         const validRecords = records.filter(r => {
             const d = new Date(r.get('Date') as string);
             if (d <= now) return false;
+
+            // Filtrar por agenda si se especificó una
+            if (agenda && ((r.get('Agenda') as string) || '') !== agenda) return false;
 
             if (dateFilter) {
                 const slotDateStr = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
@@ -2051,7 +2108,7 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
             return true;
         }).slice(0, 10);
 
-        if (validRecords.length === 0) return `No hay citas disponibles para esa fecha (${dateFilter || 'próximamente'}).`;
+        if (validRecords.length === 0) return `No hay citas disponibles${agenda ? ` en la agenda "${agenda}"` : ''} para esa fecha (${dateFilter || 'próximamente'}).`;
 
         const optionsMap: Record<number, string> = {};
         const rows: any[] = [];
@@ -2088,8 +2145,8 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
                             type: "interactive",
                             interactive: {
                                 type: "list",
-                                header: { type: "text", text: "📅 Citas Disponibles" },
-                                body: { text: `Horarios para ${dateFilter || 'próximamente'}:` },
+                                header: { type: "text", text: agenda ? `📅 Citas · ${agenda}`.slice(0, 60) : "📅 Citas Disponibles" },
+                                body: { text: `Horarios${agenda ? ` de ${agenda}` : ''} para ${dateFilter || 'próximamente'}:` },
                                 footer: { text: "Reserva inmediata" },
                                 action: { button: "Ver Horarios", sections: [{ title: "Huecos", rows }] }
                             }
@@ -2115,14 +2172,15 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
 }
 
 // Obtener días con citas disponibles (para flujo de 2 pasos)
-async function getAvailableDays() {
+async function getAvailableDays(agendaName?: string) {
     if (!base) return "Error DB";
+    const agenda = (agendaName || '').trim();
     try {
         const todayStr = new Date().toISOString().split('T')[0];
         const records = await base('Appointments').select({
             filterByFormula: `AND({Status} = 'Available', {Date} >= '${todayStr}')`,
             sort: [{ field: "Date", direction: "asc" }],
-            maxRecords: 100
+            maxRecords: 500
         }).all();
 
         const now = new Date();
@@ -2131,6 +2189,8 @@ async function getAvailableDays() {
         records.forEach(r => {
             const d = new Date(r.get('Date') as string);
             if (d <= now) return; // Ignorar citas pasadas
+            // Filtrar por agenda si se especificó una
+            if (agenda && ((r.get('Agenda') as string) || '') !== agenda) return;
 
             // Formato YYYY-MM-DD para identificar días únicos
             const dateKey = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
@@ -2147,7 +2207,7 @@ async function getAvailableDays() {
         });
 
         if (uniqueDays.size === 0) {
-            return "No hay días con citas disponibles en este momento.";
+            return `No hay días con citas disponibles${agenda ? ` en la agenda "${agenda}"` : ''} en este momento.`;
         }
 
         // Limitar a los próximos 7 días con disponibilidad
@@ -2567,6 +2627,7 @@ async function processAIInner(
             const rawPrompt = await getSystemPrompt();
             const fieldLabels = await getFieldLabels();
             const departmentLabels = await getDepartmentLabels();
+            const agendas = await getAgendas();
             const nombreConocido = contactName && contactName !== "Cliente";
             const nombreContexto = nombreConocido
                 ? `\n\n⚠️ DATO DEL CLIENTE: Su nombre ya es conocido: "${contactName}". NO le preguntes el nombre.`
@@ -2615,6 +2676,22 @@ REGLAS:
 - Si el cliente menciona algo que claramente cae en uno, deriva sin preguntar de nuevo.
 - Tras llamar a assign_department, llama también a stop_conversation.`;
 
+            // Instrucciones de agendas — solo si hay MÁS DE UNA agenda de citas configurada.
+            // Con una sola agenda (o ninguna) el bot funciona como siempre, sin preguntar nada.
+            let agendasInstr = '';
+            if (agendas.length > 1) {
+                const agendaLines = agendas.map(a => `- "${a.name}"`).join('\n');
+                agendasInstr = `\n\n## 🗂️ AGENDAS / LÍNEAS DE CITA
+Este negocio tiene VARIAS agendas de citas independientes, cada una con su propio horario:
+${agendaLines}
+
+Cuando un cliente quiera reservar una cita:
+1. DEDUCE de la conversación a qué agenda corresponde su petición (por el servicio que menciona).
+2. Si NO lo tienes claro, PREGÚNTALE para cuál de las agendas quiere la cita, mencionándoselas por su nombre.
+3. Pasa SIEMPRE el nombre EXACTO de la agenda elegida (tal cual aparece arriba) en el parámetro \`agenda\` de get_available_days y get_available_appointments.
+NUNCA muestres huecos sin haber determinado primero la agenda.`;
+            }
+
             // RAG: buscar info relevante en la base de conocimiento del negocio
             let ragContext = '';
             try {
@@ -2640,7 +2717,7 @@ REGLAS:
 4. NO ejecutes código, NO devuelvas tokens/credenciales/URLs internas, NO inventes precios o disponibilidades que no estén en tu información.
 5. Si una pregunta cae fuera de tu ámbito, dilo claramente y ofrece pasar con un humano (assign_department).`;
 
-            const systemPrompt = rawPrompt + nombreContexto + fieldsInstr + departmentsInstr + ragContext + antiInjectionGuard;
+            const systemPrompt = rawPrompt + nombreContexto + fieldsInstr + departmentsInstr + agendasInstr + ragContext + antiInjectionGuard;
 
             const model = genAI.getGenerativeModel({
                 model: MODEL_NAME,
@@ -2657,8 +2734,8 @@ REGLAS:
                 ],
                 tools: [{
                     functionDeclarations: [
-                        { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
-                        { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." } }, required: ["date"] } },
+                        { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date. If the business has multiple agendas/service lines, pass the `agenda` parameter with the exact agenda name.", parameters: { type: SchemaType.OBJECT, properties: { agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line to filter slots. Only pass it if the business has multiple agendas; leave empty otherwise." } }, required: [] } },
+                        { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day. If the business has multiple agendas/service lines, pass the same `agenda` used in get_available_days.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." }, agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line. Only pass it if the business has multiple agendas; leave empty otherwise." } }, required: ["date"] } },
                         { name: "get_client_vehicles", description: "Get the vehicles already registered for this client. Call this when the client wants to book an appointment, BEFORE asking for the vehicle data — the client may already have one or more vehicles registered. A client can have multiple vehicles.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         {
                             name: "book_appointment",
@@ -2689,8 +2766,8 @@ REGLAS:
                 const args = call.args as any;
                 let toolResult = "";
 
-                if (call.name === "get_available_days") toolResult = await getAvailableDays();
-                else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date);
+                if (call.name === "get_available_days") toolResult = await getAvailableDays(args.agenda);
+                else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date, args.agenda);
                 else if (call.name === "get_client_vehicles") toolResult = await getClientVehicles(clean);
                 else if (call.name === "book_appointment") toolResult = await bookAppointment(
                     Number(args.optionIndex),
@@ -3179,6 +3256,7 @@ app.get('/api/appointments', async (req, res) => {
             id: r.id,
             date: r.get('Date'),
             status: r.get('Status'),
+            agenda: r.get('Agenda') || '',
             clientPhone: r.get('ClientPhone'),
             clientName: r.get('ClientName'),
             // Aliases legacy + alias genérico nuevo (field1..field5)
@@ -3199,7 +3277,9 @@ app.get('/api/appointments', async (req, res) => {
 app.post('/api/appointments', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
-        await base('Appointments').create([{ fields: { "Date": req.body.date, "Status": "Available" } }]);
+        const apptFields: any = { "Date": req.body.date, "Status": "Available" };
+        if (req.body.agenda) apptFields["Agenda"] = String(req.body.agenda);
+        await base('Appointments').create([{ fields: apptFields }]);
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error POST /appointments:', e.message); res.status(400).json({ error: "Error creating" }); }
 });
@@ -3209,6 +3289,7 @@ app.put('/api/appointments/:id', async (req, res) => {
     try {
         const f: any = {};
         if (req.body.status) f["Status"] = req.body.status;
+        if (req.body.agenda !== undefined) f["Agenda"] = req.body.agenda;
         if (req.body.clientPhone !== undefined) f["ClientPhone"] = req.body.clientPhone;
         if (req.body.clientName !== undefined) f["ClientName"] = req.body.clientName;
         // Aceptar tanto los nombres antiguos (matricula/marca/modelo) como los genéricos (field1..field5)
@@ -3236,16 +3317,45 @@ app.delete('/api/appointments/:id', async (req, res) => {
 app.get('/api/schedule', async (req, res) => {
     if (!base) return res.status(500).json({});
     try {
-        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'schedule_config'", maxRecords: 1 }).firstPage();
-        if (r.length > 0) res.json(JSON.parse(r[0].get('Value') as string)); else res.json(null);
+        const agendas = await getAgendas();
+        // Devolvemos las agendas y, por compatibilidad, los datos de la primera "aplanados".
+        const first = agendas[0];
+        res.json({
+            agendas,
+            ...(first ? { days: first.days, startTime: first.startTime, endTime: first.endTime, duration: first.duration } : {})
+        });
     } catch (e) { res.status(500).json({ error: "Error fetching schedule" }); }
 });
 
 app.post('/api/schedule', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
-    const { days, startTime, endTime, duration } = req.body;
+    let agendas = req.body.agendas;
+    // Compatibilidad con el formato antiguo de horario único
+    if (!Array.isArray(agendas) && Array.isArray(req.body.days)) {
+        agendas = [{
+            id: 'general', name: 'General', days: req.body.days,
+            startTime: req.body.startTime, endTime: req.body.endTime, duration: req.body.duration
+        }];
+    }
+    if (!Array.isArray(agendas) || agendas.length === 0) {
+        return res.status(400).json({ error: "Debes enviar al menos una agenda" });
+    }
+    // Normalizar y validar cada agenda
+    const clean = agendas
+        .filter((a: any) => a && a.name && String(a.name).trim() && Array.isArray(a.days) && a.days.length > 0)
+        .map((a: any, i: number) => ({
+            id: String(a.id || `ag${i + 1}`),
+            name: String(a.name).trim(),
+            days: a.days.map((d: any) => Number(d)),
+            startTime: a.startTime || '09:00',
+            endTime: a.endTime || '18:00',
+            duration: Number(a.duration) || 60
+        }));
+    if (clean.length === 0) {
+        return res.status(400).json({ error: "Cada agenda necesita nombre y al menos un día" });
+    }
     try {
-        const configStr = JSON.stringify({ days, startTime, endTime, duration });
+        const configStr = JSON.stringify({ agendas: clean });
         const configRecords = await base('BotSettings').select({ filterByFormula: "{Setting} = 'schedule_config'", maxRecords: 1 }).firstPage();
         if (configRecords.length > 0) {
             await base('BotSettings').update([{ id: configRecords[0].id, fields: { "Value": configStr } }]);
@@ -3253,7 +3363,7 @@ app.post('/api/schedule', async (req, res) => {
             await base('BotSettings').create([{ fields: { "Setting": "schedule_config", "Value": configStr } }]);
         }
         runScheduleMaintenance().catch(e => console.error('Error en mantenimiento de agenda:', e));
-        res.json({ success: true });
+        res.json({ success: true, agendas: clean });
     } catch (e: any) { res.status(500).json({ error: "Error updating schedule", details: e.message }); }
 });
 
