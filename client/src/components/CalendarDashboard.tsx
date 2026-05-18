@@ -11,6 +11,7 @@ interface Appointment {
     date: string;
     status: 'Available' | 'Booked';
     agenda?: string;
+    incident?: boolean;   // cita inesperada del mismo día (incidente)
     clientPhone?: string;
     clientName?: string;
     matricula?: string;
@@ -105,6 +106,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [editModelo, setEditModelo] = useState('');
     const [editExtra, setEditExtra] = useState('');
     const [editNotas, setEditNotas] = useState('');
+    // Incidente: marca manual/automática de cita inesperada del mismo día
+    const [editIncident, setEditIncident] = useState(false);
     // Estado del CLIENTE (contacto) — distinto del estado de la cita.
     // Permite marcar "Vehículo Entregado" y demás estados desde el calendario.
     const [editContactStatus, setEditContactStatus] = useState('');
@@ -249,6 +252,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setEditModelo(appt.modelo || appt.field3 || '');
         setEditExtra(appt.extra || appt.field4 || '');
         setEditNotas(appt.notas || appt.field5 || '');
+        setEditIncident(!!appt.incident);
         // Cargar el estado del contacto (cliente) asociado a esta cita
         setEditContactStatus('');
         setOriginalContactStatus('');
@@ -281,7 +285,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     marca: editMarca,
                     modelo: editModelo,
                     extra: editExtra,
-                    notas: editNotas
+                    notas: editNotas,
+                    incident: editIncident
                 })
             });
             if (!res.ok) { alert("Error guardando"); return; }
@@ -490,6 +495,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             {agendas.length > 1 && s.agenda && (
                 <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agendaColor(s.agenda) }} title={s.agenda} />
             )}
+            {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
             <span className="font-bold font-mono flex-shrink-0">{fmtTime(s.date)}</span>
             {s.status === 'Booked'
                 ? <span className="truncate font-medium">{s.clientName || 'Cliente'}</span>
@@ -685,6 +691,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                                 title={s.agenda}
                                                             />
                                                         )}
+                                                        {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
                                                         {formatTimeRange(s.date)}
                                                     </span>
                                                     {/* Nombre de la agenda (visible si hay varias) */}
@@ -872,8 +879,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     </span>
                                                 )}
                                             </div>
-                                            {/* Etiqueta de estado */}
-                                            <div className="flex items-center flex-shrink-0">
+                                            {/* Etiqueta de estado + incidente */}
+                                            <div className="flex flex-col items-end justify-center gap-1 flex-shrink-0">
+                                                {s.incident && (
+                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}><Zap size={11} />Incidente</span>
+                                                )}
                                                 {isBooked
                                                     ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-purple-800/50 text-purple-200' : 'bg-purple-100 text-purple-700'}`}><User size={11} />Reservada</span>
                                                     : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-green-800/40 text-green-300' : 'bg-green-100 text-green-700'}`}>Libre</span>}
@@ -933,6 +943,28 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     <option value="Available">🟢 Disponible</option>
                                     <option value="Booked">🔴 Reservada</option>
                                 </select>
+                            </div>
+
+                            {/* Incidente — cita inesperada / urgente del mismo día */}
+                            <div className={`flex items-center justify-between p-3 rounded-xl border ${editIncident
+                                ? (isDark ? 'bg-amber-900/20 border-amber-700' : 'bg-amber-50 border-amber-200')
+                                : (isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200')}`}>
+                                <div className="flex items-center gap-2">
+                                    <Zap size={16} className={editIncident ? 'text-amber-500' : 'text-slate-400'} />
+                                    <div>
+                                        <span className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Incidente</span>
+                                        <p className="text-[11px] text-slate-400">Cita inesperada / urgente del día</p>
+                                    </div>
+                                </div>
+                                <button
+                                    type="button"
+                                    onClick={() => { if (!readOnly) setEditIncident(v => !v); }}
+                                    disabled={readOnly}
+                                    title={editIncident ? 'Quitar marca de incidente' : 'Marcar como incidente'}
+                                    className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${editIncident ? 'bg-amber-500' : (isDark ? 'bg-slate-600' : 'bg-slate-300')} ${readOnly ? 'opacity-60 cursor-not-allowed' : ''}`}
+                                >
+                                    <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${editIncident ? 'translate-x-5' : ''}`} />
+                                </button>
                             </div>
 
                             {(editStatus === 'Booked' || readOnly) && (

@@ -10,7 +10,8 @@ import {
   Loader2,
   ServerCrash,
   Activity,
-  Lock
+  Lock,
+  Zap
 } from 'lucide-react';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
@@ -146,6 +147,7 @@ const AnalyticsDashboard = () => {
   const activity = safeData.activity || [];
   const agents = safeData.agents || [];
   const statuses = safeData.statuses || [];
+  const incidents = safeData.incidents || { monthLabel: '', count: 0, total: 0, percentage: 0 };
 
   // Escalar gráfica
   const maxActivity = Math.max(...(activity.map((d: any) => d.count) || [0]), 1);
@@ -164,7 +166,7 @@ const AnalyticsDashboard = () => {
       </div>
 
       {/* KPIs Cards */}
-      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
         <div className={`p-6 rounded-2xl border shadow-sm flex items-center gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
           <div className={`p-3 rounded-xl ${isDark ? 'bg-blue-500/20 text-blue-400' : 'bg-blue-50 text-blue-600'}`}><MessageSquare size={24} /></div>
           <div>
@@ -186,6 +188,21 @@ const AnalyticsDashboard = () => {
           <div>
             <p className={`text-xs font-bold uppercase tracking-wider ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>Nuevos Leads</p>
             <h3 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{kpis.newLeads}</h3>
+          </div>
+        </div>
+
+        {/* Incidentes del mes — citas inesperadas del mismo día */}
+        <div className={`p-6 rounded-2xl border shadow-sm flex items-center gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+          <div className={`p-3 rounded-xl ${isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-50 text-amber-600'}`}><Zap size={24} /></div>
+          <div className="min-w-0">
+            <p className={`text-xs font-bold uppercase tracking-wider truncate ${isDark ? 'text-slate-400' : 'text-slate-400'}`} title={incidents.monthLabel}>
+              Incidentes{incidents.monthLabel ? ` · ${incidents.monthLabel}` : ''}
+            </p>
+            <h3 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+              {incidents.count}
+              <span className="text-base font-bold text-amber-500 ml-2">{incidents.percentage}%</span>
+            </h3>
+            <p className="text-[11px] text-slate-400 mt-0.5">de {incidents.total} citas reservadas</p>
           </div>
         </div>
       </div>

@@ -3588,6 +3588,7 @@ app.get('/api/appointments', async (req, res) => {
             date: r.get('Date'),
             status: r.get('Status'),
             agenda: r.get('Agenda') || '',
+            incident: !!r.get('Incident'),
             clientPhone: r.get('ClientPhone'),
             clientName: r.get('ClientName'),
             // Aliases legacy + alias genérico nuevo (field1..field5)
@@ -3605,13 +3606,37 @@ app.get('/api/appointments', async (req, res) => {
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
 });
 
+// Devuelve la fecha (YYYY-MM-DD) de un Date en la zona horaria de España.
+const madridDay = (dt: Date) => dt.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+
 app.post('/api/appointments', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
         const apptFields: any = { "Date": req.body.date, "Status": "Available" };
         if (req.body.agenda) apptFields["Agenda"] = String(req.body.agenda);
-        await base('Appointments').create([{ fields: apptFields }]);
-        res.json({ success: true });
+        // INCIDENTE: una cita creada a mano para el MISMO día es una cita
+        // inesperada (incidente). Se detecta comparando el día de la cita con
+        // el día de hoy (zona horaria de España). El frontend también puede
+        // forzar/anular la marca con req.body.incident.
+        let isIncident = false;
+        try {
+            if (req.body.date) isIncident = madridDay(new Date(req.body.date)) === madridDay(new Date());
+        } catch { /* fecha inválida → no es incidente */ }
+        if (req.body.incident === true) isIncident = true;
+        if (req.body.incident === false) isIncident = false;
+        if (isIncident) apptFields["Incident"] = true;
+        try {
+            await base('Appointments').create([{ fields: apptFields }]);
+        } catch (e: any) {
+            // Tolerancia: si el campo "Incident" aún no existe en Airtable, crear sin él.
+            if (apptFields.Incident !== undefined && /incident/i.test(e.message || '')) {
+                console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                delete apptFields.Incident;
+                isIncident = false;
+                await base('Appointments').create([{ fields: apptFields }]);
+            } else throw e;
+        }
+        res.json({ success: true, incident: isIncident });
     } catch (e: any) { console.error('[API] Error POST /appointments:', e.message); res.status(400).json({ error: "Error creating" }); }
 });
 
@@ -3634,7 +3659,18 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.field3 !== undefined) f["Modelo"] = req.body.field3;
         if (req.body.field4 !== undefined) f["Extra"] = req.body.field4;
         if (req.body.field5 !== undefined) f["Notas"] = req.body.field5;
-        await base('Appointments').update([{ id: req.params.id, fields: f }]);
+        // Marcar/desmarcar la cita como incidente manualmente desde el popup
+        if (req.body.incident !== undefined) f["Incident"] = !!req.body.incident;
+        try {
+            await base('Appointments').update([{ id: req.params.id, fields: f }]);
+        } catch (e: any) {
+            // Tolerancia: si el campo "Incident" aún no existe en Airtable, guardar sin él.
+            if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                delete f.Incident;
+                await base('Appointments').update([{ id: req.params.id, fields: f }]);
+            } else throw e;
+        }
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
 });
@@ -3811,7 +3847,30 @@ app.get('/api/analytics', async (req, res) => {
         const agentPerformance = Object.entries(agentStats).map(([name, data]) => ({ name, msgCount: data.msgs, chatCount: data.uniqueChats.size })).sort((a, b) => b.msgCount - a.msgCount).slice(0, 5);
         const statusMap: Record<string, number> = {}; contacts.forEach(c => { const s = (c.get('status') as string) || 'Otros'; statusMap[s] = (statusMap[s] || 0) + 1; });
         const statusDistribution = Object.entries(statusMap).map(([name, count]) => ({ name, count }));
-        res.json({ kpis: { totalContacts, totalMessages, newLeads }, activity: activityData, agents: agentPerformance, statuses: statusDistribution });
+
+        // --- Incidentes del mes en curso ---
+        // Incidente = cita reservada marcada como tal (cita inesperada del mismo día).
+        // % = incidentes / total de citas reservadas del mes (zona horaria España).
+        let incidentStats = { monthLabel: '', count: 0, total: 0, percentage: 0 };
+        try {
+            const now = new Date();
+            const monthKey = madridDay(now).slice(0, 7); // YYYY-MM
+            const appts = await base('Appointments').select().all();
+            const monthBooked = appts.filter(a => {
+                const d = a.get('Date') as string;
+                if (!d || a.get('Status') !== 'Booked') return false;
+                return madridDay(new Date(d)).slice(0, 7) === monthKey;
+            });
+            const incCount = monthBooked.filter(a => !!a.get('Incident')).length;
+            incidentStats = {
+                monthLabel: now.toLocaleDateString('es-ES', { month: 'long', year: 'numeric', timeZone: 'Europe/Madrid' }),
+                count: incCount,
+                total: monthBooked.length,
+                percentage: monthBooked.length > 0 ? Math.round((incCount / monthBooked.length) * 100) : 0
+            };
+        } catch (e: any) { console.error('[API] Error calculando incidentes:', e.message); }
+
+        res.json({ kpis: { totalContacts, totalMessages, newLeads }, activity: activityData, agents: agentPerformance, statuses: statusDistribution, incidents: incidentStats });
     } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }
 });
 
