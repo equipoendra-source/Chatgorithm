@@ -2705,6 +2705,31 @@ async function cancelPendingCitaReminders(phone: string): Promise<number> {
     }
 }
 
+// Detecta si el texto del cliente expresa intención de cancelar / no asistir.
+// La respuesta humana es muy variada: "no", "No", "no.", "no puedo",
+// "no podré ir", "cancelar", "anular"... Esta función normaliza (sin acentos,
+// minúsculas, sin puntuación) y reconoce las formas más habituales.
+function looksLikeApptCancellation(text: string): boolean {
+    const norm = (text || '')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')   // quitar acentos
+        .toLowerCase()
+        .replace(/[.,;:!¡¿?()"'\-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!norm) return false;
+    // "no" a secas (también "no no", "no gracias")
+    if (/^no( no| gracias)?$/.test(norm)) return true;
+    // Frases de cancelación / no asistencia
+    const phrases = [
+        'no puedo', 'no podre', 'no voy a poder', 'no voy a ir', 'no ire',
+        'no asisti', 'no asistir', 'no podre ir', 'no podre asistir',
+        'no me viene bien', 'no me va bien', 'no quiero la cita', 'no quiero ir',
+        'cancelar', 'cancela', 'cancelo', 'anular', 'anula', 'anulo',
+        'cancelar la cita', 'cancelar cita', 'quiero cancelar'
+    ];
+    return phrases.some(p => norm.includes(p));
+}
+
 // Gestiona la respuesta "NO" del cliente a un recordatorio de cita.
 // El recordatorio dice literalmente "responda NO para liberar el hueco".
 // SOLO se trata como cancelación si el cliente recibió un recordatorio de cita
@@ -4141,8 +4166,23 @@ app.post('/webhook', async (req, res) => {
             });
             console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
 
-            // --- Detección opt-out de notificaciones y marketing ---
             const upperText = (msg.type === 'text' && text) ? text.trim().toUpperCase() : '';
+
+            // --- Cancelación de cita por respuesta del cliente al recordatorio ---
+            // Va ANTES del opt-out: si el cliente recibió un recordatorio de cita
+            // reciente, una respuesta como "no" / "cancelar" significa cancelar la
+            // CITA (no darse de baja de marketing). Funciona aunque la IA esté apagada.
+            // handleAppointmentCancelReply solo actúa si hay un recordatorio reciente,
+            // así un "no" en conversación normal nunca libera una cita por error.
+            if (msg.type === 'text' && text && looksLikeApptCancellation(text)) {
+                const cancelled = await handleAppointmentCancelReply(from, originPhoneId);
+                if (cancelled) {
+                    console.log(`📅 [WEBHOOK] Cita liberada por respuesta del cliente "${text}" (${from})`);
+                    return res.sendStatus(200);
+                }
+            }
+
+            // --- Detección opt-out de notificaciones y marketing ---
             const optOutKeywords = ['BAJA', 'STOP', 'CANCELAR', 'NO PROMOCIONES', 'NO MARKETING', 'UNSUBSCRIBE'];
             if (optOutKeywords.some(k => upperText === k || upperText === `RESPONDE ${k}`)) {
                 console.log(`🚫 [WEBHOOK] Opt-out detectado de ${from} (palabra: ${upperText})`);
@@ -4151,19 +4191,6 @@ app.post('/webhook', async (req, res) => {
                 try { await setContactMarketingOptIn(from, false, 'whatsapp_baja'); } catch (e: any) { console.error('[Campaigns] Error opt-out marketing:', e.message); }
                 return res.sendStatus(200);
             }
-            // --- Cancelación de cita por respuesta "NO" al recordatorio ---
-            // El recordatorio de cita pide literalmente "responda NO para liberar el hueco".
-            // Se gestiona aquí, ANTES del bot, para que funcione aunque la IA esté apagada.
-            // handleAppointmentCancelReply solo cancela si hay un recordatorio reciente,
-            // así un "no" en conversación normal no libera ninguna cita por error.
-            if (/^NO[.!,\s]*$/.test(upperText)) {
-                const cancelled = await handleAppointmentCancelReply(from, originPhoneId);
-                if (cancelled) {
-                    console.log(`📅 [WEBHOOK] Cita liberada por respuesta "NO" de ${from}`);
-                    return res.sendStatus(200);
-                }
-            }
-
             // --- Detección opt-in marketing por respuesta explícita ---
             const optInKeywords = ['SI PROMOCIONES', 'SÍ PROMOCIONES', 'ACEPTO PROMOCIONES', 'ALTA PROMOCIONES', 'ALTA MARKETING', 'YES PROMO'];
             if (optInKeywords.some(k => upperText === k)) {
