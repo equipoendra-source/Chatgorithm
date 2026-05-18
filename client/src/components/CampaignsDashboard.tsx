@@ -3,7 +3,7 @@ import {
     Megaphone, Send, Users, Calendar as CalendarIcon, TrendingUp, Plus, Edit3,
     Trash2, Eye, X, ChevronLeft, ChevronRight, Check, Clock, Target, AlertCircle,
     Loader2, Search, Filter, Mail, DollarSign, BarChart3, CheckCircle2, XCircle,
-    PauseCircle, FileText, Sparkles, ArrowLeft, Repeat, Play, Pause, History, Ban
+    PauseCircle, FileText, Sparkles, ArrowLeft, Repeat, Play, Pause, History, Ban, Bell
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -74,7 +74,8 @@ interface ContactForCampaign {
     status: string;
     assigned_to: string;
     optInMarketing: boolean;
-    optedOut: boolean;
+    optedOutCampaigns: boolean;
+    optedOutReminders: boolean;
     lastMessageTime: string | null;
 }
 
@@ -427,8 +428,11 @@ const CampaignsDashboard: React.FC<CampaignsDashboardProps> = ({ readOnly = fals
 // ===========================
 //  MODAL: LISTA DE EXCLUSIÓN
 // ===========================
-// Permite marcar/desmarcar varios clientes como "no contactar". El campo
-// opted_out_notifications los excluye tanto de campañas como de recordatorios.
+// Permite marcar/desmarcar clientes como "no contactar". Campañas y
+// recordatorios son INDEPENDIENTES: cada uno tiene su propio campo
+// (opted_out_campaigns / opted_out_reminders). La pestaña activa
+// determina sobre qué lista actúan las acciones.
+type ExclusionType = 'campaigns' | 'reminders';
 const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: () => void }> = ({ isDark, API_URL, onClose }) => {
     const [contacts, setContacts] = useState<ContactForCampaign[]>([]);
     const [loading, setLoading] = useState(true);
@@ -436,6 +440,7 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
     const [search, setSearch] = useState('');
     const [onlyExcluded, setOnlyExcluded] = useState(false);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+    const [listType, setListType] = useState<ExclusionType>('campaigns');
 
     useEffect(() => {
         setLoading(true);
@@ -446,16 +451,23 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
             .finally(() => setLoading(false));
     }, []);
 
+    // Estado de exclusión del contacto SEGÚN la pestaña activa
+    const isExcluded = (c: ContactForCampaign) => listType === 'campaigns' ? c.optedOutCampaigns : c.optedOutReminders;
+    const listLabel = listType === 'campaigns' ? 'campañas' : 'recordatorios';
+
     const visible = useMemo(() => contacts.filter(c => {
-        if (onlyExcluded && !c.optedOut) return false;
+        if (onlyExcluded && !isExcluded(c)) return false;
         if (search) {
             const q = search.toLowerCase();
             if (!(c.name?.toLowerCase().includes(q) || c.phone.includes(q))) return false;
         }
         return true;
-    }), [contacts, search, onlyExcluded]);
+    }), [contacts, search, onlyExcluded, listType]);
 
-    const excludedCount = useMemo(() => contacts.filter(c => c.optedOut).length, [contacts]);
+    const excludedCount = useMemo(() => contacts.filter(isExcluded).length, [contacts, listType]);
+
+    // Al cambiar de pestaña, limpiar la selección (cada lista es independiente)
+    const switchList = (t: ExclusionType) => { setListType(t); setSelectedIds(new Set()); };
 
     const toggle = (id: string) => {
         setSelectedIds(prev => {
@@ -478,18 +490,19 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
     const apply = async (optedOut: boolean) => {
         const ids = Array.from(selectedIds);
         if (ids.length === 0) return;
-        if (!optedOut && !confirm(`¿Volver a permitir campañas y recordatorios a ${ids.length} cliente(s)?\n\nAviso: si alguno se dio de baja escribiendo "BAJA", volverá a recibir mensajes.`)) return;
+        if (!optedOut && !confirm(`¿Volver a permitir ${listLabel} a ${ids.length} cliente(s)?\n\nAviso: si alguno se dio de baja escribiendo "BAJA", volverá a recibir mensajes.`)) return;
         setSaving(true);
         try {
             const r = await fetch(`${API_URL}/contacts/bulk-opt-out`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ ids, optedOut })
+                body: JSON.stringify({ ids, optedOut, type: listType })
             });
             const data = await r.json();
             if (data.success) {
                 const idSet = new Set(ids);
-                setContacts(prev => prev.map(c => idSet.has(c.id) ? { ...c, optedOut } : c));
+                const field = listType === 'campaigns' ? 'optedOutCampaigns' : 'optedOutReminders';
+                setContacts(prev => prev.map(c => idSet.has(c.id) ? { ...c, [field]: optedOut } : c));
                 setSelectedIds(new Set());
             } else {
                 alert('❌ ' + (data.error || 'Error'));
@@ -500,6 +513,11 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
             setSaving(false);
         }
     };
+
+    const tabs: { key: ExclusionType; label: string; icon: React.ReactNode }[] = [
+        { key: 'campaigns', label: 'Campañas', icon: <Megaphone className="w-4 h-4" /> },
+        { key: 'reminders', label: 'Recordatorios', icon: <Bell className="w-4 h-4" /> },
+    ];
 
     return (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={onClose}>
@@ -515,13 +533,28 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
                         <div>
                             <h2 className="text-lg font-bold">Lista de exclusión</h2>
                             <p className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
-                                Los clientes marcados no reciben campañas ni recordatorios — {excludedCount} excluido(s)
+                                {excludedCount} cliente(s) excluido(s) de {listLabel}
                             </p>
                         </div>
                     </div>
                     <button onClick={onClose} className={`p-2 rounded-lg ${isDark ? 'hover:bg-white/5 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}>
                         <X className="w-5 h-5" />
                     </button>
+                </div>
+
+                {/* Pestañas: campañas / recordatorios (independientes) */}
+                <div className={`px-6 pt-3 flex gap-2 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                    {tabs.map(t => (
+                        <button
+                            key={t.key}
+                            onClick={() => switchList(t.key)}
+                            className={`flex items-center gap-2 px-4 py-2 rounded-t-lg text-sm font-semibold transition border-b-2 ${listType === t.key
+                                ? 'border-red-500 text-red-500'
+                                : `border-transparent ${isDark ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'}`}`}>
+                            {t.icon}
+                            {t.label}
+                        </button>
+                    ))}
                 </div>
 
                 {/* Buscador + filtro */}
@@ -569,8 +602,12 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
                                             <p className="text-sm font-semibold truncate">{c.name || 'Sin nombre'}</p>
                                             <p className={`text-xs font-mono ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{c.phone}</p>
                                         </div>
-                                        {c.optedOut && (
-                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-500/20 text-red-500 flex-shrink-0">NO CONTACTAR</span>
+                                        {/* Estado en ambas listas — siempre visible para tener contexto */}
+                                        {c.optedOutCampaigns && (
+                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-red-500/20 text-red-500 flex-shrink-0 flex items-center gap-1"><Megaphone className="w-3 h-3" />Sin campañas</span>
+                                        )}
+                                        {c.optedOutReminders && (
+                                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-amber-500/20 text-amber-500 flex-shrink-0 flex items-center gap-1"><Bell className="w-3 h-3" />Sin recordatorios</span>
                                         )}
                                     </label>
                                 ))}
@@ -579,7 +616,7 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
                     )}
                 </div>
 
-                {/* Acciones */}
+                {/* Acciones — aplican a la pestaña activa */}
                 <div className={`px-6 py-4 border-t flex flex-wrap items-center justify-between gap-3 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                     <span className={`text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                         {selectedIds.size} seleccionado(s)
@@ -589,14 +626,14 @@ const ExclusionListModal: React.FC<{ isDark: boolean; API_URL: string; onClose: 
                             onClick={() => apply(false)}
                             disabled={saving || selectedIds.size === 0}
                             className={`px-4 py-2 rounded-lg text-sm font-semibold transition disabled:opacity-40 ${isDark ? 'bg-white/5 text-slate-300 hover:bg-white/10' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
-                            Quitar exclusión
+                            Permitir {listLabel}
                         </button>
                         <button
                             onClick={() => apply(true)}
                             disabled={saving || selectedIds.size === 0}
                             className="px-4 py-2 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-red-500 to-rose-600 hover:shadow-lg hover:shadow-red-500/30 transition disabled:opacity-40 flex items-center gap-2">
                             {saving && <Loader2 className="w-4 h-4 animate-spin" />}
-                            Marcar como no contactar
+                            Excluir de {listLabel}
                         </button>
                     </div>
                 </div>
@@ -856,7 +893,7 @@ const CampaignWizard: React.FC<{
     // Contactos filtrados
     const filteredContacts = useMemo(() => {
         return contacts.filter(c => {
-            if (contactFilterOptIn && (!c.optInMarketing || c.optedOut)) return false;
+            if (contactFilterOptIn && (!c.optInMarketing || c.optedOutCampaigns)) return false;
             if (contactSearch && !(c.name?.toLowerCase().includes(contactSearch.toLowerCase()) || c.phone.includes(contactSearch))) return false;
             if (contactFilterTag && !(c.tags || []).includes(contactFilterTag)) return false;
             if (contactFilterDept && c.department !== contactFilterDept) return false;
@@ -1314,8 +1351,8 @@ const Step3Recipients: React.FC<any> = ({
                                         {c.tags?.length > 0 && ` · ${c.tags.join(', ')}`}
                                     </div>
                                 </div>
-                                {c.optInMarketing && !c.optedOut && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-500/20 text-green-500">OPT-IN</span>}
-                                {c.optedOut && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-500">BAJA</span>}
+                                {c.optInMarketing && !c.optedOutCampaigns && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-green-500/20 text-green-500">OPT-IN</span>}
+                                {c.optedOutCampaigns && <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-red-500/20 text-red-500">BAJA</span>}
                             </button>
                         );
                     })}

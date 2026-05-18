@@ -1295,7 +1295,8 @@ async function handleNotificationOptOut(phone: string, originPhoneId: string): P
         if (contacts.length > 0) {
             await base('Contacts').update([{
                 id: contacts[0].id,
-                fields: { opted_out_notifications: true }
+                // BAJA por WhatsApp → excluido de campañas Y recordatorios
+                fields: { opted_out_campaigns: true, opted_out_reminders: true }
             }]);
         }
 
@@ -1347,7 +1348,8 @@ async function runNotificationScheduler() {
             const contact = await base('Contacts').select({
                 filterByFormula: `{phone}='${clientPhone}'`, maxRecords: 1
             }).firstPage();
-            if (contact.length > 0 && contact[0].get('opted_out_notifications')) continue;
+            // Excluido de recordatorios (opted_out_notifications = campo antiguo, respaldo)
+            if (contact.length > 0 && (contact[0].get('opted_out_reminders') || contact[0].get('opted_out_notifications'))) continue;
             await delay(100);
 
             const clientName = (appt.get('ClientName') as string) || 'cliente';
@@ -1402,7 +1404,7 @@ async function runNotificationScheduler() {
             const contactCheck = await base('Contacts').select({
                 filterByFormula: `{phone}='${phone}'`, maxRecords: 1
             }).firstPage();
-            if (contactCheck.length > 0 && contactCheck[0].get('opted_out_notifications')) {
+            if (contactCheck.length > 0 && (contactCheck[0].get('opted_out_reminders') || contactCheck[0].get('opted_out_notifications'))) {
                 await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
                     id: notif.id, fields: { status: 'cancelled' }
                 }]);
@@ -4551,18 +4553,18 @@ async function executeCampaign(campaignId: string): Promise<void> {
             }
         }
 
-        // Comprobar opt-out global de notificaciones (campo opted_out_notifications en Contacts)
+        // Comprobar exclusión de campañas (opted_out_notifications = campo antiguo, respaldo)
         try {
             const contactCheck = await base('Contacts').select({
                 filterByFormula: `{phone}='${cleanPhone}'`, maxRecords: 1
             }).firstPage();
-            if (contactCheck.length > 0 && contactCheck[0].get('opted_out_notifications')) {
+            if (contactCheck.length > 0 && (contactCheck[0].get('opted_out_campaigns') || contactCheck[0].get('opted_out_notifications'))) {
                 skippedCount++;
                 try {
                     await base(TABLE_CAMPAIGN_SENDS).create([{
                         fields: {
                             campaignId, phone: cleanPhone, status: 'skipped',
-                            error: 'Opt-out global de notificaciones', sentAt: new Date().toISOString()
+                            error: 'Cliente excluido de campañas', sentAt: new Date().toISOString()
                         }
                     }]);
                 } catch {}
@@ -4738,7 +4740,7 @@ async function expandRecipientsFromFilters(filters: any): Promise<string[]> {
             const phone = (r.get('phone') as string) || '';
             if (!phone) return false;
             const optInMarketing = !!r.get('optInMarketing');
-            const optedOut = !!r.get('opted_out_notifications');
+            const optedOut = !!r.get('opted_out_campaigns') || !!r.get('opted_out_notifications');
             const contactTags: string[] = (r.get('tags') as string[]) || [];
             const contactDept = (r.get('department') as string) || '';
 
@@ -5204,10 +5206,12 @@ app.get('/api/campaigns-contacts', async (req, res) => {
             status: (r.get('status') as string) || '',
             assigned_to: (r.get('assigned_to') as string) || '',
             optInMarketing: !!r.get('optInMarketing'),
-            optedOut: !!r.get('opted_out_notifications'),
+            // opted_out_notifications = campo antiguo (respaldo): si está activo, excluido de todo
+            optedOutCampaigns: !!r.get('opted_out_campaigns') || !!r.get('opted_out_notifications'),
+            optedOutReminders: !!r.get('opted_out_reminders') || !!r.get('opted_out_notifications'),
             lastMessageTime: (r.get('last_message_time') as string) || null
         })).filter(c => c.phone);
-        const filtered = onlyOptedIn ? list.filter(c => c.optInMarketing && !c.optedOut) : list;
+        const filtered = onlyOptedIn ? list.filter(c => c.optInMarketing && !c.optedOutCampaigns) : list;
         res.json(filtered);
     } catch (e: any) {
         res.status(500).json({ error: e.message });
@@ -5223,18 +5227,23 @@ app.post('/api/contacts/:phone/marketing-opt-in', async (req, res) => {
 });
 
 // Marcar/desmarcar en lote varios contactos como "no contactar".
-// Activa el campo opted_out_notifications, que ya excluye al cliente
-// tanto de las campañas como de los recordatorios de citas.
+// type = 'campaigns' → campo opted_out_campaigns | 'reminders' → opted_out_reminders.
+// Campañas y recordatorios son independientes: un cliente puede estar
+// excluido de uno y no del otro.
 app.post('/api/contacts/bulk-opt-out', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
-    const { ids, optedOut } = req.body;
+    const { ids, optedOut, type } = req.body;
     if (!Array.isArray(ids) || ids.length === 0) {
         return res.status(400).json({ error: 'ids debe ser un array no vacío' });
     }
+    if (type !== 'campaigns' && type !== 'reminders') {
+        return res.status(400).json({ error: "type debe ser 'campaigns' o 'reminders'" });
+    }
+    const field = type === 'reminders' ? 'opted_out_reminders' : 'opted_out_campaigns';
     try {
         const updates = ids
             .filter((id: any) => typeof id === 'string' && id)
-            .map((id: string) => ({ id, fields: { opted_out_notifications: !!optedOut } }));
+            .map((id: string) => ({ id, fields: { [field]: !!optedOut } }));
         // Airtable admite como máximo 10 registros por llamada de update
         for (let i = 0; i < updates.length; i += 10) {
             await base('Contacts').update(updates.slice(i, i + 10));
