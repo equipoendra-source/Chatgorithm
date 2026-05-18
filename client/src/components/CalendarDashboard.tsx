@@ -42,6 +42,13 @@ const DEFAULT_FIELD_LABELS: FieldLabels = {
     field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: '' }
 };
 
+// Tipo de servicio con duración variable dentro de una agenda
+interface AgendaService {
+    id: string;
+    name: string;
+    durationMin: number;   // duración real del servicio en minutos
+}
+
 // Una agenda = una línea de citas independiente con su propio horario
 interface Agenda {
     id: string;
@@ -50,7 +57,8 @@ interface Agenda {
     days: number[];        // 0=Domingo, 1=Lunes ... 6=Sábado
     startTime: string;
     endTime: string;
-    duration: number;
+    duration: number;      // granularidad del slot (minutos)
+    services: AgendaService[];  // tipos de servicio con duración variable
 }
 
 // Días de la semana para el selector (etiqueta + valor getDay)
@@ -151,15 +159,38 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
         // Si no hay agendas, arrancamos con una por defecto
         setDraftAgendas(agendas.length > 0
             ? JSON.parse(JSON.stringify(agendas))
-            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60 }]);
+            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60, services: [] }]);
         setShowAgendaModal(true);
     };
 
     const addDraftAgenda = () => {
         setDraftAgendas(prev => [...prev, {
             id: `ag${Date.now()}`, name: '', description: '', days: [1, 2, 3, 4, 5],
-            startTime: '09:00', endTime: '18:00', duration: 60
+            startTime: '09:00', endTime: '18:00', duration: 60, services: []
         }]);
+    };
+
+    // Gestión de servicios dentro de una agenda
+    const addService = (agendaIdx: number) => {
+        setDraftAgendas(prev => prev.map((a, idx) => idx === agendaIdx
+            ? { ...a, services: [...(a.services || []), { id: `svc${Date.now()}`, name: '', durationMin: a.duration || 60 }] }
+            : a
+        ));
+    };
+
+    const updateService = (agendaIdx: number, svcIdx: number, patch: Partial<AgendaService>) => {
+        setDraftAgendas(prev => prev.map((a, idx) => {
+            if (idx !== agendaIdx) return a;
+            const services = (a.services || []).map((s, si) => si === svcIdx ? { ...s, ...patch } : s);
+            return { ...a, services };
+        }));
+    };
+
+    const removeService = (agendaIdx: number, svcIdx: number) => {
+        setDraftAgendas(prev => prev.map((a, idx) => {
+            if (idx !== agendaIdx) return a;
+            return { ...a, services: (a.services || []).filter((_, si) => si !== svcIdx) };
+        }));
     };
 
     const updateDraftAgenda = (i: number, patch: Partial<Agenda>) => {
@@ -765,7 +796,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                     </div>
 
                                     {/* Horas + duración */}
-                                    <div className="grid grid-cols-3 gap-2">
+                                    <div className="grid grid-cols-3 gap-2 mb-3">
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Apertura</label>
                                             <input type="time" value={ag.startTime} onChange={e => updateDraftAgenda(i, { startTime: e.target.value })}
@@ -777,10 +808,45 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false 
                                                 className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white scheme-dark' : 'bg-white border-slate-200'}`} />
                                         </div>
                                         <div>
-                                            <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Duración (min)</label>
+                                            <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Grid slot (min)</label>
                                             <input type="number" min={5} step={5} value={ag.duration} onChange={e => updateDraftAgenda(i, { duration: parseInt(e.target.value) || 30 })}
                                                 className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
                                         </div>
+                                    </div>
+
+                                    {/* Tipos de servicio — duración variable por servicio */}
+                                    <div className={`rounded-xl border p-3 ${isDark ? 'border-white/10 bg-slate-800/40' : 'border-slate-200 bg-slate-50'}`}>
+                                        <div className="flex items-center justify-between mb-2">
+                                            <label className="text-xs font-bold text-slate-400 uppercase">Tipos de servicio <span className="font-normal lowercase">(duración variable, opcional)</span></label>
+                                            <button onClick={() => addService(i)} className={`text-xs px-2 py-1 rounded-lg flex items-center gap-1 font-semibold transition ${isDark ? 'bg-purple-900/40 text-purple-300 hover:bg-purple-900/60' : 'bg-purple-50 text-purple-700 hover:bg-purple-100'}`}>
+                                                <Plus size={11} /> Añadir
+                                            </button>
+                                        </div>
+                                        {(!ag.services || ag.services.length === 0) && (
+                                            <p className="text-xs text-slate-400 italic">Sin tipos — todos los huecos duran {ag.duration} min.</p>
+                                        )}
+                                        {(ag.services || []).map((svc, si) => (
+                                            <div key={svc.id} className="flex items-center gap-2 mb-2">
+                                                <input
+                                                    value={svc.name}
+                                                    onChange={e => updateService(i, si, { name: e.target.value })}
+                                                    placeholder="Ej: Avería, Revisión..."
+                                                    className={`flex-1 p-1.5 border rounded-lg text-sm outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`}
+                                                />
+                                                <div className="flex items-center gap-1 flex-shrink-0">
+                                                    <input
+                                                        type="number" min={5} step={5}
+                                                        value={svc.durationMin}
+                                                        onChange={e => updateService(i, si, { durationMin: parseInt(e.target.value) || ag.duration })}
+                                                        className={`w-20 p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`}
+                                                    />
+                                                    <span className="text-xs text-slate-400">min</span>
+                                                </div>
+                                                <button onClick={() => removeService(i, si)} className={`p-1.5 rounded-lg transition ${isDark ? 'text-red-400 hover:bg-red-900/30' : 'text-red-500 hover:bg-red-50'}`}>
+                                                    <X size={14} />
+                                                </button>
+                                            </div>
+                                        ))}
                                     </div>
                                 </div>
                             ))}

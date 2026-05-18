@@ -606,7 +606,15 @@ function notifyTeam(type: AlertType, severity: TeamAlert['severity'], message: s
     } catch (_) {}
 }
 
-const appointmentOptionsCache = new Map<string, Record<number, string>>();
+// Cada entrada mapea: número de opción → array de IDs de slot (1 slot para citas cortas, N para largas).
+// Backward compat: si el caché persiste con el formato antiguo (string en vez de string[]) se normaliza al leer.
+const appointmentOptionsCache = new Map<string, Record<number, string[]>>();
+
+/** Normaliza un valor del caché (puede ser string antiguo o string[] nuevo) a string[] */
+function normalizeSlotIds(v: string | string[] | undefined): string[] {
+    if (!v) return [];
+    return Array.isArray(v) ? v : [v];
+}
 const processedWebhookIds = new Set<string>();
 
 // =========================================================================
@@ -1031,7 +1039,7 @@ async function broadcastPushNotification(payload: { title: string, body: string,
 
 // --- HELPERS PARA CACHE PERSISTENTE DE CITAS ---
 // Guarda el cache en Airtable para que sobreviva reinicios del servidor
-async function saveAppointmentCache(phone: string, optionsMap: Record<number, string>) {
+async function saveAppointmentCache(phone: string, optionsMap: Record<number, string[]>) {
     if (!base) return;
     const clean = cleanNumber(phone);
     try {
@@ -1054,7 +1062,7 @@ async function saveAppointmentCache(phone: string, optionsMap: Record<number, st
     appointmentOptionsCache.set(clean, optionsMap);
 }
 
-async function getAppointmentCache(phone: string): Promise<Record<number, string> | null> {
+async function getAppointmentCache(phone: string): Promise<Record<number, string[]> | null> {
     const clean = cleanNumber(phone);
 
     // Primero intentar memoria (más rápido)
@@ -1075,11 +1083,16 @@ async function getAppointmentCache(phone: string): Promise<Record<number, string
         if (contacts.length > 0) {
             const cacheStr = contacts[0].get('appointment_cache') as string;
             if (cacheStr) {
-                const parsed = JSON.parse(cacheStr);
+                const raw = JSON.parse(cacheStr);
+                // Backward compat: normalizar valores string → string[]
+                const normalized: Record<number, string[]> = {};
+                for (const k of Object.keys(raw)) {
+                    normalized[Number(k)] = normalizeSlotIds(raw[k]);
+                }
                 // Restaurar en memoria
-                appointmentOptionsCache.set(clean, parsed);
+                appointmentOptionsCache.set(clean, normalized);
                 console.log(`📋 [Cache] Recuperado de Airtable para ${clean}`);
-                return parsed;
+                return normalized;
             }
         }
     } catch (e: any) {
@@ -1125,6 +1138,12 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 // --- AGENDAS / LÍNEAS DE CITA ---
 // Una "agenda" es una línea de citas independiente (ej: Taller, Ventas, Odontología)
 // con su propio horario y duración. Se guardan todas en BotSettings → schedule_config.
+interface AgendaService {
+    id: string;
+    name: string;
+    durationMin: number;  // duración REAL del servicio en minutos (puede ocupar varios slots)
+}
+
 interface Agenda {
     id: string;
     name: string;
@@ -1132,7 +1151,8 @@ interface Agenda {
     days: number[];
     startTime: string;
     endTime: string;
-    duration: number;
+    duration: number;      // granularidad del grid (tamaño del slot base, en minutos)
+    services: AgendaService[];  // tipos de servicio con duración variable (vacío = todos usan `duration`)
 }
 
 // Lee las agendas configuradas. Soporta el formato antiguo (un único horario sin
@@ -1153,12 +1173,19 @@ async function getAgendas(): Promise<Agenda[]> {
                     days: a.days,
                     startTime: a.startTime || '09:00',
                     endTime: a.endTime || '18:00',
-                    duration: Number(a.duration) || 60
+                    duration: Number(a.duration) || 60,
+                    services: Array.isArray(a.services)
+                        ? a.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any) => ({
+                            id: String(s.id || s.name),
+                            name: String(s.name).trim(),
+                            durationMin: Number(s.durationMin) || Number(a.duration) || 60
+                        }))
+                        : []
                 }));
         }
         // Formato antiguo: { days, startTime, endTime, duration } → una agenda "General"
         if (parsed && Array.isArray(parsed.days)) {
-            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: Number(parsed.duration) || 60 }];
+            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: Number(parsed.duration) || 60, services: [] }];
         }
         return [];
     } catch (e) {
@@ -1184,17 +1211,21 @@ async function runScheduleMaintenance() {
             await delay(200);
         }
 
-        // 2. Leer huecos futuros disponibles (para no duplicar)
+        // 2. Leer huecos futuros (Available Y Booked) para no duplicar ni pisar reservas activas
         const endDate = new Date();
         endDate.setDate(now.getDate() + 90);
-        const futureSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} > '${nowISO}')`, fields: ['Date', 'Agenda'] }).all();
-        // Clave de deduplicación: agenda + fecha ISO
+        const futureSlots = await base('Appointments').select({
+            filterByFormula: `AND(OR({Status}='Available',{Status}='Booked'), {Date}>'${nowISO}')`,
+            fields: ['Date', 'Agenda', 'Status']
+        }).all();
+        // Clave de deduplicación: agenda + fecha ISO (cubre tanto Available como Booked)
         const existing = new Set(futureSlots.map(r => `${(r.get('Agenda') as string) || ''}|${new Date(r.get('Date') as string).toISOString()}`));
 
-        // 3. Limpiar huecos disponibles de agendas que ya no existen
+        // 3. Limpiar huecos DISPONIBLES de agendas que ya no existen
+        // (Los Booked se dejan intactos — son reservas reales que no deben borrarse aunque se elimine la agenda)
         const agendaNames = new Set(agendas.map(a => a.name));
         const orphans = futureSlots
-            .filter(r => { const ag = (r.get('Agenda') as string) || ''; return ag && !agendaNames.has(ag); })
+            .filter(r => { const ag = (r.get('Agenda') as string) || ''; return ag && !agendaNames.has(ag) && r.get('Status') === 'Available'; })
             .map(r => r.id);
         for (let i = 0; i < orphans.length; i += 10) {
             await base('Appointments').destroy(orphans.slice(i, i + 10));
@@ -2077,15 +2108,31 @@ async function sendWhatsAppText(to: string, body: string, originPhoneId: string)
 // ==========================================
 //  HELPERS IA
 // ==========================================
-async function getAvailableAppointments(userPhone: string, originPhoneId: string, dateFilter?: string, agendaName?: string) {
+async function getAvailableAppointments(userPhone: string, originPhoneId: string, dateFilter?: string, agendaName?: string, serviceName?: string) {
     if (!base) return "Error DB";
 
     // CRÍTICO: Usar siempre el número limpio para el cache
     const cleanPhone = cleanNumber(userPhone);
     const agenda = (agendaName || '').trim();
+    const serviceKey = (serviceName || '').trim();
 
     try {
         if (cleanPhone) appointmentOptionsCache.delete(cleanPhone);
+
+        // Determinar cuántos slots consecutivos necesita este servicio
+        const allAgendas = await getAgendas();
+        const matchedAgenda = agenda ? allAgendas.find(a => a.name === agenda) : allAgendas[0];
+        const slotGranularity = matchedAgenda?.duration || 60;
+        let slotsNeeded = 1;
+        let serviceLabel = '';
+        if (serviceKey && matchedAgenda) {
+            const svc = matchedAgenda.services.find(s => s.name === serviceKey);
+            if (svc) {
+                slotsNeeded = Math.max(1, Math.ceil(svc.durationMin / slotGranularity));
+                serviceLabel = svc.name;
+                console.log(`📅 [Slots] Servicio "${svc.name}" → ${svc.durationMin}min → ${slotsNeeded} slot(s) de ${slotGranularity}min`);
+            }
+        }
 
         const todayStr = new Date().toISOString().split('T')[0];
         // Fetch all available future slots
@@ -2096,30 +2143,46 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         }).all();
 
         const now = new Date();
-        const validRecords = records.filter(r => {
+        const filtered = records.filter(r => {
             const d = new Date(r.get('Date') as string);
             if (d <= now) return false;
-
-            // Filtrar por agenda si se especificó una
             if (agenda && ((r.get('Agenda') as string) || '') !== agenda) return false;
-
             if (dateFilter) {
                 const slotDateStr = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
                 return slotDateStr === dateFilter;
             }
             return true;
-        }).slice(0, 10);
+        });
 
-        if (validRecords.length === 0) return `No hay citas disponibles${agenda ? ` en la agenda "${agenda}"` : ''} para esa fecha (${dateFilter || 'próximamente'}).`;
+        // --- Buscar grupos de slots consecutivos suficientes para el servicio ---
+        // Un grupo es válido si hay `slotsNeeded` slots seguidos separados exactamente por `slotGranularity` min.
+        const validStarts: Array<{ lead: any, allIds: string[] }> = [];
+        for (let i = 0; i <= filtered.length - slotsNeeded; i++) {
+            let ok = true;
+            const group = [filtered[i]];
+            for (let j = 1; j < slotsNeeded; j++) {
+                const prev = new Date(filtered[i + j - 1].get('Date') as string).getTime();
+                const next = new Date(filtered[i + j].get('Date') as string).getTime();
+                if (next - prev !== slotGranularity * 60000) { ok = false; break; }
+                group.push(filtered[i + j]);
+            }
+            if (ok) validStarts.push({ lead: filtered[i], allIds: group.map(r => r.id) });
+        }
 
-        const optionsMap: Record<number, string> = {};
+        const validRecords = validStarts.slice(0, 10);
+        if (validRecords.length === 0) {
+            const svcTxt = serviceLabel ? ` para "${serviceLabel}"` : '';
+            return `No hay citas disponibles${agenda ? ` en la agenda "${agenda}"` : ''}${svcTxt} para esa fecha (${dateFilter || 'próximamente'}).`;
+        }
+
+        const optionsMap: Record<number, string[]> = {};
         const rows: any[] = [];
         let responseText = "Huecos disponibles:\n";
 
-        validRecords.forEach((r, index) => {
+        validRecords.forEach(({ lead, allIds }, index) => {
             const optionNum = index + 1;
-            const dateObj = new Date(r.get('Date') as string);
-            optionsMap[optionNum] = r.id;
+            const dateObj = new Date(lead.get('Date') as string);
+            optionsMap[optionNum] = allIds;
 
             const dateStr = dateObj.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', weekday: 'short', day: 'numeric', month: 'short' });
             const timeStr = dateObj.toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit' });
@@ -2227,10 +2290,10 @@ async function getAvailableDays(agendaName?: string) {
     }
 }
 
-async function bookAppointment(optionIndex: number, clientPhone: string, clientName: string, field1: string = '', field2: string = '', field3: string = '', field4: string = '', field5: string = '') {
+async function bookAppointment(optionIndex: number, clientPhone: string, clientName: string, field1: string = '', field2: string = '', field3: string = '', field4: string = '', field5: string = '', service: string = '') {
     if (!base) return "Error BD";
 
-    console.log(`📅 [Book] Intentando reservar opción ${optionIndex} para ${clientPhone} | Datos: ${field1} | ${field2} | ${field3} | ${field4} | ${field5}`);
+    console.log(`📅 [Book] Intentando reservar opción ${optionIndex} para ${clientPhone} | Servicio: ${service || 'N/A'} | Datos: ${field1} | ${field2} | ${field3} | ${field4} | ${field5}`);
 
     // Intentar obtener cache (primero memoria, luego Airtable)
     const userMap = await getAppointmentCache(clientPhone);
@@ -2242,8 +2305,9 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
 
     console.log(`📅 [Book] Opciones disponibles: ${JSON.stringify(userMap)}`);
 
-    const realId = userMap[optionIndex];
-    if (!realId) return `❌ Error: La opción ${optionIndex} no es válida.`;
+    const slotIds = normalizeSlotIds(userMap[optionIndex]);
+    if (slotIds.length === 0) return `❌ Error: La opción ${optionIndex} no es válida.`;
+    const realId = slotIds[0];   // slot líder (el primero del bloque)
 
     // Validación de inputs antes de tocar Airtable
     const cleanedPhone = cleanNumber(clientPhone);
@@ -2291,6 +2355,21 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
             console.log(`📅 [Book] Actualizando cita a Booked...`);
+
+            // Calcular duración total de la cita (en minutos) para guardar en DurationMin
+            // Si hay varios slots, la duración total es slotIds.length × granularidad de la agenda.
+            // Esto permite a cancelAppointment liberar TODOS los slots del bloque.
+            const allAgendas = await getAgendas();
+            const slotAgendaName = (record.get('Agenda') as string) || '';
+            const matchedAg = slotAgendaName ? allAgendas.find(a => a.name === slotAgendaName) : allAgendas[0];
+            const granularity = matchedAg?.duration || 60;
+            // Prioridad: (a) servicio seleccionado, (b) slotIds.length × granularity, (c) granularity
+            let durationMin = slotIds.length > 1 ? slotIds.length * granularity : granularity;
+            if (service && matchedAg) {
+                const svc = matchedAg.services.find(s => s.name === service);
+                if (svc) durationMin = svc.durationMin;
+            }
+
             // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
             // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra, Notas) por compatibilidad,
             // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels
@@ -2304,9 +2383,25 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                     "Marca": field2,
                     "Modelo": field3,
                     "Extra": field4,
-                    "Notas": field5
+                    "Notas": field5,
+                    "DurationMin": durationMin   // duración total de la cita en minutos
                 }
             }]);
+
+            // Si la cita ocupa múltiples slots, marcar los secundarios como Booked también.
+            // No guardan datos del cliente — solo Status=Booked para bloquear el hueco.
+            if (slotIds.length > 1) {
+                const secondaryIds = slotIds.slice(1);
+                for (let i = 0; i < secondaryIds.length; i += 10) {
+                    await base!.table('Appointments').update(
+                        secondaryIds.slice(i, i + 10).map(id => ({
+                            id,
+                            fields: { "Status": "Booked", "ClientPhone": cleanedPhone }
+                        }))
+                    );
+                }
+                console.log(`📅 [Book] ${secondaryIds.length} slot(s) secundario(s) bloqueados`);
+            }
 
             // VERIFICACIÓN POST-UPDATE: re-leer y comprobar que somos el dueño.
             // Si otra instancia (o un timing extremo) sobreescribió, detectamos.
@@ -2439,10 +2534,10 @@ async function cancelAppointment(clientPhone: string) {
     if (!base) return "Error BD";
     const clean = cleanNumber(clientPhone);
     try {
-        // Buscar la cita reservada más próxima del cliente
+        // Buscar el slot LÍDER (el que tiene datos del cliente: ClientName, DurationMin, etc.)
         const now = new Date().toISOString();
         const records = await base('Appointments').select({
-            filterByFormula: `AND({Status} = 'Booked', {ClientPhone} = '${clean}', {Date} >= '${now}')`,
+            filterByFormula: `AND({Status} = 'Booked', {ClientPhone} = '${clean}', {ClientName} != '', {Date} >= '${now}')`,
             sort: [{ field: "Date", direction: "asc" }],
             maxRecords: 1
         }).firstPage();
@@ -2452,16 +2547,41 @@ async function cancelAppointment(clientPhone: string) {
         }
 
         const record = records[0];
-        const dateVal = new Date(record.get('Date') as string);
-        const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
+        const leadDate = new Date(record.get('Date') as string);
+        const humanDate = leadDate.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
+        // Leer DurationMin para saber cuántos slots ocupa el bloque
+        const durationMin = Number(record.get('DurationMin') || 0);
+
+        // Resetear slot líder
         await base('Appointments').update([{
             id: record.id,
-            fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "", "Notas": "" }
+            fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "", "Notas": "", "DurationMin": 0 }
         }]);
 
+        // Si la cita ocupa múltiples slots, liberar también los secundarios
+        // (están en el rango [leadDate, leadDate + durationMin) con Status=Booked y mismo ClientPhone)
+        if (durationMin > 0) {
+            const endDate = new Date(leadDate.getTime() + durationMin * 60000).toISOString();
+            const secondaries = await base('Appointments').select({
+                filterByFormula: `AND({Status}='Booked', {ClientPhone}='${clean}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`,
+                fields: []
+            }).all();
+            if (secondaries.length > 0) {
+                for (let i = 0; i < secondaries.length; i += 10) {
+                    await base('Appointments').update(
+                        secondaries.slice(i, i + 10).map(r => ({
+                            id: r.id,
+                            fields: { "Status": "Available", "ClientPhone": "", "DurationMin": 0 }
+                        }))
+                    );
+                }
+                console.log(`📅 [Cancel] ${secondaries.length} slot(s) secundario(s) liberados`);
+            }
+        }
+
         metrics.appointmentsCancelled++;
-        console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate}`);
+        console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate} (${durationMin}min)`);
         return `✅ CITA_CANCELADA: ${humanDate}`;
     } catch (e: any) {
         console.error(`❌ [Cancel] Error:`, e.message);
@@ -2678,21 +2798,43 @@ REGLAS:
 - Si el cliente menciona algo que claramente cae en uno, deriva sin preguntar de nuevo.
 - Tras llamar a assign_department, llama también a stop_conversation.`;
 
-            // Instrucciones de agendas — solo si hay MÁS DE UNA agenda de citas configurada.
-            // Con una sola agenda (o ninguna) el bot funciona como siempre, sin preguntar nada.
+            // Instrucciones de agendas — se inyectan cuando hay >1 agenda O cuando alguna agenda tiene servicios.
             let agendasInstr = '';
-            if (agendas.length > 1) {
-                const agendaLines = agendas.map(a => `- "${a.name}"${a.description ? `: ${a.description}` : ''}`).join('\n');
-                agendasInstr = `\n\n## 🗂️ AGENDAS / LÍNEAS DE CITA
-Este negocio tiene VARIAS agendas de citas independientes, cada una con su propio horario.
-Cada agenda lleva (tras los dos puntos) una descripción de los servicios que cubre:
-${agendaLines}
+            const anyHasServices = agendas.some(a => a.services && a.services.length > 0);
+            if (agendas.length > 1 || anyHasServices) {
+                let agendaLines = '';
+                for (const a of agendas) {
+                    agendaLines += `- "${a.name}"${a.description ? `: ${a.description}` : ''}`;
+                    if (a.services && a.services.length > 0) {
+                        agendaLines += `\n  Tipos de servicio disponibles (usa el nombre EXACTO en el parámetro \`service\`):\n`;
+                        agendaLines += a.services.map(s => `  • "${s.name}" → ${s.durationMin} minutos`).join('\n');
+                    }
+                    agendaLines += '\n';
+                }
 
+                if (agendas.length > 1) {
+                    agendasInstr = `\n\n## 🗂️ AGENDAS / LÍNEAS DE CITA
+Este negocio tiene VARIAS agendas de citas independientes, cada una con su propio horario.
+${agendaLines}
 Cuando un cliente quiera reservar una cita:
 1. DEDUCE de la conversación a qué agenda corresponde su petición, usando la descripción de cada agenda para emparejar el servicio que menciona el cliente.
 2. Si NO lo tienes claro, PREGÚNTALE para cuál de las agendas quiere la cita, mencionándoselas por su nombre.
 3. Pasa SIEMPRE el nombre EXACTO de la agenda elegida (tal cual aparece arriba) en el parámetro \`agenda\` de get_available_days y get_available_appointments.
 NUNCA muestres huecos sin haber determinado primero la agenda.`;
+                } else {
+                    // Solo 1 agenda pero tiene servicios: inyectar solo las instrucciones de servicio
+                    agendasInstr = `\n\n## 🔧 TIPOS DE SERVICIO
+${agendaLines}`;
+                }
+
+                if (anyHasServices) {
+                    agendasInstr += `
+
+Cuando el cliente indique qué tipo de servicio necesita:
+1. PREGUNTA el tipo de servicio si el cliente no lo ha mencionado y hay más de uno disponible.
+2. Pasa el nombre EXACTO del servicio elegido en el parámetro \`service\` de get_available_appointments y book_appointment.
+3. Esto garantiza que solo se muestren huecos con disponibilidad suficiente para ese servicio.`;
+                }
             }
 
             // RAG: buscar info relevante en la base de conocimiento del negocio
@@ -2738,16 +2880,17 @@ NUNCA muestres huecos sin haber determinado primero la agenda.`;
                 tools: [{
                     functionDeclarations: [
                         { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date. If the business has multiple agendas/service lines, pass the `agenda` parameter with the exact agenda name.", parameters: { type: SchemaType.OBJECT, properties: { agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line to filter slots. Only pass it if the business has multiple agendas; leave empty otherwise." } }, required: [] } },
-                        { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day. If the business has multiple agendas/service lines, pass the same `agenda` used in get_available_days.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." }, agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line. Only pass it if the business has multiple agendas; leave empty otherwise." } }, required: ["date"] } },
+                        { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day. Pass `service` (exact service name) if the client mentioned a specific service type — this ensures only slots with enough consecutive availability are shown.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." }, agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line. Only pass it if the business has multiple agendas; leave empty otherwise." }, service: { type: SchemaType.STRING, description: "Exact name of the service type the client wants (e.g. 'Avería', 'Revisión'). Leave empty if not specified or no services configured." } }, required: ["date"] } },
                         { name: "get_client_vehicles", description: "Get the vehicles already registered for this client. Call this when the client wants to book an appointment, BEFORE asking for the vehicle data — the client may already have one or more vehicles registered. A client can have multiple vehicles.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         {
                             name: "book_appointment",
-                            description: `Book an appointment using the slot index number. ONLY call this when you have ALL the required data from the client. The 5 custom fields adapt to the sector configured. After booking, ALWAYS call stop_conversation.`,
+                            description: `Book an appointment using the slot index number. ONLY call this when you have ALL the required data from the client. The 5 custom fields adapt to the sector configured. Pass \`service\` if the client chose a specific service type. After booking, ALWAYS call stop_conversation.`,
                             parameters: {
                                 type: SchemaType.OBJECT,
                                 properties: {
                                     optionIndex: { type: SchemaType.NUMBER, description: "Index number chosen by the client from the list (e.g., 1, 2, 3)" },
                                     clientName: { type: SchemaType.STRING, description: "Full name of the client for the appointment." },
+                                    service: { type: SchemaType.STRING, description: "Exact name of the service type chosen by the client (e.g. 'Avería', 'Revisión'). Only pass it if services are configured for the agenda; leave empty otherwise." },
                                     field1: { type: SchemaType.STRING, description: fieldLabels.field1.description },
                                     field2: { type: SchemaType.STRING, description: fieldLabels.field2.description },
                                     field3: { type: SchemaType.STRING, description: fieldLabels.field3.description },
@@ -2770,7 +2913,7 @@ NUNCA muestres huecos sin haber determinado primero la agenda.`;
                 let toolResult = "";
 
                 if (call.name === "get_available_days") toolResult = await getAvailableDays(args.agenda);
-                else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date, args.agenda);
+                else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date, args.agenda, args.service);
                 else if (call.name === "get_client_vehicles") toolResult = await getClientVehicles(clean);
                 else if (call.name === "book_appointment") toolResult = await bookAppointment(
                     Number(args.optionIndex),
@@ -2782,7 +2925,8 @@ NUNCA muestres huecos sin haber determinado primero la agenda.`;
                     args.field2 || args.carBrand || '',
                     args.field3 || args.carModel || '',
                     args.field4 || '',
-                    args.field5 || ''
+                    args.field5 || '',
+                    args.service || ''
                 );
                 else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
                 else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
@@ -3353,7 +3497,14 @@ app.post('/api/schedule', async (req, res) => {
             days: a.days.map((d: any) => Number(d)),
             startTime: a.startTime || '09:00',
             endTime: a.endTime || '18:00',
-            duration: Number(a.duration) || 60
+            duration: Number(a.duration) || 60,
+            services: Array.isArray(a.services)
+                ? a.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any) => ({
+                    id: String(s.id || s.name),
+                    name: String(s.name).trim(),
+                    durationMin: Number(s.durationMin) || Number(a.duration) || 60
+                }))
+                : []
         }));
     if (clean.length === 0) {
         return res.status(400).json({ error: "Cada agenda necesita nombre y al menos un día" });
