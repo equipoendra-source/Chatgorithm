@@ -2682,6 +2682,72 @@ async function cancelAppointment(clientPhone: string) {
     }
 }
 
+// Cancela los recordatorios de cita (cita_24h, cita_1h...) pendientes de un cliente.
+// FIND('cita', {type})>0 → solo recordatorios cita_* (no toca los postventa_*).
+async function cancelPendingCitaReminders(phone: string): Promise<number> {
+    if (!base) return 0;
+    const clean = cleanNumber(phone);
+    try {
+        const pend = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND({phone}='${clean}', {status}='pending', FIND('cita', {type})>0)`
+        }).all();
+        for (let i = 0; i < pend.length; i += 10) {
+            await base(TABLE_SCHEDULED_NOTIFICATIONS).update(
+                pend.slice(i, i + 10).map(r => ({ id: r.id, fields: { status: 'cancelled' as const } }))
+            );
+            await delay(200);
+        }
+        if (pend.length > 0) console.log(`📋 [CancelReply] ${pend.length} recordatorio(s) de cita cancelado(s) para ${clean}`);
+        return pend.length;
+    } catch (e: any) {
+        console.error('[CancelReply] Error cancelando recordatorios de cita:', e.message);
+        return 0;
+    }
+}
+
+// Gestiona la respuesta "NO" del cliente a un recordatorio de cita.
+// El recordatorio dice literalmente "responda NO para liberar el hueco".
+// SOLO se trata como cancelación si el cliente recibió un recordatorio de cita
+// recientemente (ventana de 30h) — así un "no" en conversación normal NO cancela
+// nada por error. Devuelve true si se ha gestionado la cancelación.
+async function handleAppointmentCancelReply(phone: string, originPhoneId: string): Promise<boolean> {
+    if (!base) return false;
+    const clean = cleanNumber(phone);
+    try {
+        // 1. ¿Recibió un recordatorio de cita en las últimas 30h? (desambigua el "NO")
+        //    Se compara la fecha en JS para no depender del tipo del campo {sentAt}.
+        const recentReminders = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND({phone}='${clean}', {status}='sent', FIND('cita', {type})>0)`,
+            sort: [{ field: 'sentAt', direction: 'desc' }],
+            maxRecords: 5
+        }).firstPage();
+        const cutoffMs = Date.now() - 30 * 60 * 60 * 1000;
+        const hasRecentReminder = recentReminders.some(r => {
+            const sentAt = r.get('sentAt') as string;
+            const t = sentAt ? new Date(sentAt).getTime() : NaN;
+            return !isNaN(t) && t >= cutoffMs;
+        });
+        if (!hasRecentReminder) return false; // sin recordatorio reciente → "no" normal
+
+        // 2. Cancelar la cita (libera el slot líder y los secundarios del bloque)
+        const result = await cancelAppointment(clean);
+        if (typeof result === 'string' && result.startsWith('✅ CITA_CANCELADA')) {
+            // 3. Cancelar los recordatorios de cita pendientes (ej. el de 1h)
+            await cancelPendingCitaReminders(clean);
+            // 4. Confirmar al cliente
+            await sendWhatsAppText(clean, '✅ Hemos cancelado su cita y liberado el hueco. Si quiere reprogramar, escríbanos cuando le venga bien. ¡Gracias por avisar!', originPhoneId);
+            console.log(`📅 [CancelReply] Cita cancelada por respuesta "NO" de ${clean}`);
+            return true;
+        }
+        // Recibió recordatorio pero ya no hay cita activa: no hacemos nada raro,
+        // dejamos que el mensaje siga el flujo normal.
+        return false;
+    } catch (e: any) {
+        console.error('[CancelReply] Error gestionando cancelación por "NO":', e.message);
+        return false;
+    }
+}
+
 async function assignDepartment(clientPhone: string, department: string) {
     if (!base) return "Error BD";
     try {
@@ -4085,6 +4151,19 @@ app.post('/webhook', async (req, res) => {
                 try { await setContactMarketingOptIn(from, false, 'whatsapp_baja'); } catch (e: any) { console.error('[Campaigns] Error opt-out marketing:', e.message); }
                 return res.sendStatus(200);
             }
+            // --- Cancelación de cita por respuesta "NO" al recordatorio ---
+            // El recordatorio de cita pide literalmente "responda NO para liberar el hueco".
+            // Se gestiona aquí, ANTES del bot, para que funcione aunque la IA esté apagada.
+            // handleAppointmentCancelReply solo cancela si hay un recordatorio reciente,
+            // así un "no" en conversación normal no libera ninguna cita por error.
+            if (/^NO[.!,\s]*$/.test(upperText)) {
+                const cancelled = await handleAppointmentCancelReply(from, originPhoneId);
+                if (cancelled) {
+                    console.log(`📅 [WEBHOOK] Cita liberada por respuesta "NO" de ${from}`);
+                    return res.sendStatus(200);
+                }
+            }
+
             // --- Detección opt-in marketing por respuesta explícita ---
             const optInKeywords = ['SI PROMOCIONES', 'SÍ PROMOCIONES', 'ACEPTO PROMOCIONES', 'ALTA PROMOCIONES', 'ALTA MARKETING', 'YES PROMO'];
             if (optInKeywords.some(k => upperText === k)) {
