@@ -2572,17 +2572,20 @@ async function processAIInner(
                 ? `\n\n⚠️ DATO DEL CLIENTE: Su nombre ya es conocido: "${contactName}". NO le preguntes el nombre.`
                 : `\n\n⚠️ DATO DEL CLIENTE: Nombre desconocido. Si va a reservar cita, pregúntale su nombre antes de llamar a book_appointment.`;
 
-            // Inyectar al prompt los datos personalizados que tiene que pedir antes de reservar (según sector)
+            // Inyectar al prompt los datos personalizados que tiene que pedir antes de reservar (según sector).
+            // Cada campo se marca OBLIGATORIO u OPCIONAL según su flag `required` configurado por sector.
+            const fieldKeys = ['field1', 'field2', 'field3', 'field4', 'field5'] as const;
+            const fieldsList = fieldKeys
+                .map((k, i) => `${i + 1}. **${fieldLabels[k].label}**${fieldLabels[k].required ? '' : ' (opcional)'} — ${fieldLabels[k].description}`)
+                .join('\n');
+            const requiredLabels = fieldKeys.filter(k => fieldLabels[k].required).map(k => fieldLabels[k].label);
+            const optionalLabels = fieldKeys.filter(k => !fieldLabels[k].required).map(k => fieldLabels[k].label);
             const fieldsInstr = `\n\n## 📋 DATOS QUE DEBES PEDIR ANTES DE RESERVAR CITA (en este orden):
-1. **${fieldLabels.field1.label}** — ${fieldLabels.field1.description}
-2. **${fieldLabels.field2.label}** — ${fieldLabels.field2.description}
-3. **${fieldLabels.field3.label}** — ${fieldLabels.field3.description}
-4. **${fieldLabels.field4.label}** — ${fieldLabels.field4.description}
-5. **${fieldLabels.field5.label}** (opcional) — ${fieldLabels.field5.description}
+${fieldsList}
 
 Cuando llames a book_appointment, PASA esos datos en los parámetros field1, field2, field3, field4, field5 (en ese orden).
 🚨 PIDE TODOS LOS DATOS QUE FALTEN DE GOLPE, EN UN ÚNICO MENSAJE numerado. NUNCA los pidas uno a uno (eso obliga al cliente a responder muchas veces y se pierde). Si el cliente solo envía algunos, agradécelos y pide ÚNICAMENTE los que falten, otra vez todos juntos en un mensaje.
-Los datos 1 a 4 son OBLIGATORIOS para poder reservar. El dato 5 es opcional — si el cliente no quiere darlo, no insistas.
+Datos OBLIGATORIOS para poder reservar: ${requiredLabels.join(', ') || '(ninguno)'}.${optionalLabels.length ? ` Datos OPCIONALES (no insistas si el cliente no quiere darlos): ${optionalLabels.join(', ')}.` : ''}
 
 ## 🚗 VEHÍCULOS DEL CLIENTE (un cliente puede tener VARIOS)
 Un mismo cliente puede tener varios vehículos registrados (varias matrículas/unidades).
@@ -2671,7 +2674,7 @@ REGLAS:
                                     field4: { type: SchemaType.STRING, description: fieldLabels.field4.description },
                                     field5: { type: SchemaType.STRING, description: fieldLabels.field5.description }
                                 },
-                                required: ["optionIndex", "clientName", "field1", "field2", "field3", "field4"]
+                                required: ["optionIndex", "clientName", ...fieldKeys.filter(k => fieldLabels[k].required)]
                             }
                         },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
@@ -5611,72 +5614,74 @@ app.delete('/api/bot/knowledge/:source', async (req, res) => {
 // ==========================================
 
 // Plantillas predefinidas de los 5 campos según sector
-type FieldLabel = { label: string; placeholder: string; key: string; description: string };
+// `required`: si es true, el bot DEBE conseguir este dato antes de reservar.
+// Configurable por sector — cada negocio decide qué campos son imprescindibles.
+type FieldLabel = { label: string; placeholder: string; key: string; description: string; required: boolean };
 type SectorFieldLabels = { field1: FieldLabel; field2: FieldLabel; field3: FieldLabel; field4: FieldLabel; field5: FieldLabel };
 
 const SECTOR_FIELD_LABELS: Record<string, SectorFieldLabels> = {
     taller: {
-        field1: { label: 'Matrícula', placeholder: 'Ej: 1234ABC', key: 'licensePlate', description: 'Matrícula del vehículo (ej: 1234ABC)' },
-        field2: { label: 'Marca', placeholder: 'Ej: Ford', key: 'carBrand', description: 'Marca del vehículo (ej: Ford, Toyota, BMW)' },
-        field3: { label: 'Modelo', placeholder: 'Ej: Focus', key: 'carModel', description: 'Modelo del vehículo (ej: Focus, Corolla)' },
-        field4: { label: 'Kilómetros', placeholder: 'Ej: 80.000 km', key: 'yearKms', description: 'Kilómetros actuales del vehículo (ej: 80.000 km)' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Matrícula', placeholder: 'Ej: 1234ABC', key: 'licensePlate', description: 'Matrícula del vehículo (ej: 1234ABC)', required: true },
+        field2: { label: 'Marca', placeholder: 'Ej: Ford', key: 'carBrand', description: 'Marca del vehículo (ej: Ford, Toyota, BMW)', required: true },
+        field3: { label: 'Modelo', placeholder: 'Ej: Focus', key: 'carModel', description: 'Modelo del vehículo (ej: Focus, Corolla)', required: true },
+        field4: { label: 'Kilómetros', placeholder: 'Ej: 80.000 km', key: 'yearKms', description: 'Kilómetros actuales del vehículo (ej: 80.000 km)', required: true },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     clinica_dental: {
-        field1: { label: 'Paciente', placeholder: 'Nombre del paciente', key: 'patientName', description: 'Nombre completo del paciente' },
-        field2: { label: 'Tratamiento', placeholder: 'Ej: Limpieza, ortodoncia', key: 'treatment', description: 'Tratamiento o motivo de la visita' },
-        field3: { label: 'Mutua / Seguro', placeholder: 'Ej: Sanitas, Adeslas', key: 'insurance', description: 'Mutua o seguro médico (opcional)' },
-        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir (opcional)' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Paciente', placeholder: 'Nombre del paciente', key: 'patientName', description: 'Nombre completo del paciente', required: true },
+        field2: { label: 'Tratamiento', placeholder: 'Ej: Limpieza, ortodoncia', key: 'treatment', description: 'Tratamiento o motivo de la visita', required: true },
+        field3: { label: 'Mutua / Seguro', placeholder: 'Ej: Sanitas, Adeslas', key: 'insurance', description: 'Mutua o seguro médico', required: false },
+        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir', required: false },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     peluqueria: {
-        field1: { label: 'Cliente', placeholder: 'Nombre del cliente', key: 'clientName', description: 'Nombre del cliente' },
-        field2: { label: 'Servicio', placeholder: 'Ej: Corte, color, mechas', key: 'service', description: 'Servicio que solicita' },
-        field3: { label: 'Estilista', placeholder: 'Estilista preferido', key: 'stylist', description: 'Estilista preferido (opcional)' },
-        field4: { label: 'Producto / Color', placeholder: 'Ej: tinte 7.0', key: 'productColor', description: 'Producto o color preferido (opcional)' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Cliente', placeholder: 'Nombre del cliente', key: 'clientName', description: 'Nombre del cliente', required: true },
+        field2: { label: 'Servicio', placeholder: 'Ej: Corte, color, mechas', key: 'service', description: 'Servicio que solicita', required: true },
+        field3: { label: 'Estilista', placeholder: 'Estilista preferido', key: 'stylist', description: 'Estilista preferido', required: false },
+        field4: { label: 'Producto / Color', placeholder: 'Ej: tinte 7.0', key: 'productColor', description: 'Producto o color preferido', required: false },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     clinica_medica: {
-        field1: { label: 'Paciente', placeholder: 'Nombre del paciente', key: 'patientName', description: 'Nombre completo del paciente' },
-        field2: { label: 'Especialidad', placeholder: 'Ej: Fisioterapia, traumatología', key: 'specialty', description: 'Especialidad solicitada' },
-        field3: { label: 'Mutua / Seguro', placeholder: 'Ej: Sanitas, Mapfre', key: 'insurance', description: 'Mutua o seguro médico (opcional)' },
-        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir (opcional)' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Paciente', placeholder: 'Nombre del paciente', key: 'patientName', description: 'Nombre completo del paciente', required: true },
+        field2: { label: 'Especialidad', placeholder: 'Ej: Fisioterapia, traumatología', key: 'specialty', description: 'Especialidad solicitada', required: true },
+        field3: { label: 'Mutua / Seguro', placeholder: 'Ej: Sanitas, Mapfre', key: 'insurance', description: 'Mutua o seguro médico', required: false },
+        field4: { label: 'Doctor', placeholder: 'Doctor preferido', key: 'doctor', description: 'Doctor con el que prefiere ir', required: false },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     gestoria: {
-        field1: { label: 'Nombre', placeholder: 'Nombre completo', key: 'clientName', description: 'Nombre completo del cliente' },
-        field2: { label: 'Tipo de gestión', placeholder: 'Ej: Renta, sociedad', key: 'serviceType', description: 'Tipo de gestión solicitada' },
-        field3: { label: 'NIF / CIF', placeholder: 'Ej: 12345678A', key: 'taxId', description: 'NIF o CIF del cliente' },
-        field4: { label: 'Email', placeholder: 'Ej: cliente@email.com', key: 'email', description: 'Email de contacto (opcional)' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Nombre', placeholder: 'Nombre completo', key: 'clientName', description: 'Nombre completo del cliente', required: true },
+        field2: { label: 'Tipo de gestión', placeholder: 'Ej: Renta, sociedad', key: 'serviceType', description: 'Tipo de gestión solicitada', required: true },
+        field3: { label: 'NIF / CIF', placeholder: 'Ej: 12345678A', key: 'taxId', description: 'NIF o CIF del cliente', required: true },
+        field4: { label: 'Email', placeholder: 'Ej: cliente@email.com', key: 'email', description: 'Email de contacto', required: false },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     inmobiliaria: {
-        field1: { label: 'Cliente', placeholder: 'Nombre del cliente', key: 'clientName', description: 'Nombre del cliente' },
-        field2: { label: 'Tipo de propiedad', placeholder: 'Ej: Piso, casa, local', key: 'propertyType', description: 'Tipo de propiedad de interés' },
-        field3: { label: 'Zona', placeholder: 'Ej: Centro, Salamanca', key: 'area', description: 'Zona de interés' },
-        field4: { label: 'Presupuesto', placeholder: 'Ej: 200-300k €', key: 'budget', description: 'Presupuesto orientativo' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Cliente', placeholder: 'Nombre del cliente', key: 'clientName', description: 'Nombre del cliente', required: true },
+        field2: { label: 'Tipo de propiedad', placeholder: 'Ej: Piso, casa, local', key: 'propertyType', description: 'Tipo de propiedad de interés', required: true },
+        field3: { label: 'Zona', placeholder: 'Ej: Centro, Salamanca', key: 'area', description: 'Zona de interés', required: true },
+        field4: { label: 'Presupuesto', placeholder: 'Ej: 200-300k €', key: 'budget', description: 'Presupuesto orientativo', required: true },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     academia: {
-        field1: { label: 'Alumno', placeholder: 'Nombre del alumno', key: 'studentName', description: 'Nombre del alumno' },
-        field2: { label: 'Curso', placeholder: 'Ej: Inglés B1, oposiciones', key: 'course', description: 'Curso de interés' },
-        field3: { label: 'Nivel / Edad', placeholder: 'Ej: 12 años, B1', key: 'levelAge', description: 'Nivel actual o edad del alumno' },
-        field4: { label: 'Email contacto', placeholder: 'Ej: padre@email.com', key: 'email', description: 'Email de contacto del padre/madre o alumno (opcional)' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Alumno', placeholder: 'Nombre del alumno', key: 'studentName', description: 'Nombre del alumno', required: true },
+        field2: { label: 'Curso', placeholder: 'Ej: Inglés B1, oposiciones', key: 'course', description: 'Curso de interés', required: true },
+        field3: { label: 'Nivel / Edad', placeholder: 'Ej: 12 años, B1', key: 'levelAge', description: 'Nivel actual o edad del alumno', required: true },
+        field4: { label: 'Email contacto', placeholder: 'Ej: padre@email.com', key: 'email', description: 'Email de contacto del padre/madre o alumno', required: false },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     veterinario: {
-        field1: { label: 'Mascota', placeholder: 'Ej: Firulais', key: 'petName', description: 'Nombre de la mascota' },
-        field2: { label: 'Especie / raza', placeholder: 'Ej: Yorkshire, gato siamés', key: 'species', description: 'Especie y raza de la mascota' },
-        field3: { label: 'Motivo', placeholder: 'Ej: Vacuna anual, revisión', key: 'reason', description: 'Motivo de la visita' },
-        field4: { label: 'Edad', placeholder: 'Ej: 3 años', key: 'age', description: 'Edad aproximada de la mascota' },
-        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
+        field1: { label: 'Mascota', placeholder: 'Ej: Firulais', key: 'petName', description: 'Nombre de la mascota', required: true },
+        field2: { label: 'Especie / raza', placeholder: 'Ej: Yorkshire, gato siamés', key: 'species', description: 'Especie y raza de la mascota', required: true },
+        field3: { label: 'Motivo', placeholder: 'Ej: Vacuna anual, revisión', key: 'reason', description: 'Motivo de la visita', required: true },
+        field4: { label: 'Edad', placeholder: 'Ej: 3 años', key: 'age', description: 'Edad aproximada de la mascota', required: true },
+        field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false }
     },
     otro: {
-        field1: { label: 'Campo 1', placeholder: 'Información 1', key: 'field1', description: 'Primer dato del cliente' },
-        field2: { label: 'Campo 2', placeholder: 'Información 2', key: 'field2', description: 'Segundo dato del cliente' },
-        field3: { label: 'Campo 3', placeholder: 'Información 3', key: 'field3', description: 'Tercer dato del cliente' },
-        field4: { label: 'Campo 4', placeholder: 'Información 4', key: 'field4', description: 'Cuarto dato del cliente' },
-        field5: { label: 'Campo 5', placeholder: 'Información 5', key: 'field5', description: 'Quinto dato del cliente' }
+        field1: { label: 'Campo 1', placeholder: 'Información 1', key: 'field1', description: 'Primer dato del cliente', required: true },
+        field2: { label: 'Campo 2', placeholder: 'Información 2', key: 'field2', description: 'Segundo dato del cliente', required: true },
+        field3: { label: 'Campo 3', placeholder: 'Información 3', key: 'field3', description: 'Tercer dato del cliente', required: true },
+        field4: { label: 'Campo 4', placeholder: 'Información 4', key: 'field4', description: 'Cuarto dato del cliente', required: false },
+        field5: { label: 'Campo 5', placeholder: 'Información 5', key: 'field5', description: 'Quinto dato del cliente', required: false }
     }
 };
 
@@ -5697,8 +5702,14 @@ async function getFieldLabels(): Promise<SectorFieldLabels> {
         if (parsed?.field1?.label && parsed?.field2?.label && parsed?.field3?.label && parsed?.field4?.label) {
             // Si falta field5 (config antigua), añadimos uno por defecto
             if (!parsed.field5?.label) {
-                parsed.field5 = { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' };
+                parsed.field5 = { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales', required: false };
             }
+            // Compatibilidad con configs antiguas sin el flag `required`:
+            // por defecto los 3 primeros campos son obligatorios y los 2 últimos opcionales.
+            const defaultRequired: Record<string, boolean> = { field1: true, field2: true, field3: true, field4: false, field5: false };
+            (['field1', 'field2', 'field3', 'field4', 'field5'] as const).forEach((f) => {
+                if (parsed[f] && typeof parsed[f].required !== 'boolean') parsed[f].required = defaultRequired[f];
+            });
             return parsed as SectorFieldLabels;
         }
         return fallback;
