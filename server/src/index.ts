@@ -1571,12 +1571,23 @@ async function loadBotGloballyEnabled(): Promise<void> {
 // Cargar al arranque (después de que base esté inicializado)
 setTimeout(() => { loadBotGloballyEnabled().catch(() => {}); }, 1000);
 
+// Caché en memoria del prompt — antes se consultaba Airtable en cada mensaje del cliente.
+// El template del prompt cambia rara vez (lo edita el usuario desde Settings),
+// así que TTL de 5 min + invalidación manual al guardar es suficiente.
+// La fecha SIEMPRE se regenera abajo, fuera del caché.
+let systemPromptCache: { value: string; loadedAt: number } | null = null;
+const BOT_SETTINGS_CACHE_TTL = 5 * 60 * 1000;
+
 async function getSystemPrompt() {
     let promptTemplate = BASE_SYSTEM_PROMPT;
-    if (base) {
+    const nowMs = Date.now();
+    if (systemPromptCache && (nowMs - systemPromptCache.loadedAt) < BOT_SETTINGS_CACHE_TTL) {
+        promptTemplate = systemPromptCache.value;
+    } else if (base) {
         try {
             const records = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage();
             if (records.length > 0) promptTemplate = records[0].get('Value') as string;
+            systemPromptCache = { value: promptTemplate, loadedAt: nowMs };
         } catch (e) { console.error('[BotSettings] Error cargando prompt personalizado, usando prompt por defecto:', e); }
     }
     const now = new Date().toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
@@ -2562,11 +2573,19 @@ async function processAIInner(
 
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-            const history = await getChatHistory(clean, text, 25, originPhoneId);
+            // Las 5 llamadas son independientes — lanzarlas en paralelo ahorra ~1-2s por turno.
+            // searchKnowledge tiene su propio try/catch interno y devuelve [] si falla.
+            const [history, rawPrompt, fieldLabels, departmentLabels, relevantChunks] = await Promise.all([
+                getChatHistory(clean, text, 25, originPhoneId),
+                getSystemPrompt(),
+                getFieldLabels(),
+                getDepartmentLabels(),
+                searchKnowledge(text, 4).catch((e: any) => {
+                    console.error('[RAG] Error buscando contexto:', e.message);
+                    return [] as { text: string; source: string; score: number }[];
+                }),
+            ]);
 
-            const rawPrompt = await getSystemPrompt();
-            const fieldLabels = await getFieldLabels();
-            const departmentLabels = await getDepartmentLabels();
             const nombreConocido = contactName && contactName !== "Cliente";
             const nombreContexto = nombreConocido
                 ? `\n\n⚠️ DATO DEL CLIENTE: Su nombre ya es conocido: "${contactName}". NO le preguntes el nombre.`
@@ -2615,18 +2634,13 @@ REGLAS:
 - Si el cliente menciona algo que claramente cae en uno, deriva sin preguntar de nuevo.
 - Tras llamar a assign_department, llama también a stop_conversation.`;
 
-            // RAG: buscar info relevante en la base de conocimiento del negocio
+            // RAG: relevantChunks ya viene resuelto del Promise.all de arriba
             let ragContext = '';
-            try {
-                const relevantChunks = await searchKnowledge(text, 4);
-                if (relevantChunks.length > 0) {
-                    ragContext = '\n\n## 📚 INFORMACIÓN RELEVANTE DEL NEGOCIO (consulta esto antes de responder):\n' +
-                        relevantChunks.map((c, i) => `[${i + 1}] (de "${c.source}"):\n${c.text}`).join('\n\n---\n\n') +
-                        '\n\nUSA esta información para responder con precisión. Si la pregunta del cliente NO está cubierta por esta información, NO te la inventes — dilo claramente y ofrece pasar a un humano.';
-                    console.log(`📚 [RAG] ${relevantChunks.length} chunks relevantes inyectados (top score: ${relevantChunks[0].score.toFixed(2)})`);
-                }
-            } catch (e: any) {
-                console.error('[RAG] Error buscando contexto:', e.message);
+            if (relevantChunks.length > 0) {
+                ragContext = '\n\n## 📚 INFORMACIÓN RELEVANTE DEL NEGOCIO (consulta esto antes de responder):\n' +
+                    relevantChunks.map((c, i) => `[${i + 1}] (de "${c.source}"):\n${c.text}`).join('\n\n---\n\n') +
+                    '\n\nUSA esta información para responder con precisión. Si la pregunta del cliente NO está cubierta por esta información, NO te la inventes — dilo claramente y ofrece pasar a un humano.';
+                console.log(`📚 [RAG] ${relevantChunks.length} chunks relevantes inyectados (top score: ${relevantChunks[0].score.toFixed(2)})`);
             }
 
             // Refuerzo anti prompt-injection: añadido al final del system prompt para que
@@ -3552,7 +3566,7 @@ app.post('/api/team/upload', teamUpload.single('file'), async (req: any, res: an
 });
 
 app.get('/api/bot-config', async (req, res) => { if (!base) return res.sendStatus(500); try { const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage(); res.json({ prompt: r.length > 0 ? r[0].get('Value') : DEFAULT_SYSTEM_PROMPT }); } catch (e) { res.status(500).json({ error: "Error" }); } });
-app.post('/api/bot-config', async (req, res) => { if (!base) return res.sendStatus(500); try { const { prompt } = req.body; const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage(); if (r.length > 0) await base('BotSettings').update([{ id: r[0].id, fields: { "Value": prompt } }]); else await base('BotSettings').create([{ fields: { "Setting": "system_prompt", "Value": prompt } }]); res.json({ success: true }); } catch (e) { res.status(500).json({ error: "Error" }); } });
+app.post('/api/bot-config', async (req, res) => { if (!base) return res.sendStatus(500); try { const { prompt } = req.body; const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'system_prompt'", maxRecords: 1 }).firstPage(); if (r.length > 0) await base('BotSettings').update([{ id: r[0].id, fields: { "Value": prompt } }]); else await base('BotSettings').create([{ fields: { "Setting": "system_prompt", "Value": prompt } }]); invalidateBotSettingsCache(); res.json({ success: true }); } catch (e) { res.status(500).json({ error: "Error" }); } });
 
 // ============================================================
 // ESTADO GLOBAL DE LAURA — toggle ON/OFF para todo el negocio
@@ -5448,11 +5462,13 @@ function invalidateKbCache() {
 async function searchKnowledge(query: string, topK = 4): Promise<{ text: string; source: string; score: number }[]> {
     if (!base) return [];
     try {
-        const queryEmbedding = await computeEmbedding(query);
-        if (!queryEmbedding) return [];
-
+        // Comprobar primero si hay KB cargada (cacheada, casi 0ms).
+        // Si no hay documentos, nos saltamos la llamada de embedding a Gemini (~500ms).
         const chunks = await getKbChunks();
         if (chunks.length === 0) return [];
+
+        const queryEmbedding = await computeEmbedding(query);
+        if (!queryEmbedding) return [];
 
         const scored = chunks.map(c => ({
             text: c.text,
@@ -5686,9 +5702,15 @@ const SECTOR_FIELD_LABELS: Record<string, SectorFieldLabels> = {
 };
 
 // Lee los field labels configurados de Airtable; fallback a taller si no hay
+let fieldLabelsCache: { value: SectorFieldLabels; loadedAt: number } | null = null;
+
 async function getFieldLabels(): Promise<SectorFieldLabels> {
     const fallback = SECTOR_FIELD_LABELS.taller;
     if (!base) return fallback;
+    const nowMs = Date.now();
+    if (fieldLabelsCache && (nowMs - fieldLabelsCache.loadedAt) < BOT_SETTINGS_CACHE_TTL) {
+        return fieldLabelsCache.value;
+    }
     try {
         const r = await base('BotSettings').select({
             filterByFormula: "{Setting} = 'field_labels'",
@@ -5710,7 +5732,9 @@ async function getFieldLabels(): Promise<SectorFieldLabels> {
             (['field1', 'field2', 'field3', 'field4', 'field5'] as const).forEach((f) => {
                 if (parsed[f] && typeof parsed[f].required !== 'boolean') parsed[f].required = defaultRequired[f];
             });
-            return parsed as SectorFieldLabels;
+            const result = parsed as SectorFieldLabels;
+            fieldLabelsCache = { value: result, loadedAt: nowMs };
+            return result;
         }
         return fallback;
     } catch {
@@ -5809,9 +5833,15 @@ function normalizeDeptLabels(parsed: any): DepartmentLabel[] | null {
     return null;
 }
 
+let departmentLabelsCache: { value: DepartmentLabel[]; loadedAt: number } | null = null;
+
 async function getDepartmentLabels(): Promise<DepartmentLabel[]> {
     const fallback = SECTOR_DEPARTMENT_LABELS.taller;
     if (!base) return fallback;
+    const nowMs = Date.now();
+    if (departmentLabelsCache && (nowMs - departmentLabelsCache.loadedAt) < BOT_SETTINGS_CACHE_TTL) {
+        return departmentLabelsCache.value;
+    }
     try {
         const r = await base('BotSettings').select({
             filterByFormula: "{Setting} = 'department_labels'",
@@ -5822,10 +5852,20 @@ async function getDepartmentLabels(): Promise<DepartmentLabel[]> {
         if (!raw) return fallback;
         const parsed = JSON.parse(raw);
         const normalized = normalizeDeptLabels(parsed);
-        return normalized || fallback;
+        const result = normalized || fallback;
+        departmentLabelsCache = { value: result, loadedAt: nowMs };
+        return result;
     } catch {
         return fallback;
     }
+}
+
+// Invalida los cachés de BotSettings. Llamar tras cualquier escritura
+// que modifique system_prompt, field_labels o department_labels.
+function invalidateBotSettingsCache() {
+    systemPromptCache = null;
+    fieldLabelsCache = null;
+    departmentLabelsCache = null;
 }
 
 // Endpoint público para el frontend (Settings UI los muestra y permite editar)
@@ -5880,6 +5920,7 @@ app.post('/api/bot/department-labels', async (req, res) => {
         } else {
             await base('BotSettings').create([{ fields: { Setting: 'department_labels', Value: json } }]);
         }
+        invalidateBotSettingsCache();
         res.json({ success: true, departments: cleaned });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
@@ -6007,6 +6048,7 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
             await base('BotSettings').create([{ fields: { Setting: 'wizard_state', Value: stateJson } }]);
         }
 
+        invalidateBotSettingsCache();
         res.json({ success: true, prompt: fullPrompt, fieldLabels: labels });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
