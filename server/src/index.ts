@@ -2577,11 +2577,12 @@ async function processAIInner(
 1. **${fieldLabels.field1.label}** — ${fieldLabels.field1.description}
 2. **${fieldLabels.field2.label}** — ${fieldLabels.field2.description}
 3. **${fieldLabels.field3.label}** — ${fieldLabels.field3.description}
-4. **${fieldLabels.field4.label}** (opcional) — ${fieldLabels.field4.description}
+4. **${fieldLabels.field4.label}** — ${fieldLabels.field4.description}
 5. **${fieldLabels.field5.label}** (opcional) — ${fieldLabels.field5.description}
 
 Cuando llames a book_appointment, PASA esos datos en los parámetros field1, field2, field3, field4, field5 (en ese orden).
-Pídelos uno a uno de forma natural, no en una sola pregunta. Los campos 4 y 5 son opcionales — si el cliente no quiere darlos, no insistas.
+🚨 PIDE TODOS LOS DATOS QUE FALTEN DE GOLPE, EN UN ÚNICO MENSAJE numerado. NUNCA los pidas uno a uno (eso obliga al cliente a responder muchas veces y se pierde). Si el cliente solo envía algunos, agradécelos y pide ÚNICAMENTE los que falten, otra vez todos juntos en un mensaje.
+Los datos 1 a 4 son OBLIGATORIOS para poder reservar. El dato 5 es opcional — si el cliente no quiere darlo, no insistas.
 
 ## 🚗 VEHÍCULOS DEL CLIENTE (un cliente puede tener VARIOS)
 Un mismo cliente puede tener varios vehículos registrados (varias matrículas/unidades).
@@ -2670,7 +2671,7 @@ REGLAS:
                                     field4: { type: SchemaType.STRING, description: fieldLabels.field4.description },
                                     field5: { type: SchemaType.STRING, description: fieldLabels.field5.description }
                                 },
-                                required: ["optionIndex", "clientName", "field1", "field2", "field3"]
+                                required: ["optionIndex", "clientName", "field1", "field2", "field3", "field4"]
                             }
                         },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
@@ -5618,7 +5619,7 @@ const SECTOR_FIELD_LABELS: Record<string, SectorFieldLabels> = {
         field1: { label: 'Matrícula', placeholder: 'Ej: 1234ABC', key: 'licensePlate', description: 'Matrícula del vehículo (ej: 1234ABC)' },
         field2: { label: 'Marca', placeholder: 'Ej: Ford', key: 'carBrand', description: 'Marca del vehículo (ej: Ford, Toyota, BMW)' },
         field3: { label: 'Modelo', placeholder: 'Ej: Focus', key: 'carModel', description: 'Modelo del vehículo (ej: Focus, Corolla)' },
-        field4: { label: 'Año / Kms', placeholder: 'Ej: 2020 · 80.000 km', key: 'yearKms', description: 'Año y kilometraje aproximado (opcional)' },
+        field4: { label: 'Kilómetros', placeholder: 'Ej: 80.000 km', key: 'yearKms', description: 'Kilómetros actuales del vehículo (ej: 80.000 km)' },
         field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: 'Notas o comentarios adicionales (opcional)' }
     },
     clinica_dental: {
