@@ -20,6 +20,7 @@ import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
 import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
 import { AlertCenter } from './components/AlertCenter';
+import { AppointmentToast, AppointmentNotification } from './components/AppointmentToast';
 
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -73,6 +74,10 @@ function App() {
     // VIEW STATE
     const [view, setView] = useState<'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns'>('chat');
     const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
+
+    // NUEVAS CITAS — toasts in-app + fecha a la que saltar al pinchar
+    const [appointmentNotifs, setAppointmentNotifs] = useState<AppointmentNotification[]>([]);
+    const [calendarInitialDate, setCalendarInitialDate] = useState<string | null>(null);
 
     // TEAM CHAT STATE
     const [teamChannel, setTeamChannel] = useState('general');
@@ -220,6 +225,23 @@ function App() {
         socket.on('online_users_update', onOnlineUsersUpdate);
         socket.on('remote_typing', onRemoteTyping);
 
+        // Nueva cita reservada (Laura o manual) → toast in-app
+        const onNewAppointment = (data: any) => {
+            if (!data || !data.appointmentId) return;
+            const notif: AppointmentNotification = {
+                id: `${data.appointmentId}-${Date.now()}`,
+                appointmentId: data.appointmentId,
+                dateISO: data.dateISO,
+                clientName: data.clientName || 'Cliente',
+                clientPhone: data.clientPhone || '',
+                agenda: data.agenda || '',
+                humanDate: data.humanDate || '',
+                source: data.source === 'manual' ? 'manual' : 'bot'
+            };
+            setAppointmentNotifs(prev => [notif, ...prev].slice(0, 5));
+        };
+        socket.on('new_appointment', onNewAppointment);
+
         // Debug
         socket.onAny((event, ...args) => {
             console.log(`🔌 [SOCKET] ${event}`, args.length > 0 ? args : '');
@@ -252,6 +274,7 @@ function App() {
             socket.off('online_users_update');
             socket.off('remote_typing');
             socket.off('quick_replies_list');
+            socket.off('new_appointment', onNewAppointment);
         };
     }, [socket, user, companyConfig?.backendUrl]);
 
@@ -421,7 +444,7 @@ function App() {
                         >
                             <ArrowLeft className="w-6 h-6 text-slate-300 group-hover:text-indigo-400 transition-colors" />
                         </button>
-                        <CalendarDashboard readOnly={user.role === 'agent'} config={config} />
+                        <CalendarDashboard readOnly={user.role === 'agent'} config={config} initialDate={calendarInitialDate} onInitialDateConsumed={() => setCalendarInitialDate(null)} />
                     </div>
                 </div>
             </div>
@@ -573,6 +596,17 @@ function App() {
 
             {/* Centro de alertas — solo visible para admins. Escucha team_alert por socket. */}
             <AlertCenter socket={socket} isAdmin={user.role?.toLowerCase() === 'admin'} />
+
+            {/* Toast de nuevas citas (Laura y manual). Al pinchar abre el calendario en el día. */}
+            <AppointmentToast
+                notifications={appointmentNotifs}
+                onOpen={(n) => {
+                    setCalendarInitialDate(n.dateISO.slice(0, 10));
+                    setView('calendar');
+                    setAppointmentNotifs(prev => prev.filter(x => x.id !== n.id));
+                }}
+                onDismiss={(id) => setAppointmentNotifs(prev => prev.filter(x => x.id !== id))}
+            />
 
             {/* THEME SELECTION - STRICT BLOCKING */}
             {showThemeModal && (

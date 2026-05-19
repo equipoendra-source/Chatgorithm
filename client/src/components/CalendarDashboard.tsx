@@ -74,9 +74,13 @@ const AGENDA_COLORS = ['#8b5cf6', '#0ea5e9', '#f59e0b', '#ec4899', '#10b981', '#
 interface CalendarDashboardProps {
     readOnly?: boolean;
     config?: { departments: string[]; statuses: string[]; tags: string[] };
+    // Día al que saltar al abrir (formato YYYY-MM-DD). Usado al pinchar el toast de nueva cita.
+    initialDate?: string | null;
+    // Callback para que el padre limpie initialDate tras consumirlo (evita re-saltar al volver).
+    onInitialDateConsumed?: () => void;
 }
 
-const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config }) => {
+const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config, initialDate, onInitialDateConsumed }) => {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
 
@@ -88,6 +92,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [slotDuration, setSlotDuration] = useState(60);
     // Vista activa del calendario: día / semana / mes
     const [viewMode, setViewMode] = useState<'month' | 'week' | 'day'>('month');
+
+    // Si nos pasan initialDate (desde el toast de nueva cita), saltamos al día y abrimos vista día
+    useEffect(() => {
+        if (!initialDate) return;
+        const [y, m, d] = initialDate.split('-').map(Number);
+        if (!y || !m || !d) return;
+        setCurrentDate(new Date(y, m - 1, d));
+        setViewMode('day');
+        onInitialDateConsumed?.();
+    }, [initialDate, onInitialDateConsumed]);
 
     // Agendas (líneas de cita independientes)
     const [agendas, setAgendas] = useState<Agenda[]>([]);

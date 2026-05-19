@@ -1037,6 +1037,66 @@ async function broadcastPushNotification(payload: { title: string, body: string,
     await Promise.all(promises);
 }
 
+// Notificación de nueva cita reservada — se dispara tanto cuando reserva Laura
+// (vía bookAppointment) como cuando un trabajador reserva manualmente desde la UI
+// (PUT /api/appointments/:id con status='Booked').
+// Envía 3 canales: socket en tiempo real (toast in-app), FCM (móviles) y Web Push (navegador).
+function notifyNewAppointment(data: {
+    appointmentId: string;
+    dateISO: string;
+    clientName: string;
+    clientPhone: string;
+    agenda?: string;
+    source: 'bot' | 'manual';
+}) {
+    try {
+        const humanDate = new Date(data.dateISO).toLocaleString('es-ES', {
+            timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short'
+        });
+        const title = '📅 Nueva cita';
+        const cleanName = (data.clientName || 'Cliente').trim();
+        const agendaSuffix = data.agenda ? ` (${data.agenda})` : '';
+        const body = `${cleanName} — ${humanDate}${agendaSuffix}`;
+
+        // 1. Socket.IO: toast in-app en tiempo real
+        io.emit('new_appointment', {
+            appointmentId: data.appointmentId,
+            dateISO: data.dateISO,
+            clientName: cleanName,
+            clientPhone: data.clientPhone,
+            agenda: data.agenda || '',
+            source: data.source,
+            humanDate,
+            title,
+            body
+        });
+
+        // 2. FCM: push a móviles (APK Android)
+        sendFCMNotification({
+            title,
+            body,
+            data: {
+                type: 'new_appointment',
+                appointmentId: data.appointmentId,
+                dateISO: data.dateISO,
+                clientPhone: data.clientPhone || ''
+            }
+        });
+
+        // 3. Web Push: push al navegador (PWA/escritorio)
+        broadcastPushNotification({
+            title,
+            body,
+            icon: '/logo.png',
+            url: `/?view=calendar&date=${data.dateISO.slice(0, 10)}`
+        });
+
+        console.log(`🔔 [NuevaCita] Notificado (${data.source}): ${cleanName} @ ${humanDate}`);
+    } catch (e: any) {
+        console.error('[NuevaCita] Error enviando notificación:', e.message);
+    }
+}
+
 // --- HELPERS PARA CACHE PERSISTENTE DE CITAS ---
 // Guarda el cache en Airtable para que sobreviva reinicios del servidor
 async function saveAppointmentCache(phone: string, optionsMap: Record<number, string[]>) {
@@ -2559,6 +2619,17 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 console.error('⚠️ [Book] No se pudo registrar el vehículo (la reserva SÍ se hizo):', vErr.message);
             }
 
+            // Notificar al equipo de la nueva cita (toast in-app + push móvil + web push).
+            // Aislado: si falla, NO afecta a la reserva.
+            notifyNewAppointment({
+                appointmentId: realId,
+                dateISO: dateVal.toISOString(),
+                clientName,
+                clientPhone: cleanedPhone,
+                agenda: (leadRecord.get('Agenda') as string) || '',
+                source: 'bot'
+            });
+
             console.log(`✅ [Book] Reserva completada para ${humanDate}`);
             return `✅ RESERVA CONFIRMADA para el ${humanDate}.`;
         } catch (e: any) {
@@ -3693,6 +3764,24 @@ app.put('/api/appointments/:id', async (req, res) => {
                 await base('Appointments').update([{ id: req.params.id, fields: f }]);
             } else throw e;
         }
+
+        // Notificar nueva cita SOLO si esta llamada la pasó a Booked (no en cambios menores)
+        if (req.body.status === 'Booked') {
+            try {
+                const rec = await base('Appointments').find(req.params.id);
+                notifyNewAppointment({
+                    appointmentId: req.params.id,
+                    dateISO: rec.get('Date') as string,
+                    clientName: (rec.get('ClientName') as string) || 'Cliente',
+                    clientPhone: (rec.get('ClientPhone') as string) || '',
+                    agenda: (rec.get('Agenda') as string) || '',
+                    source: 'manual'
+                });
+            } catch (notifErr: any) {
+                console.error('[API] Error notificando nueva cita manual:', notifErr.message);
+            }
+        }
+
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
 });
