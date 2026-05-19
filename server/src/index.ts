@@ -1485,7 +1485,25 @@ async function schedulePostSaleSequence(phone: string, clientName: string, vehic
         });
         await delay(200);
     }
-    console.log(`📋 [PostVenta] Secuencia completa programada para ${clean} desde ${now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' })} (4 hitos)`);
+
+    // Solicitud de reseña en Google — 10 días después de la entrega.
+    // Tipo "postventa_resena": el prefijo "postventa" hace que se re-ancle y se
+    // cancele junto con el resto de la secuencia post-venta (cancelPendingPostSale).
+    // La plantilla "solicitud_resena" solo lleva 1 variable: el nombre del cliente.
+    const reviewDate = new Date(now);
+    reviewDate.setDate(reviewDate.getDate() + 10);
+    reviewDate.setHours(10, 0, 0, 0);
+    await scheduleNotification({
+        type: 'postventa_resena',
+        phone: clean,
+        templateName: 'solicitud_resena',
+        variables: JSON.stringify([clientName]),
+        scheduledFor: reviewDate.toISOString(),
+        originPhoneId
+    });
+    await delay(200);
+
+    console.log(`📋 [PostVenta] Secuencia completa programada para ${clean} desde ${now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' })} (4 hitos + reseña a 10 días)`);
 }
 
 // Aplica los efectos secundarios de un cambio de estado de contacto (secuencia postventa).
