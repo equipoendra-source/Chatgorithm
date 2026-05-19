@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import {
     Send, Smile, Paperclip, MessageSquare, User, Briefcase, CheckCircle,
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
-    Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck,
+    Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck, Users,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
     LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2
 } from 'lucide-react';
@@ -105,6 +105,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const [isInternalMode, setIsInternalMode] = useState(false);
     const [isSaving, setIsSaving] = useState(false);
     const [showMobileActionsMenu, setShowMobileActionsMenu] = useState(false);
+
+    // Panel "Actividad por trabajador": quién ha hablado con el cliente
+    const [showWorkerActivity, setShowWorkerActivity] = useState(false);
+    const [workerFilter, setWorkerFilter] = useState<string | null>(null);
 
     const [showQuickRepliesList, setShowQuickRepliesList] = useState(false);
 
@@ -570,6 +574,100 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         <div className="flex h-full bg-transparent relative" onClick={() => { setShowEmojiPicker(false); setShowAssignMenu(false); setShowTagMenu(false); setShowSearch(false); setShowQuickRepliesList(false); }}>
             {selectedImage && <div className="fixed inset-0 bg-black/90 z-50 flex items-center justify-center p-4 backdrop-blur-sm" onClick={(e) => { e.stopPropagation(); setSelectedImage(null); }}><button className="absolute top-4 right-4 text-white/70 hover:text-white p-2" onClick={() => setSelectedImage(null)}><X className="w-6 h-6" /></button><img src={selectedImage} alt="Grande" className="max-w-full max-h-[90vh] object-contain rounded-lg shadow-2xl" onClick={(e) => e.stopPropagation()} /></div>}
 
+            {/* PANEL: Actividad por trabajador — quién ha hablado con el cliente */}
+            {showWorkerActivity && (() => {
+                const classify = (s: string) => s === contact.phone ? 'client' : (s === 'Bot IA' ? 'bot' : 'worker');
+                const PALETTE = ['#6366f1', '#ec4899', '#f59e0b', '#10b981', '#3b82f6', '#0ea5e9', '#ef4444', '#14b8a6'];
+                const colorFor = (n: string) => n === 'Bot IA' ? '#a855f7' : PALETTE[Math.abs([...(n || '?')].reduce((a, c) => a + c.charCodeAt(0), 0)) % PALETTE.length];
+                const initialsOf = (n: string) => (n || '?').trim().split(/\s+/).slice(0, 2).map(w => w[0]?.toUpperCase() || '').join('') || '?';
+                const fmtShort = (ts: string) => { const d = new Date(ts); return isNaN(d.getTime()) ? '—' : d.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }); };
+                const previewOf = (m: Message) => m.type === 'image' ? '📷 Imagen' : m.type === 'video' ? '🎬 Vídeo' : m.type === 'audio' ? '🎤 Audio' : m.type === 'document' ? '📄 Documento' : m.type === 'note' ? `📝 ${m.text || ''}` : m.type === 'template' ? `📋 ${m.text || ''}` : (m.text || '');
+
+                const stats = new Map<string, { count: number; first: string; last: string }>();
+                messages.forEach(m => {
+                    if (classify(m.sender) === 'client') return;
+                    const k = m.sender || 'Agente';
+                    const ex = stats.get(k) || { count: 0, first: m.timestamp, last: m.timestamp };
+                    ex.count++;
+                    if (new Date(m.timestamp) < new Date(ex.first)) ex.first = m.timestamp;
+                    if (new Date(m.timestamp) > new Date(ex.last)) ex.last = m.timestamp;
+                    stats.set(k, ex);
+                });
+                const workers = Array.from(stats.entries()).sort((a, b) => b[1].count - a[1].count);
+                const totalOut = workers.reduce((a, [, s]) => a + s.count, 0);
+                const allTs = messages.map(m => new Date(m.timestamp).getTime()).filter(t => !isNaN(t));
+                const firstConv = allTs.length ? new Date(Math.min(...allTs)) : null;
+
+                const timeline = messages.filter(m => {
+                    if (!workerFilter) return true;
+                    if (classify(m.sender) === 'client') return true;
+                    return (m.sender || 'Agente') === workerFilter;
+                });
+
+                const closePanel = () => { setShowWorkerActivity(false); setWorkerFilter(null); };
+
+                return (
+                    <div className="fixed inset-0 z-[60] bg-black/60 backdrop-blur-sm flex items-center justify-center p-0 md:p-4" onClick={closePanel}>
+                        <div className={`w-full md:max-w-2xl h-full md:h-auto md:max-h-[90vh] flex flex-col md:rounded-2xl shadow-2xl overflow-hidden ${isDark ? 'bg-slate-900 border border-white/10' : 'bg-white'}`} onClick={(e) => e.stopPropagation()}>
+                            <div className={`p-4 flex items-center justify-between border-b ${isDark ? 'border-white/10' : 'border-slate-100'}`}>
+                                <div className="min-w-0">
+                                    <h3 className={`font-bold text-base flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><Users className="w-5 h-5 text-indigo-500" /> Actividad con {name || 'el cliente'}</h3>
+                                    <p className="text-[11px] text-slate-400 mt-0.5">{workers.length} interlocutor(es) · {totalOut} mensajes enviados{firstConv ? ` · desde el ${firstConv.toLocaleDateString('es-ES', { day: 'numeric', month: 'short' })}` : ''}</p>
+                                </div>
+                                <button onClick={closePanel} className={`p-2 rounded-full flex-shrink-0 ${isDark ? 'hover:bg-white/10 text-slate-300' : 'hover:bg-slate-100 text-slate-400'}`}><X className="w-5 h-5" /></button>
+                            </div>
+
+                            <div className={`p-4 grid grid-cols-2 sm:grid-cols-3 gap-3 border-b shrink-0 ${isDark ? 'border-white/10' : 'border-slate-100'}`}>
+                                {workers.length === 0 && <p className="col-span-full text-sm text-slate-400 text-center py-4">Nadie ha respondido todavía a este cliente.</p>}
+                                {workers.map(([wname, s]) => {
+                                    const col = colorFor(wname);
+                                    const active = workerFilter === wname;
+                                    return (
+                                        <button key={wname} onClick={() => setWorkerFilter(active ? null : wname)}
+                                            className={`text-left p-3 rounded-xl border transition-all ${active ? 'shadow-md' : 'hover:shadow-sm'} ${isDark ? 'bg-slate-800/60 border-white/10' : 'bg-slate-50 border-slate-200'}`}
+                                            style={active ? { boxShadow: `0 0 0 2px ${col}` } : {}}>
+                                            <div className="flex items-center gap-2 mb-2">
+                                                <div className="w-9 h-9 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style={{ backgroundColor: col }}>
+                                                    {wname === 'Bot IA' ? <Bot className="w-4 h-4" /> : initialsOf(wname)}
+                                                </div>
+                                                <div className="min-w-0">
+                                                    <p className={`text-xs font-bold truncate ${isDark ? 'text-white' : 'text-slate-700'}`}>{wname}</p>
+                                                    <p className="text-[10px] text-slate-400">{wname === 'Bot IA' ? 'Asistente IA' : 'Trabajador'}</p>
+                                                </div>
+                                            </div>
+                                            <p className="text-lg font-bold" style={{ color: col }}>{s.count} <span className="text-[10px] font-medium text-slate-400">msgs</span></p>
+                                            <p className="text-[10px] text-slate-400 mt-0.5">{fmtShort(s.first)} – {fmtShort(s.last)}</p>
+                                        </button>
+                                    );
+                                })}
+                            </div>
+
+                            {workerFilter && <div className="px-4 pt-3 shrink-0"><button onClick={() => setWorkerFilter(null)} className="text-[11px] font-bold text-indigo-500 flex items-center gap-1"><X className="w-3 h-3" /> Quitar filtro · viendo solo {workerFilter}</button></div>}
+
+                            <div className="flex-1 overflow-y-auto p-4 space-y-2">
+                                {timeline.map((m, idx) => {
+                                    const isClient = classify(m.sender) === 'client';
+                                    const author = isClient ? (name || 'Cliente') : (m.sender || 'Agente');
+                                    const col = isClient ? '#94a3b8' : colorFor(m.sender);
+                                    return (
+                                        <div key={idx} className={`flex ${isClient ? 'justify-start' : 'justify-end'}`}>
+                                            <div className={`max-w-[80%] rounded-xl px-3 py-2 border-l-4 ${isDark ? 'bg-slate-800/60' : 'bg-slate-50'}`} style={{ borderLeftColor: col }}>
+                                                <div className="flex items-center gap-1.5 mb-0.5">
+                                                    <span className="text-[10px] font-bold" style={{ color: col }}>{author}</span>
+                                                    <span className="text-[9px] text-slate-400">{safeTime(m.timestamp)}</span>
+                                                </div>
+                                                <p className={`text-xs leading-snug break-words whitespace-pre-wrap ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{previewOf(m)}</p>
+                                            </div>
+                                        </div>
+                                    );
+                                })}
+                                {timeline.length === 0 && <p className="text-sm text-slate-400 text-center py-8">Sin mensajes para mostrar.</p>}
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
+
             <div className={`flex flex-col flex-1 min-w-0 h-full border-r ${isDark ? 'border-white/5' : 'border-gray-200'}`}>
                 <div className={`border-b p-3 flex flex-wrap gap-3 items-center shadow-sm z-10 shrink-0 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-gray-200'}`} onClick={(e) => e.stopPropagation()}>
                     {onBack && <button onClick={onBack} className="md:hidden p-2 rounded-full text-slate-500 hover:bg-slate-100"><ArrowLeft className="w-5 h-5" /></button>}
@@ -577,6 +675,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                         <div className={`flex items-center gap-2 px-2 rounded-md border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}>
                             <User className={`w-4 h-4 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} />
                             <input id="chat-header-name" className={`text-sm font-semibold border-none focus:ring-0 w-full bg-transparent py-1.5 ${isDark ? 'text-white placeholder:text-slate-500' : 'text-slate-700'}`} placeholder="Nombre" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => updateCRM('name', name)} />
+                            <button onClick={(e) => { e.stopPropagation(); setWorkerFilter(null); setShowWorkerActivity(true); }} title="Ver quién ha hablado con el cliente" className={`p-1 rounded-md flex-shrink-0 transition ${isDark ? 'text-indigo-400 hover:bg-white/10' : 'text-indigo-500 hover:bg-indigo-50'}`}><Users className="w-4 h-4" /></button>
                         </div>
                         <div className={`overflow-hidden transition-all duration-300 ${(typingUser || isOnline) ? 'max-h-6 opacity-100 mt-1' : 'max-h-0 opacity-0'}`}>
                             {typingUser ? <span className="text-[11px] text-green-600 font-bold flex items-center gap-1.5 bg-green-50 px-2 py-0.5 rounded-full w-fit"><span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span></span>{typingUser} está escribiendo...</span> : isOnline ? <span className="text-[11px] text-slate-500 font-medium flex items-center gap-1.5 px-1 w-fit"><span className="relative flex h-2 w-2"><span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span></span>En línea</span> : null}
