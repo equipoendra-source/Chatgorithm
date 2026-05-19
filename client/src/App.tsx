@@ -426,8 +426,28 @@ function App() {
         );
     }
 
+    // Toast de nuevas citas — reutilizable en TODAS las vistas (chat, calendario, settings, etc).
+    // Antes solo se renderizaba en la vista chat, así que las reservas hechas desde el calendario
+    // emitían el evento pero el toast no estaba montado y no aparecía. Ahora siempre está visible.
+    const appointmentToastNode = (
+        <AppointmentToast
+            notifications={appointmentNotifs}
+            onOpen={(n) => {
+                setCalendarInitialDate(n.dateISO.slice(0, 10));
+                setView('calendar');
+                setAppointmentNotifs(prev => prev.filter(x => x.id !== n.id));
+            }}
+            onDismiss={(id) => setAppointmentNotifs(prev => prev.filter(x => x.id !== id))}
+        />
+    );
+
     // Settings view
-    if (view === 'settings') return <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} updateMyPreferences={updateMyPreferences} />;
+    if (view === 'settings') return (
+        <>
+            <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} updateMyPreferences={updateMyPreferences} />
+            {appointmentToastNode}
+        </>
+    );
 
     // Calendar view
     if (view === 'calendar') {
@@ -447,6 +467,7 @@ function App() {
                         <CalendarDashboard readOnly={user.role === 'agent'} config={config} initialDate={calendarInitialDate} onInitialDateConsumed={() => setCalendarInitialDate(null)} />
                     </div>
                 </div>
+                {appointmentToastNode}
             </div>
         );
     }
@@ -466,6 +487,7 @@ function App() {
                         />
                     </div>
                 </div>
+                {appointmentToastNode}
             </div>
         );
     }
@@ -598,15 +620,7 @@ function App() {
             <AlertCenter socket={socket} isAdmin={user.role?.toLowerCase() === 'admin'} />
 
             {/* Toast de nuevas citas (Laura y manual). Al pinchar abre el calendario en el día. */}
-            <AppointmentToast
-                notifications={appointmentNotifs}
-                onOpen={(n) => {
-                    setCalendarInitialDate(n.dateISO.slice(0, 10));
-                    setView('calendar');
-                    setAppointmentNotifs(prev => prev.filter(x => x.id !== n.id));
-                }}
-                onDismiss={(id) => setAppointmentNotifs(prev => prev.filter(x => x.id !== id))}
-            />
+            {appointmentToastNode}
 
             {/* THEME SELECTION - STRICT BLOCKING */}
             {showThemeModal && (
