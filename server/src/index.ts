@@ -2305,8 +2305,10 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
                         type: "text",
                         origin_phone_id: originPhoneId
                     });
-                    // CRÍTICO: Devolver las opciones reales a Gemini para que no invente IDs
-                    return `✅ Lista de horarios enviada al cliente por WhatsApp.\n${responseText}\nEspera a que el cliente responda con un número de opción (1, 2, 3...). NO inventes opciones ni IDs.`;
+                    // El cliente YA ve los horarios en la lista interactiva de WhatsApp.
+                    // NO devolvemos responseText a Gemini para evitar que repita el listado
+                    // como mensaje de texto (duplicación).
+                    return `✅ Ya se ha enviado al cliente una LISTA INTERACTIVA de WhatsApp con ${rows.length} horario(s) disponible(s) (botón "Ver Horarios"). El cliente ya los ve en pantalla. NO escribas ni repitas los horarios, fechas ni opciones en tu respuesta: sería información duplicada. Responde SOLO con UNA frase breve invitándole a pulsar "Ver Horarios" y elegir un hueco. Cuando el cliente responda con un número de opción (1, 2, 3...), ese número ya está registrado en el sistema; NO inventes opciones, horarios ni IDs.`;
                 } catch (e: any) { console.warn("⚠️ Error lista interactiva:", e.message); }
             }
         }
