@@ -1034,7 +1034,7 @@ async function sendFCMNotification(payload: { title: string, body: string, data?
 }
 
 // Función para enviar push notification
-async function sendPushNotification(userIdentifier: string, payload: { title: string, body: string, icon?: string, url?: string, phone?: string }) {
+async function sendPushNotification(userIdentifier: string, payload: { title: string, body: string, icon?: string, url?: string, phone?: string, tag?: string }) {
     if (!webPushEnabled) return; // VAPID keys no configuradas, push desactivado
     const subscription = pushSubscriptions.get(userIdentifier);
     if (!subscription) {
@@ -1055,7 +1055,7 @@ async function sendPushNotification(userIdentifier: string, payload: { title: st
 }
 
 // Enviar push a TODOS los usuarios suscritos
-async function broadcastPushNotification(payload: { title: string, body: string, icon?: string, url?: string, phone?: string }) {
+async function broadcastPushNotification(payload: { title: string, body: string, icon?: string, url?: string, phone?: string, tag?: string }) {
     console.log(`📡 [WebPush] Broadcast: enviando a ${pushSubscriptions.size} navegadores suscritos`);
     const promises: Promise<void>[] = [];
     pushSubscriptions.forEach((sub, id) => {
@@ -1886,8 +1886,10 @@ async function saveAndEmitMessage(msg: any) {
         const recipients = await getNotificationRecipients(finalSender);
         
         // 1. Notificación FCM (Móviles APK)
+        // Prefijo "💬 Cliente ·" para distinguir de los mensajes del chat interno
+        // del equipo (un trabajador y un cliente pueden llamarse igual).
         sendFCMNotification({
-            title: senderName,
+            title: `💬 Cliente · ${senderName}`,
             body: payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : ''),
             data: {
                 conversationId: finalSender,
@@ -1897,11 +1899,13 @@ async function saveAndEmitMessage(msg: any) {
 
         // 2. Notificación Web Push (PWA/Escritorio)
         const webPushPayload = {
-            title: `Mensaje de ${senderName}`,
+            title: `💬 Cliente · ${senderName}`,
             body: payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : ''),
             icon: '/logo.png',
             url: `/?phone=${finalSender}`,
-            phone: finalSender
+            phone: finalSender,
+            // tag propio por cliente: no sobrescribe las notificaciones del equipo
+            tag: `cliente-${finalSender}`
         };
 
         // ENVIAR A TODOS (Broadcast) para asegurar que llegue mientras depuramos
@@ -4788,7 +4792,9 @@ io.on('connection', (socket) => {
             const isPrivate = msg.channel.includes('_');
             const [u1, u2] = isPrivate ? msg.channel.split('_') : ['', ''];
 
-            const pushTitle = isPrivate ? `Mensaje de ${msg.sender}` : `Equipo (${msg.channel}): ${msg.sender}`;
+            // Prefijo "👥 Equipo ·" para distinguir del chat con clientes
+            // (un trabajador y un cliente pueden llamarse igual).
+            const pushTitle = isPrivate ? `👥 Equipo · ${msg.sender}` : `👥 Equipo · ${msg.channel} · ${msg.sender}`;
             const pushData = { type: 'team_chat', channel: msg.channel };
 
             // 1. Android (FCM)
@@ -4828,7 +4834,8 @@ io.on('connection', (socket) => {
                     if (isPrivate && username !== u1 && username !== u2) return; // Filtro chat privado
 
                     try {
-                        const payload = JSON.stringify({ title: pushTitle, body: msg.content, url: '/team' });
+                        // tag propio del chat de equipo: no sobrescribe las de clientes
+                        const payload = JSON.stringify({ title: pushTitle, body: pushBody, url: '/team', tag: `equipo-${msg.channel}` });
                         webpush.sendNotification(sub, payload).catch(e => {
                             console.error('❌ [WebPush] Error enviando team chat:', e.statusCode || e.message);
                         });
