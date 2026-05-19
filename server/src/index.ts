@@ -2199,6 +2199,16 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
 
         // Determinar cuántos slots consecutivos necesita este servicio
         const allAgendas = await getAgendas();
+
+        // GUARDA MULTI-AGENDA: si hay varias agendas y no se ha indicado cuál,
+        // NO mostramos huecos (saldrían mezclados/duplicados). Obligamos al bot a preguntar.
+        if (!agenda && allAgendas.length > 1) {
+            const names = allAgendas
+                .map(a => `"${a.name}"${a.description ? ` (${a.description})` : ''}`)
+                .join(', ');
+            return `⚠️ AGENDA NO ESPECIFICADA. Este negocio tiene ${allAgendas.length} agendas/departamentos distintos: ${names}. NO se pueden mostrar horarios sin saber a cuál se refiere el cliente. PREGÚNTALE por cuál de esas agendas/departamentos quiere la cita, mencionándoselas por su nombre. Cuando lo sepas, vuelve a llamar a get_available_appointments con el parámetro 'agenda' relleno con el nombre EXACTO.`;
+        }
+
         const matchedAgenda = agenda ? allAgendas.find(a => a.name === agenda) : allAgendas[0];
         const slotGranularity = matchedAgenda?.duration || 60;
         let slotsNeeded = 1;
@@ -2321,6 +2331,16 @@ async function getAvailableDays(agendaName?: string) {
     if (!base) return "Error DB";
     const agenda = (agendaName || '').trim();
     try {
+        // GUARDA MULTI-AGENDA: si hay varias agendas y no se ha indicado cuál,
+        // NO mostramos días (saldrían días de agendas distintas mezclados).
+        const allAgendas = await getAgendas();
+        if (!agenda && allAgendas.length > 1) {
+            const names = allAgendas
+                .map(a => `"${a.name}"${a.description ? ` (${a.description})` : ''}`)
+                .join(', ');
+            return `⚠️ AGENDA NO ESPECIFICADA. Este negocio tiene ${allAgendas.length} agendas/departamentos distintos: ${names}. PREGÚNTALE al cliente por cuál de esas agendas/departamentos quiere la cita antes de mostrar días. Luego vuelve a llamar a get_available_days con el parámetro 'agenda' relleno con el nombre EXACTO.`;
+        }
+
         const todayStr = new Date().toISOString().split('T')[0];
         const records = await base('Appointments').select({
             filterByFormula: `AND({Status} = 'Available', {Date} >= '${todayStr}')`,
