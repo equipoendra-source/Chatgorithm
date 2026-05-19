@@ -1225,7 +1225,7 @@ async function runScheduleMaintenance() {
         // (Los Booked se dejan intactos — son reservas reales que no deben borrarse aunque se elimine la agenda)
         const agendaNames = new Set(agendas.map(a => a.name));
         const orphans = futureSlots
-            .filter(r => { const ag = (r.get('Agenda') as string) || ''; return ag && !agendaNames.has(ag) && r.get('Status') === 'Available'; })
+            .filter(r => { const ag = (r.get('Agenda') as string) || ''; return (!ag || !agendaNames.has(ag)) && r.get('Status') === 'Available'; })
             .map(r => r.id);
         for (let i = 0; i < orphans.length; i += 10) {
             await base('Appointments').destroy(orphans.slice(i, i + 10));
