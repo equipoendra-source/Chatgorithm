@@ -524,6 +524,18 @@ const cleanNumber = (phone: any) => {
     return String(phone).replace(/\D/g, '');
 };
 
+// Compara dos teléfonos de forma tolerante al prefijo de país.
+// Los números españoles son de 9 dígitos: "34609123815" y "609123815"
+// pertenecen al mismo cliente. Las citas creadas a mano en el dashboard
+// pueden guardarse sin el prefijo "34", mientras que el bot siempre lo lleva.
+function phoneMatch(a: any, b: any): boolean {
+    const ca = cleanNumber(a), cb = cleanNumber(b);
+    if (!ca || !cb) return false;
+    if (ca === cb) return true;
+    if (ca.length >= 9 && cb.length >= 9) return ca.slice(-9) === cb.slice(-9);
+    return false;
+}
+
 // --- HELPER CRÍTICO: ESCAPE DE STRINGS PARA filterByFormula DE AIRTABLE ---
 // Sin esto, un nombre como  O'Connor  o un texto con `'` rompe la query y
 // abre la puerta a inyección de fórmula. Airtable usa el escape `\'` dentro
@@ -2719,18 +2731,20 @@ async function cancelAppointment(clientPhone: string) {
     const clean = cleanNumber(clientPhone);
     try {
         // Buscar el slot LÍDER (el que tiene datos del cliente: ClientName, DurationMin, etc.)
+        // No filtramos por ClientPhone en la fórmula: el teléfono puede estar guardado
+        // con o sin prefijo de país (citas creadas a mano vs. por el bot). Se empareja
+        // en JS con phoneMatch (tolerante al prefijo). El conjunto de citas futuras es pequeño.
         const now = new Date().toISOString();
-        const records = await base('Appointments').select({
-            filterByFormula: `AND({Status} = 'Booked', {ClientPhone} = '${clean}', {ClientName} != '', {Date} >= '${now}')`,
-            sort: [{ field: "Date", direction: "asc" }],
-            maxRecords: 1
-        }).firstPage();
+        const candidates = await base('Appointments').select({
+            filterByFormula: `AND({Status} = 'Booked', {ClientName} != '', {Date} >= '${now}')`,
+            sort: [{ field: "Date", direction: "asc" }]
+        }).all();
 
-        if (records.length === 0) {
+        const record = candidates.find(r => phoneMatch(r.get('ClientPhone') as string, clientPhone));
+
+        if (!record) {
             return "No_appointment_found";
         }
-
-        const record = records[0];
         const leadDate = new Date(record.get('Date') as string);
         const humanDate = leadDate.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
@@ -2749,10 +2763,10 @@ async function cancelAppointment(clientPhone: string) {
         // en OTRAS agendas que solapen en horario) y rango [leadDate, leadDate + durationMin).
         if (durationMin > 0) {
             const endDate = new Date(leadDate.getTime() + durationMin * 60000).toISOString();
-            const secondaries = await base('Appointments').select({
-                filterByFormula: `AND({Status}='Booked', {ClientPhone}='${clean}', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`,
-                fields: []
+            const secCandidates = await base('Appointments').select({
+                filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`
             }).all();
+            const secondaries = secCandidates.filter(r => phoneMatch(r.get('ClientPhone') as string, clientPhone));
             if (secondaries.length > 0) {
                 for (let i = 0; i < secondaries.length; i += 10) {
                     await base('Appointments').update(
