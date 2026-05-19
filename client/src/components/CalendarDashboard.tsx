@@ -115,6 +115,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [editStatus, setEditStatus] = useState('');
     const [editName, setEditName] = useState('');
     const [editPhone, setEditPhone] = useState('');
+    const [editPrefix, setEditPrefix] = useState('34');
     const [editMatricula, setEditMatricula] = useState('');
     const [editMarca, setEditMarca] = useState('');
     const [editModelo, setEditModelo] = useState('');
@@ -260,7 +261,19 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setSelectedAppt(appt);
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
-        setEditPhone(appt.clientPhone || '');
+        // Separar prefijo de país y número. Los números españoles son de 9 dígitos:
+        // lo que sobra por delante se trata como prefijo. Si solo hay 9 dígitos,
+        // se asume prefijo 34 (España) por defecto.
+        {
+            const cleaned = (appt.clientPhone || '').replace(/\D/g, '');
+            if (cleaned.length > 9) {
+                setEditPrefix(cleaned.slice(0, -9));
+                setEditPhone(cleaned.slice(-9));
+            } else {
+                setEditPrefix('34');
+                setEditPhone(cleaned);
+            }
+        }
         setEditMatricula(appt.matricula || appt.field1 || '');
         setEditMarca(appt.marca || appt.field2 || '');
         setEditModelo(appt.modelo || appt.field3 || '');
@@ -295,6 +308,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     status: editStatus,
                     clientName: editName,
                     clientPhone: editPhone,
+                    phonePrefix: editPrefix,
                     matricula: editMatricula,
                     marca: editMarca,
                     modelo: editModelo,
@@ -996,14 +1010,42 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     </div>
                                     <div>
                                         <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Teléfono</label>
-                                        <input
-                                            type="text"
-                                            value={editPhone}
-                                            onChange={(e) => setEditPhone(e.target.value)}
-                                            className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
-                                            placeholder="Ej: 34600..."
-                                            disabled={readOnly}
-                                        />
+                                        <div className="flex gap-2">
+                                            <div className="relative w-24 flex-shrink-0">
+                                                <span className={`absolute left-2 top-1/2 -translate-y-1/2 text-sm font-bold pointer-events-none ${isDark ? 'text-purple-400' : 'text-purple-500'}`}>+</span>
+                                                <input
+                                                    type="text"
+                                                    inputMode="numeric"
+                                                    value={editPrefix}
+                                                    onChange={(e) => setEditPrefix(e.target.value.replace(/\D/g, ''))}
+                                                    list="phone-prefixes"
+                                                    className={`w-full p-2 pl-5 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                                    placeholder="34"
+                                                    disabled={readOnly}
+                                                />
+                                            </div>
+                                            <input
+                                                type="text"
+                                                inputMode="numeric"
+                                                value={editPhone}
+                                                onChange={(e) => setEditPhone(e.target.value)}
+                                                className={`flex-1 min-w-0 p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                                placeholder="Ej: 609123815"
+                                                disabled={readOnly}
+                                            />
+                                        </div>
+                                        <datalist id="phone-prefixes">
+                                            <option value="34">España</option>
+                                            <option value="351">Portugal</option>
+                                            <option value="33">Francia</option>
+                                            <option value="39">Italia</option>
+                                            <option value="49">Alemania</option>
+                                            <option value="44">Reino Unido</option>
+                                            <option value="1">EE.UU. / Canadá</option>
+                                            <option value="212">Marruecos</option>
+                                            <option value="376">Andorra</option>
+                                        </datalist>
+                                        <p className={`text-[10px] mt-1 ${isDark ? 'text-purple-400/70' : 'text-purple-500/80'}`}>Prefijo del país (sin +) y número. Por defecto España (34). Puedes escribir cualquier otro prefijo.</p>
                                     </div>
                                     {/* Estado del CLIENTE — permite marcar "Vehículo Entregado" y demás */}
                                     {selectedAppt.clientPhone && (

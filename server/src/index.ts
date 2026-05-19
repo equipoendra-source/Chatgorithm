@@ -536,6 +536,21 @@ function phoneMatch(a: any, b: any): boolean {
     return false;
 }
 
+// Normaliza un teléfono a un formato canónico (solo dígitos, con prefijo de país).
+// Si recibe un número de 9 dígitos (formato español sin prefijo), antepone el
+// prefijo indicado (por defecto "34"). Los números que ya traen prefijo de país
+// (longitud distinta de 9) se dejan tal cual. Así las citas creadas a mano y las
+// del bot quedan guardadas con el mismo formato.
+function normalizePhone(raw: any, prefix?: any): string {
+    const clean = cleanNumber(raw);
+    if (!clean) return "";
+    if (clean.length === 9) {
+        const pfx = cleanNumber(prefix) || '34';
+        return pfx + clean;
+    }
+    return clean;
+}
+
 // --- HELPER CRÍTICO: ESCAPE DE STRINGS PARA filterByFormula DE AIRTABLE ---
 // Sin esto, un nombre como  O'Connor  o un texto con `'` rompe la query y
 // abre la puerta a inyección de fórmula. Airtable usa el escape `\'` dentro
@@ -3753,7 +3768,10 @@ app.put('/api/appointments/:id', async (req, res) => {
         const f: any = {};
         if (req.body.status) f["Status"] = req.body.status;
         if (req.body.agenda !== undefined) f["Agenda"] = req.body.agenda;
-        if (req.body.clientPhone !== undefined) f["ClientPhone"] = req.body.clientPhone;
+        // Normalizar el teléfono: las citas creadas a mano se guardaban sin prefijo
+        // de país. Ahora siempre se almacena con prefijo (34 por defecto, o el que
+        // envíe el frontend en phonePrefix).
+        if (req.body.clientPhone !== undefined) f["ClientPhone"] = normalizePhone(req.body.clientPhone, req.body.phonePrefix);
         if (req.body.clientName !== undefined) f["ClientName"] = req.body.clientName;
         // Aceptar tanto los nombres antiguos (matricula/marca/modelo) como los genéricos (field1..field5)
         if (req.body.matricula !== undefined) f["Matricula"] = req.body.matricula;
