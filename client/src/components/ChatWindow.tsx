@@ -4,13 +4,14 @@ import {
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck, Users,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
-    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2
+    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2, FileDown
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
 import { API_BASE_URL, API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
 import { shouldShowTour, markTourAsComplete, startChatTour } from './ProductTour';
+import { exportChatToPdf } from '../services/chatPdfExport';
 
 // Definimos la interfaz aquí para evitar dependencias circulares
 interface QuickReply {
@@ -117,6 +118,31 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const [chatSearchQuery, setChatSearchQuery] = useState('');
     const [searchMatches, setSearchMatches] = useState<SearchMatch[]>([]);
     const [currentMatchIdx, setCurrentMatchIdx] = useState(0);
+
+    const [isExportingPdf, setIsExportingPdf] = useState(false);
+
+    const handleExportPdf = async () => {
+        if (isExportingPdf) return;
+        if (messages.length === 0) { alert('No hay mensajes para exportar.'); return; }
+        setIsExportingPdf(true);
+        try {
+            let companyName: string | undefined;
+            try {
+                const raw = localStorage.getItem('company_config');
+                if (raw) companyName = JSON.parse(raw).companyName;
+            } catch { /* ignore */ }
+            await exportChatToPdf({
+                messages,
+                contact: { name: name || contact.name, phone: contact.phone },
+                companyName
+            });
+        } catch (e) {
+            console.error('[ExportPDF] Error:', e);
+            alert('No se pudo generar el PDF.');
+        } finally {
+            setIsExportingPdf(false);
+        }
+    };
 
     // ESTADOS IA
     const [aiThinking, setAiThinking] = useState(false);
@@ -731,6 +757,15 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                             </div>
                         ) : (<button id="chat-search-btn" onClick={(e) => { e.stopPropagation(); setShowSearch(true); }} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-blue-500 transition" title="Buscar en conversación"><Search className="w-5 h-5" /></button>)}
                     </div>
+                    <button
+                        id="chat-export-btn"
+                        onClick={handleExportPdf}
+                        disabled={isExportingPdf}
+                        className={`p-2 rounded-lg transition ${isExportingPdf ? 'text-slate-300 cursor-wait' : 'text-slate-400 hover:bg-slate-100 hover:text-blue-500'}`}
+                        title="Exportar conversación a PDF"
+                    >
+                        {isExportingPdf ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileDown className="w-5 h-5" />}
+                    </button>
                     <button id="chat-info-btn" onClick={() => setShowDetailsPanel(!showDetailsPanel)} className={`p-2 rounded-lg transition ${showDetailsPanel ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:bg-slate-100'}`} title="Info Cliente"><Info className="w-5 h-5" /></button>
                 </div>
 
