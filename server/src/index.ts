@@ -2853,66 +2853,112 @@ async function cancelPendingCitaReminders(phone: string): Promise<number> {
 // La respuesta humana es muy variada: "no", "No", "no.", "no puedo",
 // "no podré ir", "cancelar", "anular"... Esta función normaliza (sin acentos,
 // minúsculas, sin puntuación) y reconoce las formas más habituales.
-function looksLikeApptCancellation(text: string): boolean {
+// Detecta la intención de cancelar una cita y clasifica la confianza:
+//   'explicit' → palabras claras de cancelación ("cancelar", "anular",
+//                "quiero cancelar"). Cancelar siempre. Si no hay cita activa,
+//                mandar mensaje informativo (sabemos que pide cancelar).
+//   'soft'     → frases blandas ("no puedo", "no me viene bien"...). Cancelar
+//                siempre, pero NO mandar mensaje si no hay cita (podría ser
+//                conversación normal: "no me viene bien quedar el martes").
+//   'ambiguous'→ "no" / "noo" / "nope" a secas. Solo cancelar si hay
+//                recordatorio de cita en las últimas 30h.
+//   'none'     → no parece cancelación.
+type CancellationIntent = 'explicit' | 'soft' | 'ambiguous' | 'none';
+function detectCancellationIntent(text: string): CancellationIntent {
     const norm = (text || '')
         .normalize('NFD').replace(/[̀-ͯ]/g, '')   // quitar acentos
         .toLowerCase()
         .replace(/[.,;:!¡¿?()"'\-]/g, ' ')
         .replace(/\s+/g, ' ')
         .trim();
-    if (!norm) return false;
-    // "no" a secas (también "no no", "no gracias")
-    if (/^no( no| gracias)?$/.test(norm)) return true;
-    // Frases de cancelación / no asistencia
-    const phrases = [
+    if (!norm) return 'none';
+
+    // EXPLÍCITO: el cliente dice claramente "cancelar" / "anular". La intención
+    // es 100% de cancelar — si no hay cita activa, lo informamos.
+    const explicitPhrases = [
+        'cancelar', 'cancela', 'cancelo', 'anular', 'anula', 'anulo',
+        'quiero cancelar', 'cancelar la cita', 'cancelar cita'
+    ];
+    if (explicitPhrases.some(p => norm.includes(p))) return 'explicit';
+
+    // SOFT: frases de no-asistencia que podrían también aparecer en
+    // conversación normal ("no me viene bien quedar el martes"). Cancelamos si
+    // hay cita activa, pero si no hay, no respondemos para no quedar fuera de
+    // contexto.
+    const softPhrases = [
         'no puedo', 'no podre', 'no voy a poder', 'no voy a ir', 'no ire',
         'no asisti', 'no asistir', 'no podre ir', 'no podre asistir',
-        'no me viene bien', 'no me va bien', 'no quiero la cita', 'no quiero ir',
-        'cancelar', 'cancela', 'cancelo', 'anular', 'anula', 'anulo',
-        'cancelar la cita', 'cancelar cita', 'quiero cancelar'
+        'no me viene bien', 'no me va bien', 'no quiero la cita', 'no quiero ir'
     ];
-    return phrases.some(p => norm.includes(p));
+    if (softPhrases.some(p => norm.includes(p))) return 'soft';
+
+    // AMBIGUO: "no" a secas, incluidas variantes coloquiales ("noo", "nooo",
+    // "nop", "nope") y combinaciones ("no no", "noo gracias"). Solo se trata
+    // como cancelación si hay recordatorio de cita en las últimas 30h.
+    if (/^(no+|nop|nope)( (no+|gracias))?$/.test(norm)) return 'ambiguous';
+
+    return 'none';
 }
 
-// Gestiona la respuesta "NO" del cliente a un recordatorio de cita.
-// El recordatorio dice literalmente "responda NO para liberar el hueco".
-// SOLO se trata como cancelación si el cliente recibió un recordatorio de cita
-// recientemente (ventana de 30h) — así un "no" en conversación normal NO cancela
-// nada por error. Devuelve true si se ha gestionado la cancelación.
-async function handleAppointmentCancelReply(phone: string, originPhoneId: string): Promise<boolean> {
+// Gestiona la cancelación de cita expresada por el cliente.
+//   intent='explicit'  → palabras claras ("cancelar", "anular"). Intenta
+//                        cancelar; si no hay cita activa, manda mensaje
+//                        informativo para no dejar al cliente colgado.
+//   intent='soft'      → frases blandas ("no puedo", "no me viene bien").
+//                        Intenta cancelar; si no hay cita, deja seguir al
+//                        flujo normal (podría ser conversación casual).
+//   intent='ambiguous' → "no"/"noo"/"nope". Solo cancela si hay recordatorio
+//                        de cita en las últimas 30h (desambigua).
+// Devuelve true si el mensaje quedó gestionado y NO debe seguir al flujo IA.
+async function handleAppointmentCancelReply(phone: string, originPhoneId: string, intent: CancellationIntent = 'ambiguous'): Promise<boolean> {
     if (!base) return false;
+    if (intent === 'none') return false;
     const clean = cleanNumber(phone);
     try {
-        // 1. ¿Recibió un recordatorio de cita en las últimas 30h? (desambigua el "NO")
-        //    Se compara la fecha en JS para no depender del tipo del campo {sentAt}.
-        const recentReminders = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
-            filterByFormula: `AND({phone}='${clean}', {status}='sent', FIND('cita', {type})>0)`,
-            sort: [{ field: 'sentAt', direction: 'desc' }],
-            maxRecords: 5
-        }).firstPage();
-        const cutoffMs = Date.now() - 30 * 60 * 60 * 1000;
-        const hasRecentReminder = recentReminders.some(r => {
-            const sentAt = r.get('sentAt') as string;
-            const t = sentAt ? new Date(sentAt).getTime() : NaN;
-            return !isNaN(t) && t >= cutoffMs;
-        });
-        if (!hasRecentReminder) return false; // sin recordatorio reciente → "no" normal
+        // Para "no" a secas comprobamos que haya un recordatorio reciente
+        // (los teléfonos pueden guardarse con o sin prefijo de país: comparamos
+        // los últimos 9 dígitos con RIGHT, como hace phoneMatch).
+        if (intent === 'ambiguous') {
+            const last9 = clean.slice(-9);
+            const phoneClause = last9.length === 9
+                ? `RIGHT({phone}, 9)='${last9}'`
+                : `{phone}='${clean}'`;
+            const recentReminders = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+                filterByFormula: `AND(${phoneClause}, {status}='sent', FIND('cita', {type})>0)`,
+                sort: [{ field: 'sentAt', direction: 'desc' }],
+                maxRecords: 5
+            }).firstPage();
+            const cutoffMs = Date.now() - 30 * 60 * 60 * 1000;
+            const hasRecentReminder = recentReminders.some(r => {
+                const sentAt = r.get('sentAt') as string;
+                const t = sentAt ? new Date(sentAt).getTime() : NaN;
+                return !isNaN(t) && t >= cutoffMs;
+            });
+            if (!hasRecentReminder) return false; // sin recordatorio reciente → "no" normal
+        }
 
-        // 2. Cancelar la cita (libera el slot líder y los secundarios del bloque)
+        // Cancelar la cita (libera el slot líder y los secundarios del bloque)
         const result = await cancelAppointment(clean);
         if (typeof result === 'string' && result.startsWith('✅ CITA_CANCELADA')) {
-            // 3. Cancelar los recordatorios de cita pendientes (ej. el de 1h)
             await cancelPendingCitaReminders(clean);
-            // 4. Confirmar al cliente
             await sendWhatsAppText(clean, '✅ Hemos cancelado su cita y liberado el hueco. Si quiere reprogramar, escríbanos cuando le venga bien. ¡Gracias por avisar!', originPhoneId);
-            console.log(`📅 [CancelReply] Cita cancelada por respuesta "NO" de ${clean}`);
+            console.log(`📅 [CancelReply] Cita cancelada por intent="${intent}" de ${clean}`);
             return true;
         }
-        // Recibió recordatorio pero ya no hay cita activa: no hacemos nada raro,
-        // dejamos que el mensaje siga el flujo normal.
+
+        // No hay cita activa que cancelar.
+        //   - Si la intención era EXPLÍCITA ("cancelar"/"anular"), contestamos
+        //     al cliente para no dejarlo en silencio y devolvemos true.
+        //   - Si era SOFT o AMBIGUA, devolvemos false y dejamos seguir el flujo
+        //     normal (podría ser conversación casual, no una cancelación real).
+        if (intent === 'explicit') {
+            await sendWhatsAppText(clean, 'No encontramos ninguna cita activa a tu nombre. Si crees que es un error, escríbenos y te ayudamos.', originPhoneId);
+            console.log(`📅 [CancelReply] Intención EXPLÍCITA de cancelar de ${clean} pero sin cita activa → mensaje informativo enviado`);
+            return true;
+        }
         return false;
     } catch (e: any) {
-        console.error('[CancelReply] Error gestionando cancelación por "NO":', e.message);
+        console.error('[CancelReply] Error gestionando cancelación:', e.message);
         return false;
     }
 }
@@ -4440,17 +4486,22 @@ app.post('/webhook', async (req, res) => {
 
             const upperText = (msg.type === 'text' && text) ? text.trim().toUpperCase() : '';
 
-            // --- Cancelación de cita por respuesta del cliente al recordatorio ---
-            // Va ANTES del opt-out: si el cliente recibió un recordatorio de cita
-            // reciente, una respuesta como "no" / "cancelar" significa cancelar la
-            // CITA (no darse de baja de marketing). Funciona aunque la IA esté apagada.
-            // handleAppointmentCancelReply solo actúa si hay un recordatorio reciente,
-            // así un "no" en conversación normal nunca libera una cita por error.
-            if (msg.type === 'text' && text && looksLikeApptCancellation(text)) {
-                const cancelled = await handleAppointmentCancelReply(from, originPhoneId);
-                if (cancelled) {
-                    console.log(`📅 [WEBHOOK] Cita liberada por respuesta del cliente "${text}" (${from})`);
-                    return res.sendStatus(200);
+            // --- Cancelación de cita por respuesta del cliente ---
+            // Va ANTES del opt-out para que un "cancelar" suelte la cita en lugar
+            // de darle de baja de marketing. Funciona aunque la IA esté apagada.
+            //   - Intent INEQUÍVOCO ("cancelar", "anular", "no puedo ir"...):
+            //     siempre intenta cancelar; si no hay cita activa, manda mensaje
+            //     informativo para no dejar al cliente colgado.
+            //   - Intent AMBIGUO ("no", "noo", "nope" a secas): solo cancela si
+            //     hay recordatorio de cita reciente (no rompe el "no" casual).
+            if (msg.type === 'text' && text) {
+                const cancelIntent = detectCancellationIntent(text);
+                if (cancelIntent !== 'none') {
+                    const cancelled = await handleAppointmentCancelReply(from, originPhoneId, cancelIntent);
+                    if (cancelled) {
+                        console.log(`📅 [WEBHOOK] Cancelación gestionada (intent=${cancelIntent}) por "${text}" (${from})`);
+                        return res.sendStatus(200);
+                    }
                 }
             }
 
