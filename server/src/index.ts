@@ -2797,21 +2797,73 @@ async function getClientVehicles(clientPhone: string): Promise<string> {
     }
 }
 
-async function cancelAppointment(clientPhone: string) {
+// Helper: hace UPDATE en Appointments resiliente al error "Unknown field name: DurationMin".
+// Si el campo no existe en Airtable, reintenta sin ese campo (solo log warning una vez).
+let durationMinFieldWarned = false;
+async function updateAppointmentFields(recordId: string, fields: Record<string, any>): Promise<void> {
+    if (!base) throw new Error('No DB');
+    try {
+        await base('Appointments').update([{ id: recordId, fields }]);
+    } catch (e: any) {
+        const msg = String(e?.message || '');
+        if (msg.includes('Unknown field name') && msg.includes('DurationMin') && 'DurationMin' in fields) {
+            if (!durationMinFieldWarned) {
+                console.warn(`⚠️ [Appointments] Campo DurationMin NO EXISTE en Airtable. Crea la columna como Number para evitar este warning. Reintentando sin ese campo.`);
+                durationMinFieldWarned = true;
+            }
+            const { DurationMin: _omit, ...rest } = fields;
+            await base('Appointments').update([{ id: recordId, fields: rest }]);
+            return;
+        }
+        throw e;
+    }
+}
+
+// Cancela una cita del cliente.
+//   - Si se pasa `targetAppointmentId`, intenta cancelar ESA cita en concreto
+//     (validando que pertenezca al cliente por teléfono). Esto es lo que usamos
+//     cuando el cliente responde "no" a un recordatorio: queremos cancelar la
+//     cita del recordatorio, no la más próxima en el tiempo (puede tener varias).
+//   - Si no se pasa o no se encuentra esa cita, fallback al comportamiento
+//     original: cancela la cita más próxima en el futuro.
+async function cancelAppointment(clientPhone: string, targetAppointmentId?: string): Promise<string> {
     if (!base) return "Error BD";
     const clean = cleanNumber(clientPhone);
     try {
-        // Buscar el slot LÍDER (el que tiene datos del cliente: ClientName, DurationMin, etc.)
-        // No filtramos por ClientPhone en la fórmula: el teléfono puede estar guardado
-        // con o sin prefijo de país (citas creadas a mano vs. por el bot). Se empareja
-        // en JS con phoneMatch (tolerante al prefijo). El conjunto de citas futuras es pequeño.
-        const now = new Date().toISOString();
-        const candidates = await base('Appointments').select({
-            filterByFormula: `AND({Status} = 'Booked', {ClientName} != '', {Date} >= '${now}')`,
-            sort: [{ field: "Date", direction: "asc" }]
-        }).all();
+        let record: any = null;
 
-        const record = candidates.find(r => phoneMatch(r.get('ClientPhone') as string, clientPhone));
+        // Caso A: tenemos appointmentId específico (típico cuando se cancela
+        // desde la respuesta a un recordatorio concreto).
+        if (targetAppointmentId) {
+            try {
+                const candidate = await base('Appointments').find(targetAppointmentId);
+                const cstatus = candidate.get('Status') as string;
+                if (cstatus !== 'Booked') {
+                    console.log(`📅 [Cancel] Cita ${targetAppointmentId} no está Booked (Status=${cstatus}). Fallback a cita más próxima.`);
+                } else if (!phoneMatch(candidate.get('ClientPhone') as string, clientPhone)) {
+                    console.warn(`⚠️ [Cancel] Cita ${targetAppointmentId} no pertenece a ${clean} (ClientPhone=${candidate.get('ClientPhone')}). Fallback a cita más próxima.`);
+                } else {
+                    record = candidate;
+                }
+            } catch (e: any) {
+                console.warn(`⚠️ [Cancel] No se pudo encontrar cita ${targetAppointmentId}: ${e.message}. Fallback a cita más próxima.`);
+            }
+        }
+
+        // Caso B (fallback o llamada sin appointmentId): cancelar la cita más próxima.
+        if (!record) {
+            // Buscar el slot LÍDER (el que tiene datos del cliente: ClientName, DurationMin, etc.)
+            // No filtramos por ClientPhone en la fórmula: el teléfono puede estar guardado
+            // con o sin prefijo de país (citas creadas a mano vs. por el bot). Se empareja
+            // en JS con phoneMatch (tolerante al prefijo). El conjunto de citas futuras es pequeño.
+            const now = new Date().toISOString();
+            const candidates = await base('Appointments').select({
+                filterByFormula: `AND({Status} = 'Booked', {ClientName} != '', {Date} >= '${now}')`,
+                sort: [{ field: "Date", direction: "asc" }]
+            }).all();
+
+            record = candidates.find(r => phoneMatch(r.get('ClientPhone') as string, clientPhone));
+        }
 
         if (!record) {
             return "No_appointment_found";
@@ -2823,11 +2875,18 @@ async function cancelAppointment(clientPhone: string) {
         const durationMin = Number(record.get('DurationMin') || 0);
         const leadAgenda = (record.get('Agenda') as string) || '';
 
-        // Resetear slot líder
-        await base('Appointments').update([{
-            id: record.id,
-            fields: { "Status": "Available", "ClientPhone": "", "ClientName": "", "Matricula": "", "Marca": "", "Modelo": "", "Extra": "", "Notas": "", "DurationMin": 0 }
-        }]);
+        // Resetear slot líder (resiliente a si DurationMin no existe en Airtable)
+        await updateAppointmentFields(record.id, {
+            "Status": "Available",
+            "ClientPhone": "",
+            "ClientName": "",
+            "Matricula": "",
+            "Marca": "",
+            "Modelo": "",
+            "Extra": "",
+            "Notas": "",
+            "DurationMin": 0
+        });
 
         // Si la cita ocupa múltiples slots, liberar también los secundarios.
         // Filtramos por: mismo cliente, MISMA agenda (clave: evita liberar citas del cliente
@@ -2837,22 +2896,20 @@ async function cancelAppointment(clientPhone: string) {
             const secCandidates = await base('Appointments').select({
                 filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`
             }).all();
-            const secondaries = secCandidates.filter(r => phoneMatch(r.get('ClientPhone') as string, clientPhone));
+            const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, clientPhone));
             if (secondaries.length > 0) {
                 for (let i = 0; i < secondaries.length; i += 10) {
-                    await base('Appointments').update(
-                        secondaries.slice(i, i + 10).map(r => ({
-                            id: r.id,
-                            fields: { "Status": "Available", "ClientPhone": "", "DurationMin": 0 }
-                        }))
-                    );
+                    const batch = secondaries.slice(i, i + 10);
+                    for (const r of batch) {
+                        await updateAppointmentFields(r.id, { "Status": "Available", "ClientPhone": "", "DurationMin": 0 });
+                    }
                 }
                 console.log(`📅 [Cancel] ${secondaries.length} slot(s) secundario(s) liberados`);
             }
         }
 
         metrics.appointmentsCancelled++;
-        console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate} (${durationMin}min)`);
+        console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate} (${durationMin}min)${targetAppointmentId ? ` [appointmentId=${targetAppointmentId}]` : ' [cita más próxima]'}`);
         return `✅ CITA_CANCELADA: ${humanDate}`;
     } catch (e: any) {
         console.error(`❌ [Cancel] Error:`, e.message);
@@ -2949,35 +3006,60 @@ async function handleAppointmentCancelReply(phone: string, originPhoneId: string
     if (intent === 'none') return false;
     const clean = cleanNumber(phone);
     try {
-        // Para "no" a secas comprobamos que haya un recordatorio reciente
-        // (los teléfonos pueden guardarse con o sin prefijo de país: comparamos
-        // los últimos 9 dígitos con RIGHT, como hace phoneMatch).
-        if (intent === 'ambiguous') {
-            const last9 = clean.slice(-9);
-            const phoneClause = last9.length === 9
-                ? `RIGHT({phone}, 9)='${last9}'`
-                : `{phone}='${clean}'`;
-            const recentReminders = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
-                filterByFormula: `AND(${phoneClause}, {status}='sent', FIND('cita', {type})>0)`,
-                sort: [{ field: 'sentAt', direction: 'desc' }],
-                maxRecords: 5
-            }).firstPage();
-            const cutoffMs = Date.now() - 30 * 60 * 60 * 1000;
-            const hasRecentReminder = recentReminders.some(r => {
-                const sentAt = r.get('sentAt') as string;
-                const t = sentAt ? new Date(sentAt).getTime() : NaN;
-                return !isNaN(t) && t >= cutoffMs;
-            });
-            if (!hasRecentReminder) return false; // sin recordatorio reciente → "no" normal
+        // Buscar el último recordatorio de cita ENVIADO al cliente.
+        // Lo usamos para dos cosas:
+        //   1) Para intent='ambiguous' ("no"), comprobar que hay recordatorio
+        //      reciente (<30h) y que el "no" no es conversación casual.
+        //   2) Para sacar el appointmentId del recordatorio: así cancelamos
+        //      la cita CONCRETA del recordatorio, no la más próxima en el
+        //      tiempo (un cliente puede tener varias citas en paralelo).
+        const last9 = clean.slice(-9);
+        const phoneClause = last9.length === 9
+            ? `RIGHT({phone}, 9)='${last9}'`
+            : `{phone}='${clean}'`;
+        const recentReminders = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND(${phoneClause}, {status}='sent', FIND('cita', {type})>0)`,
+            sort: [{ field: 'sentAt', direction: 'desc' }],
+            maxRecords: 5
+        }).firstPage();
+
+        const cutoffMs = Date.now() - 30 * 60 * 60 * 1000;
+        const recentReminder = recentReminders.find(r => {
+            const sentAt = r.get('sentAt') as string;
+            const t = sentAt ? new Date(sentAt).getTime() : NaN;
+            return !isNaN(t) && t >= cutoffMs;
+        });
+
+        // Para "no" a secas requerimos recordatorio reciente para no romper
+        // conversación casual.
+        if (intent === 'ambiguous' && !recentReminder) return false;
+
+        const targetAppointmentId = (recentReminder?.get('appointmentId') as string) || undefined;
+        if (targetAppointmentId) {
+            console.log(`📅 [CancelReply] Cancelando cita del recordatorio (appointmentId=${targetAppointmentId}) tras "${intent}" de ${clean}`);
         }
 
-        // Cancelar la cita (libera el slot líder y los secundarios del bloque)
-        const result = await cancelAppointment(clean);
+        // Cancelar la cita: si tenemos appointmentId del recordatorio, esa;
+        // si no, fallback a la cita más próxima del cliente.
+        const result = await cancelAppointment(clean, targetAppointmentId);
+
         if (typeof result === 'string' && result.startsWith('✅ CITA_CANCELADA')) {
             await cancelPendingCitaReminders(clean);
             await sendWhatsAppText(clean, '✅ Hemos cancelado su cita y liberado el hueco. Si quiere reprogramar, escríbanos cuando le venga bien. ¡Gracias por avisar!', originPhoneId);
             console.log(`📅 [CancelReply] Cita cancelada por intent="${intent}" de ${clean}`);
             return true;
+        }
+
+        // Error técnico al actualizar Airtable. Avisamos al cliente para no
+        // dejarlo en silencio, sobre todo si el "no" fue respuesta directa al
+        // recordatorio (recentReminder existe) o si la intención era explícita.
+        if (result === 'Error técnico al cancelar.') {
+            if (intent === 'explicit' || recentReminder) {
+                await sendWhatsAppText(clean, '⚠️ Tuvimos un problema técnico al cancelar tu cita. Por favor inténtalo de nuevo en unos minutos, o escríbenos y te ayudamos a cancelarla manualmente.', originPhoneId);
+                console.warn(`⚠️ [CancelReply] Error técnico al cancelar para ${clean}. Mensaje de disculpa enviado.`);
+                return true;
+            }
+            return false;
         }
 
         // No hay cita activa que cancelar.
