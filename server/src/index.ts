@@ -1354,6 +1354,22 @@ async function runScheduleMaintenance() {
             await delay(200);
         }
         console.log(`📅 [Agendas] Mantenimiento OK. ${agendas.length} agenda(s), ${newSlotsToCreate.length} huecos nuevos.`);
+
+        // Si hubo cambios reales (borrados o creados), avisar a los calendarios
+        // abiertos para que se refresquen. Antes los slots fantasma se quedaban
+        // visibles hasta recargar manualmente.
+        const totalChanges = pastSlots.length + orphans.length + newSlotsToCreate.length;
+        if (totalChanges > 0) {
+            try {
+                io.emit('appointment_changed', {
+                    action: 'maintenance',
+                    removed: pastSlots.length + orphans.length,
+                    created: newSlotsToCreate.length
+                });
+            } catch (emitErr: any) {
+                console.warn('[Agendas] Error emitiendo appointment_changed:', emitErr?.message);
+            }
+        }
     } catch (e) { console.error("Error mantenimiento agenda:", e); }
 }
 
@@ -1860,14 +1876,39 @@ const HUMAN_IDLE_MINUTES = 15;
 // Devuelve los minutos transcurridos desde el último mensaje SALIENTE
 // enviado por un trabajador (no por Bot IA, no por el cliente) hacia este
 // cliente. Si nunca ha habido respuesta del equipo, devuelve null.
-async function getMinutesSinceLastWorkerReply(clientPhone: string): Promise<number | null> {
+//
+// originPhoneId (opcional): si se pasa, filtra solo mensajes de esa WABA.
+// Esto evita confundir respuestas de un número con las de otro cuando un
+// mismo cliente escribe a varios PhoneId de la misma cuenta.
+//
+// Excluye explícitamente:
+//   - sender = "Bot IA" (mensajes de Laura)
+//   - sender = phone del cliente (inbound)
+//   - sender = "" (mensajes sin remitente — históricos malformados)
+//   - sender numérico (mensajes inbound antiguos cuyo sender es el número
+//     del cliente con/sin prefijo de país).
+async function getMinutesSinceLastWorkerReply(clientPhone: string, originPhoneId?: string): Promise<number | null> {
     if (!base) return null;
     const clean = cleanNumber(clientPhone);
     if (!clean) return null;
     try {
-        // Outbound: recipient = clientPhone, sender = trabajador (no Bot IA, no el propio cliente)
+        // Construir filtro: outbound al cliente, no de Bot IA, no del propio
+        // cliente (con o sin prefijo), no sender vacío, no sender numérico.
+        const clauses = [
+            `{recipient}='${clean}'`,
+            `{sender}!='Bot IA'`,
+            `{sender}!='${clean}'`,
+            `{sender}!=''`,
+            // Excluir senders que parezcan números de teléfono (>=8 dígitos
+            // seguidos). Cubre mensajes inbound antiguos del cliente que
+            // guardaron `sender` con/sin prefijo.
+            `NOT(REGEX_MATCH({sender}, "^[+]?[0-9]{8,}$"))`
+        ];
+        if (originPhoneId) {
+            clauses.push(`{origin_phone_id}='${escAt(originPhoneId)}'`);
+        }
         const records = await base('Messages').select({
-            filterByFormula: `AND({recipient}='${clean}', {sender}!='Bot IA', {sender}!='${clean}', {sender}!='')`,
+            filterByFormula: `AND(${clauses.join(', ')})`,
             sort: [{ field: 'timestamp', direction: 'desc' }],
             maxRecords: 1
         }).firstPage();
@@ -2637,33 +2678,27 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             console.log(`📅 [Book] Actualizando cita a Booked...`);
             // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
             // Los nombres de columna en Airtable se mantienen (Matricula, Marca, Modelo, Extra, Notas) por compatibilidad,
-            // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels
-            await base!.table('Appointments').update([{
-                id: realId,
-                fields: {
-                    "Status": "Booked",
-                    "ClientPhone": cleanedPhone,
-                    "ClientName": clientName,
-                    "Matricula": field1,
-                    "Marca": field2,
-                    "Modelo": field3,
-                    "Extra": field4,
-                    "Notas": field5,
-                    "DurationMin": durationMin   // duración total de la cita en minutos
-                }
-            }]);
+            // pero su CONTENIDO depende de los labels configurados en BotSettings → field_labels.
+            // Usamos updateAppointmentFields para que la reserva no falle si la columna
+            // DurationMin no existe en Airtable (mismo tratamiento que en cancelAppointment).
+            await updateAppointmentFields(realId, {
+                "Status": "Booked",
+                "ClientPhone": cleanedPhone,
+                "ClientName": clientName,
+                "Matricula": field1,
+                "Marca": field2,
+                "Modelo": field3,
+                "Extra": field4,
+                "Notas": field5,
+                "DurationMin": durationMin   // duración total de la cita en minutos
+            });
 
             // Si la cita ocupa múltiples slots, marcar los secundarios como Booked también.
             // No guardan datos del cliente — solo Status=Booked + ClientPhone para bloquear el hueco.
             if (slotIds.length > 1) {
                 const secondaryIds = slotIds.slice(1);
-                for (let i = 0; i < secondaryIds.length; i += 10) {
-                    await base!.table('Appointments').update(
-                        secondaryIds.slice(i, i + 10).map(id => ({
-                            id,
-                            fields: { "Status": "Booked", "ClientPhone": cleanedPhone }
-                        }))
-                    );
+                for (const id of secondaryIds) {
+                    await updateAppointmentFields(id, { "Status": "Booked", "ClientPhone": cleanedPhone });
                 }
                 console.log(`📅 [Book] ${secondaryIds.length} slot(s) secundario(s) bloqueados`);
             }
@@ -3230,6 +3265,29 @@ async function processAIInner(
     inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
 ) {
     if (!genAI) { console.error("❌ No API Key"); return; }
+
+    // RE-CHECK anti-race: entre que el webhook decidió llamar a processAI y
+    // que llegamos aquí (puede pasar 1-2s con el lock por teléfono), el agente
+    // pudo asignarse el chat o escribirle al cliente. Si ahora hay agente
+    // activo (último mensaje del agente <HUMAN_IDLE_MINUTES), abortamos para
+    // no interrumpir al humano.
+    if (base) {
+        try {
+            const rc = await base('Contacts').select({
+                filterByFormula: `{phone}='${clean}'`, maxRecords: 1
+            }).firstPage();
+            const currentAssigned = (rc.length > 0 ? rc[0].get('assigned_to') as string : '') || '';
+            if (currentAssigned) {
+                const idleMin = await getMinutesSinceLastWorkerReply(clean, originPhoneId);
+                if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
+                    console.log(`🛑 [IA] Abortando para ${clean}: agente "${currentAssigned}" activo (último mensaje hace ${idleMin}min).`);
+                    return;
+                }
+            }
+        } catch (e: any) {
+            console.warn(`⚠️ [IA] Re-check assigned_to falló (continúo procesando): ${e.message}`);
+        }
+    }
 
     // Truncar texto MUY largo del cliente — protege contra DoS de cuota Gemini
     // y peticiones excesivas. 4000 chars son ~3 mensajes de WhatsApp largos.
@@ -4043,13 +4101,15 @@ app.put('/api/appointments/:id', async (req, res) => {
         // Marcar/desmarcar la cita como incidente manualmente desde el popup
         if (req.body.incident !== undefined) f["Incident"] = !!req.body.incident;
         try {
-            await base('Appointments').update([{ id: req.params.id, fields: f }]);
+            // updateAppointmentFields ya tolera el campo DurationMin si no existe.
+            // Aquí añadimos también tolerancia al campo Incident (más nuevo).
+            await updateAppointmentFields(req.params.id, f);
         } catch (e: any) {
             // Tolerancia: si el campo "Incident" aún no existe en Airtable, guardar sin él.
             if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
                 console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
-                delete f.Incident;
-                await base('Appointments').update([{ id: req.params.id, fields: f }]);
+                const { Incident: _omitIncident, ...rest } = f;
+                await updateAppointmentFields(req.params.id, rest);
             } else throw e;
         }
 
@@ -4697,7 +4757,7 @@ app.post('/webhook', async (req, res) => {
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
             } else if (assignedTo) {
-                const idleMin = await getMinutesSinceLastWorkerReply(from);
+                const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
                 if (idleMin === null) {
                     console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}" sin mensajes previos del agente. Laura no responde (le da tiempo a contestar).`);
                 } else if (idleMin < HUMAN_IDLE_MINUTES) {
