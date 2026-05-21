@@ -978,8 +978,8 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
 
             {showDetailsPanel && (
                 <div className={`fixed inset-0 md:relative md:inset-auto w-full md:w-80 md:border-l shadow-2xl flex flex-col h-full animate-in slide-in-from-right duration-300 z-30 ${isDark ? 'glass-panel border-l border-white/5 m-0 rounded-none' : 'bg-white border-gray-200'}`}>
-                    <div className={`p-4 border-b flex justify-between items-center ${isDark ? 'border-white/5 bg-transparent' : 'border-gray-100 bg-slate-50/50'}`}><h3 className={`font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Detalles del Cliente</h3><button onClick={() => setShowDetailsPanel(false)} className={`p-1 rounded-full transition ${isDark ? 'hover:bg-white/10 text-slate-300' : 'hover:bg-slate-200 text-slate-400'}`}><X className="w-5 h-5" /></button></div>
-                    <div className="flex-1 overflow-y-auto p-5 space-y-6">
+                    <div className={`px-4 pb-4 safe-pt-header border-b flex justify-between items-center ${isDark ? 'border-white/5 bg-transparent' : 'border-gray-100 bg-slate-50/50'}`}><h3 className={`font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Detalles del Cliente</h3><button onClick={() => setShowDetailsPanel(false)} className={`p-1 rounded-full transition ${isDark ? 'hover:bg-white/10 text-slate-300' : 'hover:bg-slate-200 text-slate-400'}`}><X className="w-5 h-5" /></button></div>
+                    <div className="flex-1 overflow-y-auto p-5 safe-pb-8 space-y-6">
                         <div className="flex flex-col items-center">
                             <div className={`w-20 h-20 rounded-full flex items-center justify-center mb-3 border-4 shadow-sm ${isDark ? 'bg-slate-700 text-slate-500 border-slate-600' : 'bg-slate-100 text-slate-300 border-white'}`}>{contact.avatar ? <img src={contact.avatar} className="w-full h-full rounded-full object-cover" /> : <User className="w-10 h-10" />}</div>
                             <h2 className={`text-lg font-bold text-center ${isDark ? 'text-white' : 'text-slate-800'}`}>{name || "Sin nombre"}</h2>

@@ -28,7 +28,7 @@ export function AppointmentToast({ notifications, onOpen, onDismiss }: Props) {
     if (notifications.length === 0) return null;
 
     return (
-        <div className="fixed top-4 right-4 z-[9999] flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] sm:w-96 pointer-events-none">
+        <div className="fixed safe-toast-top right-4 z-[9999] flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] sm:w-96 pointer-events-none">
             {notifications.map(n => (
                 <div
                     key={n.id}

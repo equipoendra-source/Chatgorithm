@@ -469,14 +469,14 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         <div className={`fixed inset-0 z-50 flex flex-col h-[100dvh] w-full font-sans ${isDark ? 'bg-transparent' : 'bg-slate-50'}`}>
 
             {/* HEADER */}
-            <div className={`border-b p-4 flex items-center justify-between shadow-sm flex-shrink-0 z-20 ${isDark ? 'bg-slate-900/60 backdrop-blur-xl border-white/5' : 'bg-white border-gray-200'}`}>
+            <div className={`border-b px-4 pb-4 safe-pt-header flex items-center justify-between shadow-sm flex-shrink-0 z-20 ${isDark ? 'bg-slate-900/60 backdrop-blur-xl border-white/5' : 'bg-white border-gray-200'}`}>
                 <div className="flex items-center gap-3">
                     <button onClick={handleBack} className={`p-2 rounded-full transition active:scale-95 ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`}>
                         <ArrowLeft className="w-6 h-6" />
                     </button>
                     <h1 className={`text-lg md:text-xl font-bold truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>{getTitle()}</h1>
                 </div>
-                <div className="fixed top-4 right-4 z-[70] flex flex-col gap-2 items-end pointer-events-none">
+                <div className="fixed safe-toast-top right-4 z-[70] flex flex-col gap-2 items-end pointer-events-none">
                     {success && <div className="bg-green-100 text-green-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto">{success}</div>}
                     {error && <div className="bg-red-100 text-red-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto">{error}</div>}
                 </div>

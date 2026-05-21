@@ -109,7 +109,7 @@ export function AlertCenter({ socket, isAdmin }: AlertCenterProps) {
 
     return (
         <div
-            className="fixed top-4 right-4 z-[9999] flex flex-col gap-3 max-w-md w-full pointer-events-none"
+            className="fixed safe-toast-top right-4 z-[9999] flex flex-col gap-3 max-w-md w-full pointer-events-none"
             aria-live="polite"
         >
             {alerts.map(a => {

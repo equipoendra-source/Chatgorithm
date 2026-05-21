@@ -532,7 +532,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     );
 
     return (
-        <div className={`p-4 md:p-8 h-full overflow-y-auto relative pb-20 md:pb-8 ${isDark ? 'bg-transparent' : 'bg-slate-50'}`}>
+        <div className={`p-4 md:p-8 h-full overflow-y-auto relative safe-pb-20 md:safe-pb-8 ${isDark ? 'bg-transparent' : 'bg-slate-50'}`}>
             <div className="max-w-6xl mx-auto space-y-6">
 
                 {/* HEADER RESPONSIVE */}

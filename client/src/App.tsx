@@ -459,7 +459,7 @@ function App() {
                     <div className={`flex-1 flex flex-col relative h-full ${isDark ? 'bg-slate-900/40 backdrop-blur-md' : 'bg-white'}`}>
                         <button
                             onClick={() => setView('chat')}
-                            className="absolute top-6 left-6 z-50 glass-button-secondary p-2.5 rounded-full hover:bg-white/10 transition-all active:scale-95 group border border-white/10"
+                            className="absolute safe-top-4 left-4 md:left-6 z-50 glass-button-secondary p-2.5 rounded-full hover:bg-white/10 transition-all active:scale-95 group border border-white/10"
                             title="Volver al Chat"
                         >
                             <ArrowLeft className="w-6 h-6 text-slate-300 group-hover:text-indigo-400 transition-colors" />
@@ -512,7 +512,7 @@ function App() {
                     : 'border-slate-200 bg-slate-50'}`}>
 
                     {/* Company indicator */}
-                    <div className={`px-5 py-4 flex items-center gap-3 border-b backdrop-blur-sm ${isDark ? 'border-white/5 bg-white/5' : 'border-slate-200 bg-white'}`} id="tour-company-info">
+                    <div className={`px-5 pb-4 safe-pt-header flex items-center gap-3 border-b backdrop-blur-sm ${isDark ? 'border-white/5 bg-white/5' : 'border-slate-200 bg-white'}`} id="tour-company-info">
                         {companyConfig.logoUrl ? (
                             <img
                                 src={companyConfig.logoUrl}
@@ -567,11 +567,11 @@ function App() {
                 {/* MAIN AREA */}
                 <main className={`flex-1 flex-col min-w-0 relative ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) || (view === 'team_chat' && window.innerWidth >= 768) ? 'flex' : 'hidden md:flex'} ${isDark ? 'bg-slate-900/20 backdrop-blur-sm' : 'bg-white'}`}>
                     <div className="flex-1 overflow-hidden relative flex flex-col h-full">
-                        {!isConnected && <div className="absolute top-0 left-0 right-0 bg-red-500/90 backdrop-blur-sm text-white text-xs text-center py-2 z-50 flex items-center justify-center gap-2 font-bold shadow-lg"><div className="w-4 h-4 flex items-center justify-center"><WifiOff className="w-3 h-3" /></div><span>Sin conexión con el servidor.</span></div>}
+                        {!isConnected && <div className="absolute top-0 left-0 right-0 bg-red-500/90 backdrop-blur-sm text-white text-xs text-center z-50 flex items-center justify-center gap-2 font-bold shadow-lg safe-pt-2 pb-2"><div className="w-4 h-4 flex items-center justify-center"><WifiOff className="w-3 h-3" /></div><span>Sin conexión con el servidor.</span></div>}
 
                         {view === 'team_chat' ? (
                             <div className="flex flex-col h-full w-full relative">
-                                <button onClick={() => setMobileTeamChatActive(false)} className="md:hidden absolute top-4 left-4 z-50 p-2.5 rounded-full shadow-lg border border-white/10 bg-slate-800 text-slate-300 active:scale-95 transition-transform"><ArrowLeft className="w-5 h-5" /></button>
+                                <button onClick={() => setMobileTeamChatActive(false)} className="md:hidden absolute safe-top-4 left-4 z-50 p-2.5 rounded-full shadow-lg border border-white/10 bg-slate-800 text-slate-300 active:scale-95 transition-transform"><ArrowLeft className="w-5 h-5" /></button>
                                 <TeamChat socket={socket} user={user} channel={teamChannel} />
                             </div>
                         )
