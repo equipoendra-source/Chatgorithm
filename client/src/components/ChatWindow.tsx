@@ -825,23 +825,26 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                 {/* ... (Resto del Footer con Inputs) ... */}
                 {showEmojiPicker && <div className="absolute bottom-20 left-4 z-50 shadow-2xl rounded-xl animate-in zoom-in-95 duration-200" onClick={(e) => e.stopPropagation()}><EmojiPicker onEmojiClick={onEmojiClick} width={300} height={400} previewConfig={{ showPreview: false }} /></div>}
 
-                <div className={`px-3 pt-3 safe-bottom-2 border-t relative z-20 transition-colors duration-300 ${isInternalMode ? 'bg-yellow-900/20 border-yellow-500/30 backdrop-blur-sm' : (isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-slate-200')} ${isAiActive ? 'border-t-4 border-purple-500 bg-purple-900/10' : ''}`}>
+                <div className={`safe-bottom-2 border-t relative z-20 transition-colors duration-300 ${isInternalMode ? 'bg-yellow-900/20 border-yellow-500/30 backdrop-blur-sm' : (isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-slate-200')} ${isAiActive ? 'border-t-4 border-purple-500 bg-purple-900/10' : ''}`}>
+
+                    {/* BANNERS — ahora hijos normales (no absolute) para que su altura empuje
+                        el último mensaje del chat hacia arriba en lugar de taparlo. */}
 
                     {/* PANEL DE PREVISUALIZACIÓN DE ATAJO */}
                     {matchingQR && (
-                        <div className="absolute bottom-full left-0 w-full bg-yellow-50 border-t border-yellow-200 p-2 text-xs text-yellow-800 flex items-center gap-2 animate-in slide-in-from-bottom-2 z-10">
-                            <Zap className="w-4 h-4 fill-current" />
-                            <span className="font-bold">Atajo detectado:</span>
-                            <span className="truncate flex-1 italic font-medium">{matchingQR.content}</span>
-                            <span className="text-[10px] opacity-70 whitespace-nowrap">(Se enviará este texto)</span>
+                        <div className="bg-yellow-50 border-b border-yellow-200 p-2 text-xs text-yellow-800 flex items-center gap-2 animate-in slide-in-from-bottom-2">
+                            <Zap className="w-4 h-4 fill-current flex-shrink-0" />
+                            <span className="font-bold flex-shrink-0">Atajo detectado:</span>
+                            <span className="truncate flex-1 italic font-medium min-w-0">{matchingQR.content}</span>
+                            <span className="text-[10px] opacity-70 whitespace-nowrap hidden sm:inline">(Se enviará este texto)</span>
                         </div>
                     )}
 
-                    {/* PANEL DE PREVISUALIZACIÓN DE ARCHIVO (NUEVO) */}
+                    {/* PANEL DE PREVISUALIZACIÓN DE ARCHIVO */}
                     {pendingFile && (
-                        <div className="absolute bottom-full left-0 w-full bg-slate-100 border-t border-slate-200 p-3 flex items-center justify-between z-20 animate-in slide-in-from-bottom-2 shadow-sm">
+                        <div className="bg-slate-100 border-b border-slate-200 p-3 flex items-center justify-between animate-in slide-in-from-bottom-2 shadow-sm">
                             <div className="flex items-center gap-3 overflow-hidden">
-                                <div className="bg-white p-2 rounded-lg border border-slate-200 text-blue-500">
+                                <div className="bg-white p-2 rounded-lg border border-slate-200 text-blue-500 flex-shrink-0">
                                     {pendingFile.type.startsWith('image') ? <ImageIcon size={20} /> : <FileText size={20} />}
                                 </div>
                                 <div className="min-w-0">
@@ -855,7 +858,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                     if (fileInputRef.current) fileInputRef.current.value = '';
                                     if (cameraInputRef.current) cameraInputRef.current.value = '';
                                 }}
-                                className="p-1.5 hover:bg-slate-200 rounded-full text-slate-500 transition"
+                                className="p-1.5 hover:bg-slate-200 rounded-full text-slate-500 transition flex-shrink-0"
                                 title="Cancelar subida"
                             >
                                 <X size={16} />
@@ -864,29 +867,29 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                     )}
 
                     {isAiActive && (
-                        <div className="absolute bottom-full left-0 w-full bg-purple-600 text-white p-2 text-xs font-bold flex items-center justify-between px-4 animate-in slide-in-from-bottom-2 z-20 shadow-md">
-                            <span className="flex items-center gap-2"><Bot className="w-4 h-4 animate-pulse" /> MODALIDAD AUTOMÁTICA ACTIVA</span>
-                            <button onClick={handleStopAI} className="bg-white/20 hover:bg-white/30 px-2 py-1 rounded text-[10px] flex items-center gap-1 transition"><StopCircle className="w-3 h-3" /> DETENER IA</button>
+                        <div className="bg-purple-600 text-white p-2 text-xs font-bold flex items-center justify-between px-4 animate-in slide-in-from-bottom-2 shadow-md gap-2">
+                            <span className="flex items-center gap-2 min-w-0"><Bot className="w-4 h-4 animate-pulse flex-shrink-0" /> <span className="truncate">MODALIDAD AUTOMÁTICA ACTIVA</span></span>
+                            <button onClick={handleStopAI} className="bg-white/20 hover:bg-white/30 px-2 py-1 rounded text-[10px] flex items-center gap-1 transition flex-shrink-0"><StopCircle className="w-3 h-3" /> DETENER IA</button>
                         </div>
                     )}
 
                     {/* INDICADOR DE GRABACIÓN DE AUDIO */}
                     {isRecording && (
-                        <div className="absolute bottom-full left-0 w-full bg-red-500 text-white p-3 text-sm font-bold flex items-center justify-center gap-3 animate-in slide-in-from-bottom-2 z-30 shadow-lg">
-                            <span className="relative flex h-3 w-3">
+                        <div className="bg-red-500 text-white p-3 text-sm font-bold flex items-center justify-center gap-3 animate-in slide-in-from-bottom-2 shadow-lg">
+                            <span className="relative flex h-3 w-3 flex-shrink-0">
                                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-white opacity-75"></span>
                                 <span className="relative inline-flex rounded-full h-3 w-3 bg-white"></span>
                             </span>
-                            <Mic className="w-5 h-5 animate-pulse" />
+                            <Mic className="w-5 h-5 animate-pulse flex-shrink-0" />
                             <span className="text-lg font-mono tracking-wider">{formatRecordingTime(recordingDuration)}</span>
-                            <span className="text-xs opacity-80">Grabando audio...</span>
-                            <button onClick={stopRecording} className="ml-auto bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg text-xs flex items-center gap-1 transition">
+                            <span className="text-xs opacity-80 hidden sm:inline">Grabando audio...</span>
+                            <button onClick={stopRecording} className="ml-auto bg-white/20 hover:bg-white/30 px-3 py-1.5 rounded-lg text-xs flex items-center gap-1 transition flex-shrink-0">
                                 <Square className="w-3 h-3 fill-current" /> Parar
                             </button>
                         </div>
                     )}
 
-                    <form onSubmit={sendMessage} className="flex gap-1 md:gap-2 items-center max-w-5xl mx-auto" onClick={(e) => e.stopPropagation()}>
+                    <form onSubmit={sendMessage} className="flex gap-1 md:gap-2 items-center max-w-5xl mx-auto px-3 pt-3" onClick={(e) => e.stopPropagation()}>
                         <input type="file" ref={fileInputRef} onChange={handleFileSelect} className="hidden" />
                         <input
                             type="file"
