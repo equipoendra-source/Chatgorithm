@@ -890,7 +890,6 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                     <button type="button" onClick={() => { onOpenTemplates(); setShowMobileActionsMenu(false); }} className="w-full text-left px-3 py-2.5 text-sm rounded-lg hover:bg-green-50 flex items-center gap-3 text-slate-700"><LayoutTemplate className="w-4 h-4 text-green-500" /> Plantillas</button>
                                     <button type="button" onClick={() => { setShowQuickRepliesList(true); setShowMobileActionsMenu(false); }} className="w-full text-left px-3 py-2.5 text-sm rounded-lg hover:bg-yellow-50 flex items-center gap-3 text-slate-700"><Zap className="w-4 h-4 text-yellow-500" /> Resp. rápidas</button>
                                     <div className="h-px bg-slate-100 my-1" />
-                                    <button type="button" onClick={() => { handleTriggerAI(); setShowMobileActionsMenu(false); }} className={`w-full text-left px-3 py-2.5 text-sm rounded-lg flex items-center gap-3 ${isAiActive ? 'bg-purple-50 text-purple-700' : 'hover:bg-purple-50 text-slate-700'}`}><Bot className="w-4 h-4 text-purple-500" /> {isAiActive ? 'Detener IA' : 'Delegar a IA'}</button>
                                     <button type="button" onClick={() => { setIsInternalMode(!isInternalMode); setShowMobileActionsMenu(false); }} className={`w-full text-left px-3 py-2.5 text-sm rounded-lg flex items-center gap-3 ${isInternalMode ? 'bg-yellow-50 text-yellow-700' : 'hover:bg-slate-50 text-slate-700'}`}><StickyNote className="w-4 h-4 text-yellow-500" /> {isInternalMode ? 'Modo normal' : 'Nota interna'}</button>
                                     <button type="button" onClick={() => { setShowEmojiPicker(true); setShowMobileActionsMenu(false); }} className="w-full text-left px-3 py-2.5 text-sm rounded-lg hover:bg-slate-50 flex items-center gap-3 text-slate-700"><Smile className="w-4 h-4 text-slate-400" /> Emojis</button>
                                 </div>
@@ -928,8 +927,6 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                 </div>
                             )}
                         </div>
-
-                        <button id="chat-ai-btn" type="button" onClick={handleTriggerAI} className={`p-2 rounded-full transition-all hidden md:flex flex-shrink-0 ${isAiActive ? 'bg-purple-600 text-white animate-pulse shadow-lg shadow-purple-200' : 'text-slate-500 hover:text-purple-600 hover:bg-purple-50'}`} title={isAiActive ? "Detener IA" : "Delegar a IA"}>{isAiActive ? <StopCircle className="w-5 h-5" /> : <Bot className="w-5 h-5" />}</button>
 
                         <button id="chat-note-btn" type="button" onClick={() => setIsInternalMode(!isInternalMode)} className={`p-2 rounded-full transition-all hidden md:flex flex-shrink-0 ${isInternalMode ? 'text-yellow-600 bg-yellow-200' : 'text-slate-400 hover:bg-slate-100 hover:text-slate-600'}`} title={isInternalMode ? "Modo Nota Interna (Privado)" : "Cambiar a Nota Interna"}>{isInternalMode ? <Lock className="w-5 h-5" /> : <StickyNote className="w-5 h-5" />}</button>
 

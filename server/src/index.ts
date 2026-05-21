@@ -4531,22 +4531,23 @@ app.post('/webhook', async (req, res) => {
                     ? { mediaId: inboundMediaId, type: inboundType as 'audio' | 'image' | 'video' | 'document' }
                     : undefined;
 
-            // FLAG GLOBAL: si Laura está desactivada, NO se activa para ningún mensaje.
-            // Los mensajes SIGUEN guardándose y notificándose al panel — solo el bot calla.
+            // LÓGICA SIMPLIFICADA: Laura responde por defecto cuando está globalmente activa
+            // y nadie del equipo tiene asignado el chat. Cuando un humano toma el chat
+            // (assigned_to != ''), Laura calla automáticamente sin necesidad de botón
+            // por chat. El control único es el toggle global de Laura en Settings.
+            const assignedTo = (contactRecord?.get('assigned_to') as string) || '';
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
-            } else if (activeAiChats.has(from)) {
-                console.log(`🤖 IA activada por sesión activa para ${from}`);
-                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
-            } else if (hasPendingBooking) {
-                console.log(`🤖 IA reactivada por reserva pendiente en cache para ${from}`);
-                activeAiChats.add(from);
-                processAI(text, from, contactRecord?.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
-            } else if (contactRecord && (contactRecord.get('status') === 'Nuevo' || contactRecord.get('status') === 'Cerrado') && !contactRecord.get('assigned_to')) {
-                console.log(`🤖 IA activada (status=${contactRecord.get('status')}) para ${from}`);
-                processAI(text, from, contactRecord.get('name') as string || "Cliente", originPhoneId, inboundMediaPkg);
+            } else if (assignedTo) {
+                console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}". Laura no responde (humano lo maneja).`);
             } else {
-                console.log(`🔕 IA ignorada. Status=${contactRecord?.get('status')}, Assigned=${contactRecord?.get('assigned_to')}`);
+                const name = contactRecord?.get('name') as string || "Cliente";
+                const reason = activeAiChats.has(from) ? 'sesión activa'
+                    : hasPendingBooking ? 'reserva pendiente'
+                    : 'chat sin asignar';
+                console.log(`🤖 [Bot] Laura responde a ${from} (${reason}).`);
+                if (hasPendingBooking && !activeAiChats.has(from)) activeAiChats.add(from);
+                processAI(text, from, name, originPhoneId, inboundMediaPkg);
             }
         } else if (body.object && body.entry?.[0]?.changes?.[0]?.value?.statuses) {
             // Status updates (delivered, read, etc.) - ignorar silenciosamente
