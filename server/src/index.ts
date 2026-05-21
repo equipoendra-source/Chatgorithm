@@ -3108,7 +3108,16 @@ FLUJO OBLIGATORIO al reservar una cita:
    - SIEMPRE confirma el vehículo elegido antes de reservar, aunque solo tenga uno registrado ("¿Confirmas que la cita es para tu [vehículo]?").
    - Si dice que es un vehículo nuevo, pídele los datos que falten.
 3. Si el cliente NO tiene vehículos registrados: pídele los datos del vehículo normalmente (los 5 campos de arriba).
-El vehículo se guarda automáticamente al reservar — no tienes que hacer nada extra para registrarlo.`;
+El vehículo se guarda automáticamente al reservar — no tienes que hacer nada extra para registrarlo.
+
+## 📸 FOTO DE COCHE → REGISTRO AUTOMÁTICO DE MATRÍCULA
+Cuando el cliente envíe una FOTO de un vehículo (con o sin caption), o cuando te diga por texto "este es mi nuevo coche, matrícula X", actúa así:
+1. Identifica la MATRÍCULA española en la imagen. Formato actual: 4 dígitos + 3 letras (consonantes B,C,D,F,G,H,J,K,L,M,N,P,R,S,T,V,W,X,Y,Z). Formato antiguo: 1-2 letras de provincia + 4 dígitos + 1-2 letras. Reconoce también marca, modelo y color si puedes.
+2. Llama a register_vehicle con field1=matrícula (MAYÚSCULAS, sin espacios ni guiones) y field2..field5 con lo que reconozcas (marca, modelo, color, notas).
+3. register_vehicle AÑADE el vehículo a la lista (no sustituye los anteriores). Si la misma matrícula ya estaba registrada, simplemente actualiza sus datos.
+4. Si la matrícula NO es legible o no estás seguro, NO la inventes: pide al cliente que te la escriba por texto, mencionándole la marca/modelo/color que sí hayas reconocido en la foto. Cuando te la dé, entonces llama a register_vehicle.
+5. Tras registrar, confirma al cliente el alta y dile cuántos vehículos tiene ya guardados en total (esa información te la devuelve la propia tool).
+6. NO llames a stop_conversation después de register_vehicle — continúa la conversación normalmente (puede que el cliente quiera pedir cita justo después).`;
 
             // Instrucciones de derivación a departamentos — dinámicas según config del cliente
             // Laura llamará a assign_department con uno de estos nombres exactos (N dinámico).
@@ -3228,6 +3237,21 @@ Cuando el cliente indique qué tipo de servicio necesita:
                                 required: ["optionIndex", "clientName", ...fieldKeys.filter(k => fieldLabels[k].required)]
                             }
                         },
+                        {
+                            name: "register_vehicle",
+                            description: "Register a NEW vehicle for the current client, or update an existing one if the same license plate already exists. Call this when you detect a license plate in an image the client just sent, or when the client gives you vehicle data outside of booking an appointment (e.g. \"este es mi nuevo coche, matrícula 1234 BCD\"). A client can have multiple vehicles — this ADDS to the list, never replaces. The license plate (field1) is REQUIRED; if you cannot read it from the image, ask the client for it by text before calling this tool.",
+                            parameters: {
+                                type: SchemaType.OBJECT,
+                                properties: {
+                                    field1: { type: SchemaType.STRING, description: `${fieldLabels.field1.description} — REQUIRED, uppercase, no spaces or dashes (e.g. "1234BCD").` },
+                                    field2: { type: SchemaType.STRING, description: fieldLabels.field2.description },
+                                    field3: { type: SchemaType.STRING, description: fieldLabels.field3.description },
+                                    field4: { type: SchemaType.STRING, description: fieldLabels.field4.description },
+                                    field5: { type: SchemaType.STRING, description: fieldLabels.field5.description }
+                                },
+                                required: ["field1"]
+                            }
+                        },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs to talk to a human about the specific topics listed in the system prompt for each department.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: departmentLabels.map(d => d.name), format: "enum" } }, required: ["department"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking, cancelling an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
@@ -3256,6 +3280,27 @@ Cuando el cliente indique qué tipo de servicio necesita:
                     args.field5 || '',
                     args.service || ''
                 );
+                else if (call.name === "register_vehicle") {
+                    const plate = String(args.field1 || args.licensePlate || '').trim();
+                    if (!plate) {
+                        toolResult = "Error: no se ha pasado matrícula. Pide al cliente la matrícula por texto antes de volver a llamar a esta función.";
+                    } else {
+                        try {
+                            await upsertVehicle(
+                                clean,
+                                plate,
+                                args.field2 || args.carBrand || '',
+                                args.field3 || args.carModel || '',
+                                args.field4 || '',
+                                args.field5 || ''
+                            );
+                            const list = await getClientVehicles(clean);
+                            toolResult = `✅ Vehículo registrado/actualizado correctamente.\n\n${list}\n\nAhora confirma al cliente el alta del vehículo (marca/modelo/matrícula) y dile cuántos vehículos tiene en total. NO llames a stop_conversation — sigue la conversación normalmente.`;
+                        } catch (e: any) {
+                            toolResult = `Error técnico al registrar vehículo: ${e.message}. Pide disculpas al cliente y dile que lo intente de nuevo o que escriba los datos por texto.`;
+                        }
+                    }
+                }
                 else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
                 else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
                 else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
@@ -3289,7 +3334,10 @@ Cuando el cliente indique qué tipo de servicio necesita:
                     const hint = inboundMedia.type === 'audio'
                         ? `[El cliente envió una nota de voz. Escúchala y responde a lo que pide. Si no es claro, pídele aclaración. Texto literal del mensaje (placeholder): "${text}"]`
                         : inboundMedia.type === 'image'
-                            ? `[El cliente envió una imagen${text && text !== '📷 (Imagen)' ? ' con caption: "' + text + '"' : ''}. Mírala y responde.]`
+                            ? `[El cliente envió una imagen${text && text !== '📷 (Imagen)' ? ' con caption: "' + text + '"' : ''}. ANALÍZALA con atención:
+1. Si muestra un VEHÍCULO y consigues LEER la matrícula española (formato actual "NNNN XXX" 4 dígitos + 3 letras BCDFGHJKLMNPRSTVWXYZ, o antiguo "X-NNNN-XX" / "XX-NNNN-XX"), llama INMEDIATAMENTE a register_vehicle con field1=matrícula (sin espacios ni guiones, en MAYÚSCULAS) y field2/field3/field4/field5 con lo que reconozcas (marca, modelo, color/extra, notas adicionales). Esto AÑADE un vehículo a la lista del cliente — NO sustituye los anteriores. Después confirma al cliente el alta y dile cuántos vehículos tiene ahora en total.
+2. Si muestra un vehículo pero la matrícula NO se ve bien o no la puedes leer con certeza, dile educadamente que no has podido leerla y pídesela por texto, mencionando la marca/modelo/color que sí hayas reconocido en la foto.
+3. Si la imagen NO es de un vehículo, responde con normalidad a lo que el cliente pregunte sin mencionar el coche.]`
                             : `[El cliente envió un vídeo${text && text !== '🎥 (Video)' ? ' con caption: "' + text + '"' : ''}. Analízalo y responde.]`;
                     firstMessageParts = [
                         { text: hint },
