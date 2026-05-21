@@ -78,9 +78,14 @@ interface CalendarDashboardProps {
     initialDate?: string | null;
     // Callback para que el padre limpie initialDate tras consumirlo (evita re-saltar al volver).
     onInitialDateConsumed?: () => void;
+    // Socket conectado al servidor. Si se pasa, el calendario escucha
+    // `appointment_changed` y `new_appointment` para refrescarse en tiempo
+    // real cuando una cita cambia (típico cuando el bot cancela una cita
+    // por WhatsApp y el calendar está abierto en otra pestaña).
+    socket?: any;
 }
 
-const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config, initialDate, onInitialDateConsumed }) => {
+const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config, initialDate, onInitialDateConsumed, socket }) => {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
 
@@ -147,6 +152,26 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             timeInputRef.current?.focus();
         }, 100);
     };
+
+    // Refresco en tiempo real: cuando el bot cancela/reserva o se actualiza
+    // una cita en otro lugar, refrescamos los datos. Hacemos un debounce
+    // simple (300ms) para coalescer eventos que lleguen en ráfaga (p.ej.
+    // bloques de varios slots).
+    useEffect(() => {
+        if (!socket) return;
+        let timer: ReturnType<typeof setTimeout> | null = null;
+        const scheduleRefresh = () => {
+            if (timer) clearTimeout(timer);
+            timer = setTimeout(() => { fetchData(); }, 300);
+        };
+        socket.on('appointment_changed', scheduleRefresh);
+        socket.on('new_appointment', scheduleRefresh);
+        return () => {
+            if (timer) clearTimeout(timer);
+            socket.off('appointment_changed', scheduleRefresh);
+            socket.off('new_appointment', scheduleRefresh);
+        };
+    }, [socket]);
 
     useEffect(() => {
         fetchData();

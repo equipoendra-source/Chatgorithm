@@ -464,7 +464,7 @@ function App() {
                         >
                             <ArrowLeft className="w-6 h-6 text-slate-300 group-hover:text-indigo-400 transition-colors" />
                         </button>
-                        <CalendarDashboard readOnly={user.role === 'agent'} config={config} initialDate={calendarInitialDate} onInitialDateConsumed={() => setCalendarInitialDate(null)} />
+                        <CalendarDashboard readOnly={user.role === 'agent'} config={config} initialDate={calendarInitialDate} onInitialDateConsumed={() => setCalendarInitialDate(null)} socket={socket} />
                     </div>
                 </div>
                 {appointmentToastNode}

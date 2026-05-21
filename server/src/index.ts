@@ -1097,6 +1097,15 @@ function notifyNewAppointment(data: {
             title,
             body
         });
+        // Evento genérico de refresh para el calendario (los toasts y el
+        // refresh van por canales separados para que el calendario también
+        // se actualice si está abierto en otra pestaña sin toast).
+        io.emit('appointment_changed', {
+            id: data.appointmentId,
+            action: 'booked',
+            dateISO: data.dateISO,
+            clientPhone: data.clientPhone
+        });
 
         // 2. FCM: push a móviles (APK Android)
         sendFCMNotification({
@@ -2910,6 +2919,21 @@ async function cancelAppointment(clientPhone: string, targetAppointmentId?: stri
 
         metrics.appointmentsCancelled++;
         console.log(`✅ [Cancel] Cita cancelada para ${clean}: ${humanDate} (${durationMin}min)${targetAppointmentId ? ` [appointmentId=${targetAppointmentId}]` : ' [cita más próxima]'}`);
+
+        // Notificar al frontend para que los calendarios abiertos se refresquen.
+        // Es lo que permite que el calendar.tsx muestre la cita liberada sin
+        // tener que pulsar refresh ni recargar la pestaña.
+        try {
+            io.emit('appointment_changed', {
+                id: record.id,
+                action: 'cancelled',
+                dateISO: record.get('Date') as string,
+                clientPhone: clean
+            });
+        } catch (emitErr: any) {
+            console.warn('[Cancel] Error emitiendo appointment_changed:', emitErr?.message);
+        }
+
         return `✅ CITA_CANCELADA: ${humanDate}`;
     } catch (e: any) {
         console.error(`❌ [Cancel] Error:`, e.message);
@@ -4044,6 +4068,19 @@ app.put('/api/appointments/:id', async (req, res) => {
             } catch (notifErr: any) {
                 console.error('[API] Error notificando nueva cita manual:', notifErr.message);
             }
+        }
+
+        // Emitir evento genérico para que los calendarios abiertos se
+        // refresquen tras cualquier cambio (estado, datos del cliente,
+        // marcar como incidente, etc.).
+        try {
+            io.emit('appointment_changed', {
+                id: req.params.id,
+                action: req.body.status === 'Booked' ? 'booked' : (req.body.status === 'Available' ? 'released' : 'updated'),
+                status: req.body.status
+            });
+        } catch (emitErr: any) {
+            console.warn('[API] Error emitiendo appointment_changed:', emitErr?.message);
         }
 
         res.json({ success: true });
