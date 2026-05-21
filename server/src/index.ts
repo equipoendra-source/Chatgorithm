@@ -1840,6 +1840,40 @@ async function loadBotGloballyEnabled(): Promise<void> {
 // Cargar al arranque (después de que base esté inicializado)
 setTimeout(() => { loadBotGloballyEnabled().catch(() => {}); }, 1000);
 
+// ==========================================================================
+// HUMAN_IDLE_MINUTES — tiempo (en min) que esperamos al humano asignado
+// antes de que Laura tome el chat automáticamente. Se compara contra el
+// último mensaje SALIENTE del agente (no de Laura ni del cliente).
+// El campo assigned_to NO se modifica: el chat sigue asignado al trabajador.
+// ==========================================================================
+const HUMAN_IDLE_MINUTES = 15;
+
+// Devuelve los minutos transcurridos desde el último mensaje SALIENTE
+// enviado por un trabajador (no por Bot IA, no por el cliente) hacia este
+// cliente. Si nunca ha habido respuesta del equipo, devuelve null.
+async function getMinutesSinceLastWorkerReply(clientPhone: string): Promise<number | null> {
+    if (!base) return null;
+    const clean = cleanNumber(clientPhone);
+    if (!clean) return null;
+    try {
+        // Outbound: recipient = clientPhone, sender = trabajador (no Bot IA, no el propio cliente)
+        const records = await base('Messages').select({
+            filterByFormula: `AND({recipient}='${clean}', {sender}!='Bot IA', {sender}!='${clean}', {sender}!='')`,
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            maxRecords: 1
+        }).firstPage();
+        if (records.length === 0) return null;
+        const ts = records[0].get('timestamp') as string;
+        if (!ts) return null;
+        const lastMs = new Date(ts).getTime();
+        if (Number.isNaN(lastMs)) return null;
+        return Math.floor((Date.now() - lastMs) / 60000);
+    } catch (e: any) {
+        console.error('[Bot] Error consultando último mensaje del trabajador:', e.message);
+        return null;
+    }
+}
+
 async function getSystemPrompt() {
     let promptTemplate = BASE_SYSTEM_PROMPT;
     if (base) {
@@ -4531,17 +4565,30 @@ app.post('/webhook', async (req, res) => {
                     ? { mediaId: inboundMediaId, type: inboundType as 'audio' | 'image' | 'video' | 'document' }
                     : undefined;
 
-            // LÓGICA SIMPLIFICADA: Laura responde por defecto cuando está globalmente activa
-            // y nadie del equipo tiene asignado el chat. Cuando un humano toma el chat
-            // (assigned_to != ''), Laura calla automáticamente sin necesidad de botón
-            // por chat. El control único es el toggle global de Laura en Settings.
+            // LÓGICA: Laura responde por defecto si está globalmente activa.
+            // Si el chat tiene assigned_to (un humano asignado), Laura comprueba
+            // cuándo fue su último mensaje al cliente:
+            //   - Si respondió hace < HUMAN_IDLE_MINUTES → Laura calla (humano activo)
+            //   - Si respondió hace >= HUMAN_IDLE_MINUTES → Laura toma el chat
+            //     (assigned_to NO se modifica — el chat sigue asignado al humano)
+            //   - Si nunca ha respondido → Laura calla (le da tiempo a coger el chat)
             const assignedTo = (contactRecord?.get('assigned_to') as string) || '';
+            const name = contactRecord?.get('name') as string || "Cliente";
+
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
             } else if (assignedTo) {
-                console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}". Laura no responde (humano lo maneja).`);
+                const idleMin = await getMinutesSinceLastWorkerReply(from);
+                if (idleMin === null) {
+                    console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}" sin mensajes previos del agente. Laura no responde (le da tiempo a contestar).`);
+                } else if (idleMin < HUMAN_IDLE_MINUTES) {
+                    console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}" (último mensaje del agente hace ${idleMin}min). Laura no responde.`);
+                } else {
+                    console.log(`🤖 [Bot] Chat ${from} asignado a "${assignedTo}" pero agente inactivo (${idleMin}min ≥ ${HUMAN_IDLE_MINUTES}min). Laura responde sin tocar la asignación.`);
+                    if (hasPendingBooking && !activeAiChats.has(from)) activeAiChats.add(from);
+                    processAI(text, from, name, originPhoneId, inboundMediaPkg);
+                }
             } else {
-                const name = contactRecord?.get('name') as string || "Cliente";
                 const reason = activeAiChats.has(from) ? 'sesión activa'
                     : hasPendingBooking ? 'reserva pendiente'
                     : 'chat sin asignar';
