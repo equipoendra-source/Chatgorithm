@@ -7,6 +7,7 @@ import {
 } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
+import { useToast } from '../context/ToastContext';
 
 // @ts-ignore
 import WhatsAppTemplatesManager from './WhatsAppTemplatesManager';
@@ -39,6 +40,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const { theme, setTheme } = useTheme();
     const isDark = theme === 'dark';
     const isAdmin = currentUserRole === 'Admin';
+    const { showToast } = useToast();
 
     // Non-admins default to notifications tab
     const [activeTab, setActiveTab] = useState<'team' | 'config' | 'whatsapp' | 'quick_replies' | 'analytics' | 'agenda' | 'bot_config' | 'notifications' | 'data' | 'appearance'>(isAdmin ? 'analytics' : 'notifications');
@@ -49,8 +51,12 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [phoneLines, setPhoneLines] = useState<{ id: string, name: string }[]>([]);
     const [localQuickReplies, setLocalQuickReplies] = useState<QuickReply[]>(quickReplies);
 
-    const [error, setError] = useState('');
-    const [success, setSuccess] = useState('');
+    // Helpers que apuntan AL TOAST GLOBAL (ToastProvider en App.tsx). Antes
+    // eran state local, así que al cambiar de pestaña se perdían. Ahora
+    // sobreviven al desmontaje de Settings y siguen visibles hasta que el
+    // usuario los descarte con la X.
+    const setError = (msg: string) => { if (msg) showToast('error', msg); };
+    const setSuccess = (msg: string) => { if (msg) showToast('success', msg); };
     const [showMobileMenu, setShowMobileMenu] = useState(true);
 
     // Estados modal
@@ -474,24 +480,8 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                     </button>
                     <h1 className={`text-lg md:text-xl font-bold truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>{getTitle()}</h1>
                 </div>
-                <div className="fixed safe-toast-top right-4 z-[70] flex flex-col gap-2 items-end pointer-events-none max-w-[calc(100vw-2rem)]">
-                    {success && (
-                        <div className="bg-green-100 text-green-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto flex items-start gap-3 max-w-md">
-                            <span className="flex-1 leading-snug">{success}</span>
-                            <button onClick={() => setSuccess('')} className="p-1 -m-1 rounded-full hover:bg-green-200 text-green-700/70 hover:text-green-900 transition flex-shrink-0" title="Cerrar">
-                                <X className="w-4 h-4" />
-                            </button>
-                        </div>
-                    )}
-                    {error && (
-                        <div className="bg-red-100 text-red-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto flex items-start gap-3 max-w-md">
-                            <span className="flex-1 leading-snug">{error}</span>
-                            <button onClick={() => setError('')} className="p-1 -m-1 rounded-full hover:bg-red-200 text-red-700/70 hover:text-red-900 transition flex-shrink-0" title="Cerrar">
-                                <X className="w-4 h-4" />
-                            </button>
-                        </div>
-                    )}
-                </div>
+                {/* Los toasts de éxito/error ahora son globales (ToastProvider en
+                    App.tsx). Sobreviven al desmontar Settings (cambio de pestaña). */}
             </div>
 
             <div className="flex flex-1 overflow-hidden relative">

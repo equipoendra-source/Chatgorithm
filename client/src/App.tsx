@@ -17,6 +17,7 @@ import { pushNotificationService } from './services/pushNotifications';
 import ErrorBoundary from './components/ErrorBoundary';
 import { getAuthServerUrl } from './config/api';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
+import { ToastProvider } from './context/ToastContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
 import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
 import { AlertCenter } from './components/AlertCenter';
@@ -635,9 +636,11 @@ function App() {
 function AppWithErrorBoundary() {
     return (
         <ThemeProvider>
-            <ErrorBoundary>
-                <App />
-            </ErrorBoundary>
+            <ToastProvider>
+                <ErrorBoundary>
+                    <App />
+                </ErrorBoundary>
+            </ToastProvider>
         </ThemeProvider>
     );
 }

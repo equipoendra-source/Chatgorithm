@@ -35,15 +35,24 @@ export function AlertCenter({ socket, isAdmin }: AlertCenterProps) {
         const onAlert = (alert: TeamAlert) => {
             const withId = { ...alert, id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}` };
             setAlerts(prev => {
-                // Insertar la nueva al principio
+                // Insertar la nueva al principio (la más reciente primero)
                 const next = [withId, ...prev];
-                // Si hay más de 5, descartar las más antiguas que NO sean críticas
-                if (next.length > 5) {
-                    const criticals = next.filter(a => a.severity === 'critical');
-                    const nonCriticals = next.filter(a => a.severity !== 'critical').slice(0, Math.max(0, 5 - criticals.length));
-                    return [...criticals.slice(0, 5), ...nonCriticals].slice(0, 5);
-                }
-                return next;
+                if (next.length <= 5) return next;
+                // Hay >5 alertas. Estrategia: conservar las 5 MÁS RECIENTES
+                // dando prioridad a las críticas. Es decir:
+                //   1) Quedarnos con todas las críticas más recientes (hasta 5).
+                //   2) Si quedan huecos, rellenar con las no-críticas más recientes.
+                // Así, si entran 6 críticas seguidas, las 5 últimas se ven
+                // (no las 5 primeras como hacía la lógica anterior).
+                const criticals = next.filter(a => a.severity === 'critical').slice(0, 5);
+                const remaining = 5 - criticals.length;
+                const nonCriticals = remaining > 0
+                    ? next.filter(a => a.severity !== 'critical').slice(0, remaining)
+                    : [];
+                // Mantener el orden cronológico mezclando ambos por orden de
+                // aparición original (recientes primero).
+                const keep = new Set([...criticals, ...nonCriticals].map(a => a.id));
+                return next.filter(a => keep.has(a.id!));
             });
             // Sin auto-dismiss: el admin debe cerrar cada alerta manualmente
             // pulsando la X. Antes warning duraba 10s y error 20s, pero el

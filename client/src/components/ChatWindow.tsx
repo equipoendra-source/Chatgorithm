@@ -4,7 +4,7 @@ import {
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck, Users,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
-    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2, FileDown,
+    LayoutTemplate, Tag, Zap, Bot, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2, FileDown,
     MoreVertical
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
@@ -347,24 +347,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
             };
             socket.emit('chatMessage', msg);
             setInput(''); setShowEmojiPicker(false); setIsInternalMode(false);
-
-            if (isAiActive) handleStopAI();
+            // El servidor ya aborta a Laura cuando un agente envía mensaje
+            // (aiAbortControllers en chatMessage handler). No hace falta el
+            // emit manual antiguo de stop_ai_manual.
         }
-    };
-
-    const handleTriggerAI = () => {
-        if (isAiActive) {
-            handleStopAI();
-        } else {
-            if (window.confirm("¿Quieres que la IA responda automáticamente a este cliente?")) {
-                socket.emit('trigger_ai_manual', { phone: contact.phone });
-            }
-        }
-    };
-
-    const handleStopAI = () => {
-        socket.emit('stop_ai_manual', { phone: contact.phone });
-        setIsAiActive(false);
     };
 
     const updateCRM = (field: string, value: any) => { if (socket) { const updates: any = {}; updates[field] = value; if (field === 'assigned_to' && value && status === 'Nuevo') { updates.status = 'Abierto'; setStatus('Abierto'); } socket.emit('update_contact_info', { phone: contact.phone, updates: updates }); } };
@@ -424,7 +410,9 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
             setIsUploading(false);
             if (fileInputRef.current) fileInputRef.current.value = '';
             if (cameraInputRef.current) cameraInputRef.current.value = ''; // Clear camera input too
-            if (isAiActive) handleStopAI();
+            // El servidor aborta a Laura solo cuando el agente sube archivo
+            // (vía el handler de upload que también dispara stop_ai_manual
+            // implícito). Ya no hay control manual desde aquí.
         }
     };
 
@@ -866,12 +854,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                         </div>
                     )}
 
-                    {isAiActive && (
-                        <div className="bg-purple-600 text-white p-2 text-xs font-bold flex items-center justify-between px-4 animate-in slide-in-from-bottom-2 shadow-md gap-2">
-                            <span className="flex items-center gap-2 min-w-0"><Bot className="w-4 h-4 animate-pulse flex-shrink-0" /> <span className="truncate">MODALIDAD AUTOMÁTICA ACTIVA</span></span>
-                            <button onClick={handleStopAI} className="bg-white/20 hover:bg-white/30 px-2 py-1 rounded text-[10px] flex items-center gap-1 transition flex-shrink-0"><StopCircle className="w-3 h-3" /> DETENER IA</button>
-                        </div>
-                    )}
+                    {/* Banner antiguo "MODALIDAD AUTOMÁTICA ACTIVA" + botón DETENER IA
+                        eliminado: ya no encaja con el toggle global único de Laura.
+                        El indicador visual de IA pensando queda en el borde morado
+                        superior del contenedor del input (border-t-4 border-purple-500). */}
 
                     {/* INDICADOR DE GRABACIÓN DE AUDIO */}
                     {isRecording && (

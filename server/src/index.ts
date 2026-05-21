@@ -2841,26 +2841,39 @@ async function getClientVehicles(clientPhone: string): Promise<string> {
     }
 }
 
-// Helper: hace UPDATE en Appointments resiliente al error "Unknown field name: DurationMin".
-// Si el campo no existe en Airtable, reintenta sin ese campo (solo log warning una vez).
-let durationMinFieldWarned = false;
+// Helper: hace UPDATE en Appointments resiliente a errores "Unknown field name".
+// Si Airtable rechaza el update porque un campo no existe, intenta de nuevo
+// quitando ese campo. Reintenta hasta 5 veces (por si faltan varios campos).
+// Logueamos warning por cada campo desconocido (una vez por proceso para no
+// spamear).
+const unknownFieldsWarned = new Set<string>();
 async function updateAppointmentFields(recordId: string, fields: Record<string, any>): Promise<void> {
     if (!base) throw new Error('No DB');
-    try {
-        await base('Appointments').update([{ id: recordId, fields }]);
-    } catch (e: any) {
-        const msg = String(e?.message || '');
-        if (msg.includes('Unknown field name') && msg.includes('DurationMin') && 'DurationMin' in fields) {
-            if (!durationMinFieldWarned) {
-                console.warn(`⚠️ [Appointments] Campo DurationMin NO EXISTE en Airtable. Crea la columna como Number para evitar este warning. Reintentando sin ese campo.`);
-                durationMinFieldWarned = true;
-            }
-            const { DurationMin: _omit, ...rest } = fields;
-            await base('Appointments').update([{ id: recordId, fields: rest }]);
+    let current: Record<string, any> = { ...fields };
+    const MAX_RETRIES = 5;
+    for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+            await base('Appointments').update([{ id: recordId, fields: current }]);
             return;
+        } catch (e: any) {
+            const msg = String(e?.message || '');
+            // Airtable suele devolver: "Unknown field name: \"FieldX\"" o variaciones
+            const m = msg.match(/Unknown field name[:\s]*["']?([^"'\s,)]+)["']?/i);
+            if (m && m[1] && m[1] in current) {
+                const missing = m[1];
+                if (!unknownFieldsWarned.has(missing)) {
+                    console.warn(`⚠️ [Appointments] Campo "${missing}" NO EXISTE en Airtable. Reintentando sin él. Créalo si lo necesitas.`);
+                    unknownFieldsWarned.add(missing);
+                }
+                const next: Record<string, any> = { ...current };
+                delete next[missing];
+                current = next;
+                continue;
+            }
+            throw e;
         }
-        throw e;
     }
+    throw new Error(`updateAppointmentFields: agotados ${MAX_RETRIES} reintentos quitando campos desconocidos para ${recordId}`);
 }
 
 // Cancela una cita del cliente.
@@ -2878,23 +2891,30 @@ async function cancelAppointment(clientPhone: string, targetAppointmentId?: stri
 
         // Caso A: tenemos appointmentId específico (típico cuando se cancela
         // desde la respuesta a un recordatorio concreto).
+        // Si la cita ya no está Booked o no pertenece al cliente, NO hacemos
+        // fallback a "la más próxima" — eso podría cancelar una cita que el
+        // cliente NO estaba intentando cancelar. Solo hacemos fallback si
+        // Airtable lanza un error técnico (la cita pudo borrarse físicamente).
         if (targetAppointmentId) {
             try {
                 const candidate = await base('Appointments').find(targetAppointmentId);
                 const cstatus = candidate.get('Status') as string;
                 if (cstatus !== 'Booked') {
-                    console.log(`📅 [Cancel] Cita ${targetAppointmentId} no está Booked (Status=${cstatus}). Fallback a cita más próxima.`);
-                } else if (!phoneMatch(candidate.get('ClientPhone') as string, clientPhone)) {
-                    console.warn(`⚠️ [Cancel] Cita ${targetAppointmentId} no pertenece a ${clean} (ClientPhone=${candidate.get('ClientPhone')}). Fallback a cita más próxima.`);
-                } else {
-                    record = candidate;
+                    console.log(`📅 [Cancel] Cita ${targetAppointmentId} no está Booked (Status=${cstatus}). NO se hace fallback (la cita probablemente ya se canceló).`);
+                    return "No_appointment_found";
                 }
+                if (!phoneMatch(candidate.get('ClientPhone') as string, clientPhone)) {
+                    console.warn(`⚠️ [Cancel] Cita ${targetAppointmentId} no pertenece a ${clean} (ClientPhone=${candidate.get('ClientPhone')}). NO se hace fallback.`);
+                    return "No_appointment_found";
+                }
+                record = candidate;
             } catch (e: any) {
                 console.warn(`⚠️ [Cancel] No se pudo encontrar cita ${targetAppointmentId}: ${e.message}. Fallback a cita más próxima.`);
             }
         }
 
-        // Caso B (fallback o llamada sin appointmentId): cancelar la cita más próxima.
+        // Caso B (fallback solo cuando NO se pasó appointmentId o cuando
+        // Airtable falló al buscarla): cancelar la cita más próxima.
         if (!record) {
             // Buscar el slot LÍDER (el que tiene datos del cliente: ClientName, DurationMin, etc.)
             // No filtramos por ClientPhone en la fórmula: el teléfono puede estar guardado
