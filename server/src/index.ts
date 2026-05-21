@@ -380,6 +380,7 @@ const TABLE_SCHEDULED_NOTIFICATIONS = 'ScheduledNotifications';
 const TABLE_CAMPAIGNS = 'Campaigns';
 const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
 const TABLE_VEHICLES = 'Vehicles'; // Vehículos/items registrados por cliente (multi-coche)
+const TABLE_APPOINTMENT_EVENTS = 'AppointmentEvents'; // Historial de reservas y cancelaciones (auditoría)
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 // BUSINESS_ACCOUNTS: phoneId → token. Se puebla desde la tabla WhatsAppAccounts
@@ -1128,8 +1129,66 @@ function notifyNewAppointment(data: {
         });
 
         console.log(`🔔 [NuevaCita] Notificado (${data.source}): ${cleanName} @ ${humanDate}`);
+
+        // Registrar en historial persistente (no bloquea ni rompe nada si falla)
+        logAppointmentEvent({
+            type: 'booked',
+            appointmentId: data.appointmentId,
+            clientName: cleanName,
+            clientPhone: data.clientPhone,
+            appointmentDate: data.dateISO,
+            agenda: data.agenda || '',
+            source: data.source
+        });
     } catch (e: any) {
         console.error('[NuevaCita] Error enviando notificación:', e.message);
+    }
+}
+
+// Registra un evento de cita (reserva o cancelación) en Airtable para tener
+// historial persistente, y lo emite por socket para refresco en tiempo real.
+// Tolerante: si la tabla AppointmentEvents aún no existe, lo avisa una vez y
+// sigue funcionando (la reserva/cancelación no se ve afectada).
+let _appointmentEventsTableMissingWarned = false;
+async function logAppointmentEvent(data: {
+    type: 'booked' | 'cancelled';
+    appointmentId: string;
+    clientName: string;
+    clientPhone: string;
+    appointmentDate: string; // ISO
+    agenda?: string;
+    source: 'bot' | 'manual' | 'client_whatsapp';
+}): Promise<void> {
+    const createdAt = new Date().toISOString();
+    // Emitir por socket SIEMPRE (aunque Airtable falle), para que la UI se entere en tiempo real
+    try {
+        io.emit('appointment_event', { ...data, createdAt });
+    } catch (_) { /* no-op */ }
+
+    if (!base) return;
+    try {
+        await base(TABLE_APPOINTMENT_EVENTS).create([{
+            fields: {
+                type: data.type,
+                appointmentId: data.appointmentId,
+                clientName: data.clientName || '',
+                clientPhone: data.clientPhone || '',
+                appointmentDate: data.appointmentDate,
+                agenda: data.agenda || '',
+                source: data.source,
+                createdAt
+            }
+        }]);
+    } catch (e: any) {
+        // Si la tabla aún no existe, avisar una sola vez en lugar de spamear logs.
+        if (/could not find|unknown.*table|table.*not found/i.test(e.message || '')) {
+            if (!_appointmentEventsTableMissingWarned) {
+                console.warn(`⚠️ [AppointmentEvents] La tabla "${TABLE_APPOINTMENT_EVENTS}" no existe en Airtable. Crea una tabla con campos: type (single select: booked/cancelled), appointmentId, clientName, clientPhone, appointmentDate (date+time), agenda, source (single select: bot/manual/client_whatsapp), createdAt (date+time).`);
+                _appointmentEventsTableMissingWarned = true;
+            }
+        } else {
+            console.error('[AppointmentEvents] Error registrando evento:', e.message);
+        }
     }
 }
 
@@ -2883,7 +2942,8 @@ async function updateAppointmentFields(recordId: string, fields: Record<string, 
 //     cita del recordatorio, no la más próxima en el tiempo (puede tener varias).
 //   - Si no se pasa o no se encuentra esa cita, fallback al comportamiento
 //     original: cancela la cita más próxima en el futuro.
-async function cancelAppointment(clientPhone: string, targetAppointmentId?: string): Promise<string> {
+//   - `source` indica el origen de la cancelación, solo para el historial.
+async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' | 'client_whatsapp' = 'bot', targetAppointmentId?: string): Promise<string> {
     if (!base) return "Error BD";
     const clean = cleanNumber(clientPhone);
     try {
@@ -2939,6 +2999,10 @@ async function cancelAppointment(clientPhone: string, targetAppointmentId?: stri
         const durationMin = Number(record.get('DurationMin') || 0);
         const leadAgenda = (record.get('Agenda') as string) || '';
 
+        // Guardar datos para el historial ANTES de borrarlos del slot
+        const cancelledClientName = (record.get('ClientName') as string) || '';
+        const cancelledClientPhone = (record.get('ClientPhone') as string) || clientPhone;
+
         // Resetear slot líder (resiliente a si DurationMin no existe en Airtable)
         await updateAppointmentFields(record.id, {
             "Status": "Available",
@@ -2988,6 +3052,17 @@ async function cancelAppointment(clientPhone: string, targetAppointmentId?: stri
         } catch (emitErr: any) {
             console.warn('[Cancel] Error emitiendo appointment_changed:', emitErr?.message);
         }
+
+        // Registrar en historial persistente (auditoría)
+        logAppointmentEvent({
+            type: 'cancelled',
+            appointmentId: record.id,
+            clientName: cancelledClientName,
+            clientPhone: cancelledClientPhone,
+            appointmentDate: leadDate.toISOString(),
+            agenda: leadAgenda,
+            source
+        });
 
         return `✅ CITA_CANCELADA: ${humanDate}`;
     } catch (e: any) {
@@ -3120,7 +3195,9 @@ async function handleAppointmentCancelReply(phone: string, originPhoneId: string
 
         // Cancelar la cita: si tenemos appointmentId del recordatorio, esa;
         // si no, fallback a la cita más próxima del cliente.
-        const result = await cancelAppointment(clean, targetAppointmentId);
+        // source='client_whatsapp' → el historial registra que la cancelación vino del cliente.
+        const result = await cancelAppointment(clean, 'client_whatsapp', targetAppointmentId);
+
 
         if (typeof result === 'string' && result.startsWith('✅ CITA_CANCELADA')) {
             await cancelPendingCitaReminders(clean);
@@ -4120,6 +4197,24 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.field5 !== undefined) f["Notas"] = req.body.field5;
         // Marcar/desmarcar la cita como incidente manualmente desde el popup
         if (req.body.incident !== undefined) f["Incident"] = !!req.body.incident;
+
+        // Antes de aplicar la actualización, leemos el estado actual para detectar
+        // si esto es una cancelación manual (Booked → Available). Si lo es,
+        // capturamos los datos del cliente ANTES de que se borren.
+        let preUpdateStatus = '';
+        let preUpdateClientName = '';
+        let preUpdateClientPhone = '';
+        let preUpdateDate = '';
+        let preUpdateAgenda = '';
+        try {
+            const before = await base('Appointments').find(req.params.id);
+            preUpdateStatus = (before.get('Status') as string) || '';
+            preUpdateClientName = (before.get('ClientName') as string) || '';
+            preUpdateClientPhone = (before.get('ClientPhone') as string) || '';
+            preUpdateDate = (before.get('Date') as string) || '';
+            preUpdateAgenda = (before.get('Agenda') as string) || '';
+        } catch (_) { /* no bloqueamos si no se puede leer */ }
+
         try {
             // updateAppointmentFields ya tolera el campo DurationMin si no existe.
             // Aquí añadimos también tolerancia al campo Incident (más nuevo).
@@ -4163,6 +4258,19 @@ app.put('/api/appointments/:id', async (req, res) => {
             console.warn('[API] Error emitiendo appointment_changed:', emitErr?.message);
         }
 
+        // Registrar cancelación manual en el historial (Booked → Available desde el calendario)
+        if (req.body.status === 'Available' && preUpdateStatus === 'Booked') {
+            logAppointmentEvent({
+                type: 'cancelled',
+                appointmentId: req.params.id,
+                clientName: preUpdateClientName,
+                clientPhone: preUpdateClientPhone,
+                appointmentDate: preUpdateDate,
+                agenda: preUpdateAgenda,
+                source: 'manual'
+            });
+        }
+
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
 });
@@ -4170,6 +4278,38 @@ app.put('/api/appointments/:id', async (req, res) => {
 app.delete('/api/appointments/:id', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try { await base('Appointments').destroy([req.params.id]); res.json({ success: true }); } catch (e: any) { console.error('[API] Error DELETE /appointments/:id:', e.message); res.status(400).json({ error: "Error deleting" }); }
+});
+
+// Historial de eventos de cita (reservas y cancelaciones).
+// Devuelve los más recientes primero, hasta `limit` (por defecto 100, máx 500).
+app.get('/api/appointment-events', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    try {
+        const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+        const records = await base(TABLE_APPOINTMENT_EVENTS).select({
+            sort: [{ field: 'createdAt', direction: 'desc' }],
+            maxRecords: limit
+        }).firstPage();
+        const events = records.map(r => ({
+            id: r.id,
+            type: r.get('type') as string,
+            appointmentId: (r.get('appointmentId') as string) || '',
+            clientName: (r.get('clientName') as string) || '',
+            clientPhone: (r.get('clientPhone') as string) || '',
+            appointmentDate: (r.get('appointmentDate') as string) || '',
+            agenda: (r.get('agenda') as string) || '',
+            source: (r.get('source') as string) || '',
+            createdAt: (r.get('createdAt') as string) || ''
+        }));
+        res.json({ events });
+    } catch (e: any) {
+        // Si la tabla no existe, devolver vacío (no es un error fatal)
+        if (/could not find|unknown.*table|table.*not found/i.test(e.message || '')) {
+            return res.json({ events: [], warning: `Tabla "${TABLE_APPOINTMENT_EVENTS}" no existe en Airtable. Créala para empezar a registrar el historial.` });
+        }
+        console.error('[API] Error GET /appointment-events:', e.message);
+        res.status(500).json({ error: 'Error obteniendo historial' });
+    }
 });
 
 // SCHEDULE CONFIG API

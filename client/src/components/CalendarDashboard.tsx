@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import {
     Calendar as CalendarIcon, Clock, Plus, Trash2, User, CheckCircle,
-    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers
+    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
+import { AppointmentHistoryPanel } from './AppointmentHistoryPanel';
 
 interface Appointment {
     id: string;
@@ -79,9 +80,10 @@ interface CalendarDashboardProps {
     // Callback para que el padre limpie initialDate tras consumirlo (evita re-saltar al volver).
     onInitialDateConsumed?: () => void;
     // Socket conectado al servidor. Si se pasa, el calendario escucha
-    // `appointment_changed` y `new_appointment` para refrescarse en tiempo
-    // real cuando una cita cambia (típico cuando el bot cancela una cita
-    // por WhatsApp y el calendar está abierto en otra pestaña).
+    // `appointment_changed` y `new_appointment` para refrescarse en tiempo real
+    // cuando una cita cambia (típico cuando el bot cancela una cita por
+    // WhatsApp y el calendar está abierto en otra pestaña). Además el panel
+    // de Historial usa este socket para añadir nuevos eventos al instante.
     socket?: any;
 }
 
@@ -111,6 +113,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Agendas (líneas de cita independientes)
     const [agendas, setAgendas] = useState<Agenda[]>([]);
     const [showAgendaModal, setShowAgendaModal] = useState(false);
+    const [showHistoryPanel, setShowHistoryPanel] = useState(false);
     const [draftAgendas, setDraftAgendas] = useState<Agenda[]>([]);
     const [savingAgendas, setSavingAgendas] = useState(false);
     const [agendaFilter, setAgendaFilter] = useState<string>('');  // '' = todas
@@ -584,6 +587,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     {agendas.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
                                 </select>
                             )}
+                            {/* Historial de reservas y cancelaciones */}
+                            <button
+                                onClick={() => setShowHistoryPanel(true)}
+                                className={`px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-indigo-300 bg-indigo-900/30 hover:bg-indigo-900/50' : 'text-indigo-700 bg-indigo-50 hover:bg-indigo-100'}`}
+                                title="Ver historial de reservas y cancelaciones"
+                            >
+                                <History size={18} />
+                                <span className="hidden md:inline">Historial</span>
+                            </button>
                             {/* Configurar agendas */}
                             {!readOnly && (
                                 <button onClick={openAgendaModal} className={`px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-purple-300 bg-purple-900/30 hover:bg-purple-900/50' : 'text-purple-700 bg-purple-50 hover:bg-purple-100'}`} title="Configurar agendas y horarios">
@@ -1320,6 +1332,22 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     </div>
                 </div>
             )}
+
+            {/* Panel de historial de citas — reservas y cancelaciones */}
+            <AppointmentHistoryPanel
+                isOpen={showHistoryPanel}
+                onClose={() => setShowHistoryPanel(false)}
+                isDark={isDark}
+                socket={socket}
+                onJumpToDay={(dateStr) => {
+                    // Saltar al día y abrir vista día — comportamiento idéntico al toast de nueva cita
+                    const [y, m, d] = dateStr.split('-').map(Number);
+                    if (y && m && d) {
+                        setCurrentDate(new Date(y, m - 1, d));
+                        setViewMode('day');
+                    }
+                }}
+            />
         </div>
     );
 };
