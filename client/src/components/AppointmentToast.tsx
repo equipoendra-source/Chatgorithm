@@ -1,4 +1,3 @@
-import { useEffect } from 'react';
 import { Calendar, X } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 
@@ -19,17 +18,12 @@ interface Props {
     onDismiss: (id: string) => void;
 }
 
-const AUTO_DISMISS_MS = 10000;
-
+// Las notificaciones permanecen visibles hasta que el trabajador las descarte
+// (X) o pinche para abrir la cita. NO hay auto-dismiss para que nadie se las
+// pierda aunque tarde en ver la pantalla.
 export function AppointmentToast({ notifications, onOpen, onDismiss }: Props) {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
-
-    // Auto-dismiss tras AUTO_DISMISS_MS por cada notificación
-    useEffect(() => {
-        const timers = notifications.map(n => setTimeout(() => onDismiss(n.id), AUTO_DISMISS_MS));
-        return () => { timers.forEach(t => clearTimeout(t)); };
-    }, [notifications, onDismiss]);
 
     if (notifications.length === 0) return null;
 
