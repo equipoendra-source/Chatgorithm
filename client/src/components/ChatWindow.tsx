@@ -4,7 +4,8 @@ import {
     Image as ImageIcon, X, Mic, Square, FileText, Download, Play, Pause,
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck, Users,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
-    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2, FileDown
+    LayoutTemplate, Tag, Zap, Bot, StopCircle, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2, FileDown,
+    MoreVertical
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
@@ -113,6 +114,12 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const [cardsCollapsed, setCardsCollapsed] = useState(false);
 
     const [showQuickRepliesList, setShowQuickRepliesList] = useState(false);
+
+    // Menú móvil que reúne los controles CRM del header (asignación, dpto, status,
+    // etiquetas, buscar, exportar). En escritorio estos controles van inline en el
+    // header. En móvil se ocultan y se exponen mediante este sheet para que el
+    // header quede en una sola fila compacta.
+    const [showMobileCrmMenu, setShowMobileCrmMenu] = useState(false);
 
     const [showSearch, setShowSearch] = useState(false);
     const [chatSearchQuery, setChatSearchQuery] = useState('');
@@ -717,26 +724,26 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
             })()}
 
             <div className={`flex flex-col flex-1 min-w-0 h-full border-r ${isDark ? 'border-white/5' : 'border-gray-200'}`}>
-                <div className={`border-b p-3 flex flex-wrap gap-3 items-center shadow-sm z-10 shrink-0 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-gray-200'}`} onClick={(e) => e.stopPropagation()}>
-                    {onBack && <button onClick={onBack} className="md:hidden p-2 rounded-full text-slate-500 hover:bg-slate-100"><ArrowLeft className="w-5 h-5" /></button>}
-                    <div className="flex flex-col w-full md:w-auto md:min-w-[200px] md:max-w-[300px]">
+                <div className={`border-b p-3 flex gap-2 md:flex-wrap md:gap-3 items-center shadow-sm z-10 shrink-0 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-white border-gray-200'}`} onClick={(e) => e.stopPropagation()}>
+                    {onBack && <button onClick={onBack} className="md:hidden p-2 rounded-full text-slate-500 hover:bg-slate-100 flex-shrink-0"><ArrowLeft className="w-5 h-5" /></button>}
+                    <div className="flex flex-col flex-1 min-w-0 md:flex-initial md:w-auto md:min-w-[200px] md:max-w-[300px]">
                         <div className={`flex items-center gap-2 px-2 rounded-md border ${isDark ? 'bg-slate-700 border-slate-600' : 'bg-slate-50 border-slate-200'}`}>
-                            <User className={`w-4 h-4 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} />
-                            <input id="chat-header-name" className={`text-sm font-semibold border-none focus:ring-0 w-full bg-transparent py-1.5 ${isDark ? 'text-white placeholder:text-slate-500' : 'text-slate-700'}`} placeholder="Nombre" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => updateCRM('name', name)} />
+                            <User className={`w-4 h-4 flex-shrink-0 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} />
+                            <input id="chat-header-name" className={`text-sm font-semibold border-none focus:ring-0 w-full bg-transparent py-1.5 min-w-0 ${isDark ? 'text-white placeholder:text-slate-500' : 'text-slate-700'}`} placeholder="Nombre" value={name} onChange={(e) => setName(e.target.value)} onBlur={() => updateCRM('name', name)} />
                             <button onClick={(e) => { e.stopPropagation(); setWorkerFilter(null); setShowWorkerActivity(true); }} title="Ver quién ha hablado con el cliente" className={`p-1 rounded-md flex-shrink-0 transition ${isDark ? 'text-indigo-400 hover:bg-white/10' : 'text-indigo-500 hover:bg-indigo-50'}`}><Users className="w-4 h-4" /></button>
                         </div>
                         <div className={`overflow-hidden transition-all duration-300 ${(typingUser || isOnline) ? 'max-h-6 opacity-100 mt-1' : 'max-h-0 opacity-0'}`}>
                             {typingUser ? <span className="text-[11px] text-green-600 font-bold flex items-center gap-1.5 bg-green-50 px-2 py-0.5 rounded-full w-fit"><span className="relative flex h-2 w-2"><span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span><span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span></span>{typingUser} está escribiendo...</span> : isOnline ? <span className="text-[11px] text-slate-500 font-medium flex items-center gap-1.5 px-1 w-fit"><span className="relative flex h-2 w-2"><span className="relative inline-flex rounded-full h-2 w-2 bg-green-500"></span></span>En línea</span> : null}
                         </div>
                     </div>
-                    {/* Header Controls */}
+                    {/* Header Controls — ESCRITORIO. En móvil están en showMobileCrmMenu. */}
                     {status === 'Nuevo' ? (
-                        <div className="relative">
+                        <div className="hidden md:block relative">
                             <button id="chat-assign-btn" onClick={(e) => { e.stopPropagation(); setShowAssignMenu(!showAssignMenu); }} className="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-blue-700 transition shadow-sm animate-pulse"><UserPlus className="w-3.5 h-3.5" /> Asignar</button>
                             {showAssignMenu && <div className="absolute top-full left-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 z-50 overflow-hidden animate-in fade-in zoom-in-95" onClick={(e) => e.stopPropagation()}><div className="p-1"><button onClick={() => handleAssign('me')} className="w-full text-left px-3 py-2 text-sm text-slate-700 hover:bg-blue-50 rounded-lg flex items-center gap-2 font-medium transition-colors"><User className="w-4 h-4 text-blue-500" /> A mí ({user.username})</button><div className="h-px bg-slate-100 my-1"></div><p className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wide">Departamentos</p>{config?.departments?.map(dept => (<button key={dept} onClick={() => handleAssign(dept)} className="w-full text-left px-3 py-2 text-sm text-slate-600 hover:bg-purple-50 rounded-lg hover:text-purple-700 flex items-center gap-2 transition-colors"><Briefcase className="w-3.5 h-3.5 opacity-50" /> {dept}</button>))}</div></div>}
                         </div>
                     ) : (
-                        <>
+                        <div className="hidden md:flex md:flex-wrap md:gap-3 md:items-center">
                             <div className="flex items-center gap-2 bg-blue-50 px-2 rounded-md border border-blue-200"><UserCheck className="w-4 h-4 text-blue-600" /><select className="text-xs bg-transparent border-none rounded-md py-1.5 pr-6 text-blue-700 focus:ring-0 cursor-pointer font-bold tracking-wide min-w-[120px]" value={assignedTo} onChange={(e) => { setAssignedTo(e.target.value); updateCRM('assigned_to', e.target.value); }}><option value="">Sin Asignar</option>{agents.map(a => (<option key={a.id} value={a.name}>{a.name}</option>))}</select></div>
                             {!assignedTo && <button onClick={() => handleAssign('me')} className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-green-700 transition shadow-sm"><UserPlus className="w-3.5 h-3.5" /> Asignarme</button>}
                             <div className="flex items-center gap-2 bg-purple-50 px-2 rounded-md border border-purple-200"><Briefcase className="w-4 h-4 text-purple-600" /><select className="text-xs bg-transparent border-none rounded-md py-1.5 pr-6 text-purple-700 focus:ring-0 cursor-pointer font-bold uppercase tracking-wide" value={department} onChange={(e) => { setDepartment(e.target.value); updateCRM('department', e.target.value); }}><option value="">Sin Dpto</option>{config?.departments?.map(d => <option key={d} value={d}>{d}</option>) || <option value="Ventas">Ventas</option>}</select></div>
@@ -745,28 +752,44 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                 <button id="chat-tags-btn" onClick={(e) => { e.stopPropagation(); setShowTagMenu(!showTagMenu); }} className="flex items-center gap-2 bg-orange-50 px-2 py-1.5 rounded-md border border-orange-200 text-xs font-bold text-orange-700 hover:bg-orange-100 transition-colors" title="Gestionar Etiquetas"><Tag className="w-3.5 h-3.5" /> {contactTags.length > 0 ? `${contactTags.length} Tags` : 'Tags'}</button>
                                 {showTagMenu && (<div className="absolute top-full left-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 z-50 p-2 animate-in fade-in zoom-in-95" onClick={(e) => e.stopPropagation()}><p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2 px-2">Seleccionar Etiquetas</p>{config?.tags?.map(tag => { const isActive = contactTags.includes(tag); return (<button key={tag} onClick={() => toggleTag(tag)} className={`w-full text-left px-2 py-1.5 text-xs rounded-lg mb-1 flex items-center justify-between transition-colors ${isActive ? 'bg-orange-50 text-orange-700 font-bold' : 'text-slate-600 hover:bg-slate-50'}`}>{tag} {isActive && <CheckCircle className="w-3 h-3" />}</button>) })}{(!config?.tags || config.tags.length === 0) && <p className="text-xs text-slate-400 italic px-2">No hay etiquetas.</p>}</div>)}
                             </div>
-                        </>
+                        </div>
                     )}
-                    <div className="flex-1"></div>
-                    <div className="relative">
+                    <div className="hidden md:block flex-1"></div>
+
+                    {/* Botón móvil "más" — abre el sheet con los controles CRM y acciones */}
+                    <button
+                        onClick={(e) => { e.stopPropagation(); setShowMobileCrmMenu(true); }}
+                        className={`md:hidden p-2 rounded-lg flex-shrink-0 transition relative ${
+                            status === 'Nuevo'
+                                ? 'bg-blue-600 text-white animate-pulse shadow-sm hover:bg-blue-700'
+                                : 'text-slate-400 hover:bg-slate-100'
+                        }`}
+                        title="Más opciones"
+                    >
+                        <MoreVertical className="w-5 h-5" />
+                        {status === 'Nuevo' && <span className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-red-500 rounded-full animate-ping"></span>}
+                    </button>
+
+                    {/* Búsqueda — visible siempre, en móvil se expande a fullwidth */}
+                    <div className="relative flex-shrink-0">
                         {showSearch ? (
-                            <div className="flex items-center bg-slate-100 rounded-lg px-2 py-1 animate-in fade-in slide-in-from-right-5 absolute right-0 top-0 md:static z-20 shadow-md md:shadow-none min-w-[280px]">
-                                <Search className="w-4 h-4 text-slate-400 mr-2" />
-                                <input autoFocus className="bg-transparent border-none outline-none text-xs w-full text-slate-700" placeholder="Buscar..." value={chatSearchQuery} onChange={(e) => setChatSearchQuery(e.target.value)} onClick={(e) => e.stopPropagation()} />
-                                <div className="flex items-center border-l border-slate-300 pl-2 ml-2 gap-1"><span className="text-[10px] text-slate-400 mr-1">{searchMatches.length > 0 ? `${currentMatchIdx + 1}/${searchMatches.length}` : '0/0'}</span><button onClick={(e) => { e.stopPropagation(); handlePrevMatch(); }} className="p-1 hover:bg-slate-200 rounded text-slate-500" disabled={searchMatches.length === 0}><ChevronUp className="w-3 h-3" /></button><button onClick={(e) => { e.stopPropagation(); handleNextMatch(); }} className="p-1 hover:bg-slate-200 rounded text-slate-500" disabled={searchMatches.length === 0}><ChevronDown className="w-3 h-3" /></button></div><button onClick={(e) => { e.stopPropagation(); setShowSearch(false); setChatSearchQuery(''); }} className="ml-2 p-1 hover:bg-slate-200 rounded-full"><X className="w-3 h-3 text-slate-500" /></button>
+                            <div className="flex items-center bg-slate-100 rounded-lg px-2 py-1 animate-in fade-in slide-in-from-right-5 absolute right-0 top-0 md:static z-20 shadow-md md:shadow-none w-[calc(100vw-2rem)] sm:w-[280px] max-w-[320px]">
+                                <Search className="w-4 h-4 text-slate-400 mr-2 flex-shrink-0" />
+                                <input autoFocus className="bg-transparent border-none outline-none text-xs w-full text-slate-700 min-w-0" placeholder="Buscar..." value={chatSearchQuery} onChange={(e) => setChatSearchQuery(e.target.value)} onClick={(e) => e.stopPropagation()} />
+                                <div className="flex items-center border-l border-slate-300 pl-2 ml-2 gap-1 flex-shrink-0"><span className="text-[10px] text-slate-400 mr-1">{searchMatches.length > 0 ? `${currentMatchIdx + 1}/${searchMatches.length}` : '0/0'}</span><button onClick={(e) => { e.stopPropagation(); handlePrevMatch(); }} className="p-1 hover:bg-slate-200 rounded text-slate-500" disabled={searchMatches.length === 0}><ChevronUp className="w-3 h-3" /></button><button onClick={(e) => { e.stopPropagation(); handleNextMatch(); }} className="p-1 hover:bg-slate-200 rounded text-slate-500" disabled={searchMatches.length === 0}><ChevronDown className="w-3 h-3" /></button></div><button onClick={(e) => { e.stopPropagation(); setShowSearch(false); setChatSearchQuery(''); }} className="ml-2 p-1 hover:bg-slate-200 rounded-full flex-shrink-0"><X className="w-3 h-3 text-slate-500" /></button>
                             </div>
-                        ) : (<button id="chat-search-btn" onClick={(e) => { e.stopPropagation(); setShowSearch(true); }} className="p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-blue-500 transition" title="Buscar en conversación"><Search className="w-5 h-5" /></button>)}
+                        ) : (<button id="chat-search-btn" onClick={(e) => { e.stopPropagation(); setShowSearch(true); }} className="hidden md:flex p-2 rounded-lg text-slate-400 hover:bg-slate-100 hover:text-blue-500 transition" title="Buscar en conversación"><Search className="w-5 h-5" /></button>)}
                     </div>
                     <button
                         id="chat-export-btn"
                         onClick={handleExportPdf}
                         disabled={isExportingPdf}
-                        className={`p-2 rounded-lg transition ${isExportingPdf ? 'text-slate-300 cursor-wait' : 'text-slate-400 hover:bg-slate-100 hover:text-blue-500'}`}
+                        className={`hidden md:flex p-2 rounded-lg transition flex-shrink-0 ${isExportingPdf ? 'text-slate-300 cursor-wait' : 'text-slate-400 hover:bg-slate-100 hover:text-blue-500'}`}
                         title="Exportar conversación a PDF"
                     >
                         {isExportingPdf ? <Loader2 className="w-5 h-5 animate-spin" /> : <FileDown className="w-5 h-5" />}
                     </button>
-                    <button id="chat-info-btn" onClick={() => setShowDetailsPanel(!showDetailsPanel)} className={`p-2 rounded-lg transition ${showDetailsPanel ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:bg-slate-100'}`} title="Info Cliente"><Info className="w-5 h-5" /></button>
+                    <button id="chat-info-btn" onClick={() => setShowDetailsPanel(!showDetailsPanel)} className={`p-2 rounded-lg transition flex-shrink-0 ${showDetailsPanel ? 'bg-slate-200 text-slate-800' : 'text-slate-400 hover:bg-slate-100'}`} title="Info Cliente"><Info className="w-5 h-5" /></button>
                 </div>
 
                 <div
@@ -1058,6 +1081,159 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                             </div>
                         </div>
                         <div className={`rounded-xl p-4 border ${isDark ? 'bg-yellow-900/10 border-yellow-800' : 'bg-yellow-50 border-yellow-100'}`}><div className="flex items-center justify-between mb-2"><div className={`flex items-center gap-2 font-bold text-xs uppercase ${isDark ? 'text-yellow-500' : 'text-yellow-700'}`}><StickyNote className="w-4 h-4" /> Notas Privadas</div>{isSaving && <span className="text-[10px] text-green-600 font-bold animate-pulse">Guardado</span>}</div><textarea className={`w-full border rounded-lg p-2 text-sm outline-none transition-colors resize-none h-32 ${isDark ? 'bg-slate-800/50 border-yellow-900 text-slate-200 focus:bg-slate-800' : 'bg-white/50 border-yellow-200 text-slate-700 focus:bg-white'}`} placeholder="Escribe notas sobre el cliente..." value={crmNotes} onChange={(e) => setCrmNotes(e.target.value)} /><button onClick={saveNotes} className={`mt-2 w-full text-xs font-bold py-2 rounded-lg flex items-center justify-center gap-1 transition-colors ${isDark ? 'bg-yellow-800 hover:bg-yellow-700 text-yellow-100' : 'bg-yellow-200 hover:bg-yellow-300 text-yellow-800'}`}><Save className="w-3 h-3" /> Guardar Notas</button></div>
+                    </div>
+                </div>
+            )}
+
+            {/* SHEET MÓVIL — Controles CRM (asignación / dpto / status / etiquetas / buscar / exportar)
+                Solo visible en pantallas <md. En escritorio estos controles están inline en el header. */}
+            {showMobileCrmMenu && (
+                <div className="md:hidden fixed inset-0 z-[60]" onClick={() => setShowMobileCrmMenu(false)}>
+                    {/* Backdrop */}
+                    <div className="absolute inset-0 bg-black/40 backdrop-blur-sm animate-in fade-in duration-200" />
+                    {/* Bottom Sheet */}
+                    <div
+                        className={`absolute inset-x-0 bottom-0 rounded-t-3xl shadow-2xl border-t animate-in slide-in-from-bottom duration-300 max-h-[85vh] overflow-y-auto safe-pb-8 ${isDark ? 'bg-slate-900 border-white/10' : 'bg-white border-slate-200'}`}
+                        onClick={(e) => e.stopPropagation()}
+                    >
+                        {/* Handle visual */}
+                        <div className="flex justify-center pt-3 pb-1">
+                            <div className={`w-12 h-1.5 rounded-full ${isDark ? 'bg-slate-700' : 'bg-slate-300'}`}></div>
+                        </div>
+
+                        {/* Header del sheet */}
+                        <div className={`flex items-center justify-between px-5 pb-3 border-b ${isDark ? 'border-white/5' : 'border-slate-100'}`}>
+                            <h3 className={`font-bold text-base ${isDark ? 'text-white' : 'text-slate-800'}`}>Gestionar chat</h3>
+                            <button onClick={() => setShowMobileCrmMenu(false)} className={`p-1.5 rounded-full transition ${isDark ? 'hover:bg-white/10 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}>
+                                <X className="w-5 h-5" />
+                            </button>
+                        </div>
+
+                        <div className="p-5 space-y-5">
+                            {/* CASO A: Status === 'Nuevo' → mostrar "Asignar a" como lista */}
+                            {status === 'Nuevo' ? (
+                                <div>
+                                    <label className={`text-xs font-bold uppercase tracking-wide mb-2 flex items-center gap-1.5 ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>
+                                        <UserPlus className="w-3.5 h-3.5" /> Asignar este chat
+                                    </label>
+                                    <div className="space-y-1.5">
+                                        <button
+                                            onClick={() => { handleAssign('me'); setShowMobileCrmMenu(false); }}
+                                            className={`w-full text-left px-3 py-3 rounded-xl flex items-center gap-3 font-semibold transition ${isDark ? 'bg-blue-900/30 hover:bg-blue-900/50 text-blue-200 border border-blue-800' : 'bg-blue-50 hover:bg-blue-100 text-blue-700 border border-blue-200'}`}
+                                        >
+                                            <User className="w-4 h-4" /> A mí ({user.username})
+                                        </button>
+                                        <p className={`text-[10px] font-bold uppercase tracking-wide px-1 pt-2 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Departamentos</p>
+                                        {config?.departments?.map(dept => (
+                                            <button
+                                                key={dept}
+                                                onClick={() => { handleAssign(dept); setShowMobileCrmMenu(false); }}
+                                                className={`w-full text-left px-3 py-2.5 rounded-xl flex items-center gap-3 text-sm transition ${isDark ? 'hover:bg-slate-800 text-slate-300 border border-slate-700' : 'hover:bg-purple-50 text-slate-600 hover:text-purple-700 border border-slate-200'}`}
+                                            >
+                                                <Briefcase className="w-4 h-4 opacity-60" /> {dept}
+                                            </button>
+                                        ))}
+                                    </div>
+                                </div>
+                            ) : (
+                                <>
+                                    {/* Asignado a */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase tracking-wide mb-1.5 flex items-center gap-1.5 ${isDark ? 'text-blue-400' : 'text-blue-700'}`}>
+                                            <UserCheck className="w-3.5 h-3.5" /> Asignado a
+                                        </label>
+                                        <div className="flex items-center gap-2">
+                                            <select
+                                                className={`flex-1 text-sm rounded-xl py-2.5 px-3 border focus:ring-2 outline-none transition ${isDark ? 'bg-slate-800 border-slate-700 text-white focus:ring-blue-500/40' : 'bg-blue-50 border-blue-200 text-blue-700 focus:ring-blue-400'}`}
+                                                value={assignedTo}
+                                                onChange={(e) => { setAssignedTo(e.target.value); updateCRM('assigned_to', e.target.value); }}
+                                            >
+                                                <option value="">Sin asignar</option>
+                                                {agents.map(a => (<option key={a.id} value={a.name}>{a.name}</option>))}
+                                            </select>
+                                            {!assignedTo && (
+                                                <button
+                                                    onClick={() => { handleAssign('me'); setShowMobileCrmMenu(false); }}
+                                                    className="bg-green-600 hover:bg-green-700 text-white px-3 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1 flex-shrink-0 transition shadow-sm whitespace-nowrap"
+                                                >
+                                                    <UserPlus className="w-3.5 h-3.5" /> A mí
+                                                </button>
+                                            )}
+                                        </div>
+                                    </div>
+
+                                    {/* Departamento */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase tracking-wide mb-1.5 flex items-center gap-1.5 ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>
+                                            <Briefcase className="w-3.5 h-3.5" /> Departamento
+                                        </label>
+                                        <select
+                                            className={`w-full text-sm rounded-xl py-2.5 px-3 border focus:ring-2 outline-none transition ${isDark ? 'bg-slate-800 border-slate-700 text-white focus:ring-purple-500/40' : 'bg-purple-50 border-purple-200 text-purple-700 focus:ring-purple-400'}`}
+                                            value={department}
+                                            onChange={(e) => { setDepartment(e.target.value); updateCRM('department', e.target.value); }}
+                                        >
+                                            <option value="">Sin departamento</option>
+                                            {config?.departments?.map(d => <option key={d} value={d}>{d}</option>) || <option value="Ventas">Ventas</option>}
+                                        </select>
+                                    </div>
+
+                                    {/* Estado */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase tracking-wide mb-1.5 flex items-center gap-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
+                                            <CheckCircle className="w-3.5 h-3.5" /> Estado del chat
+                                        </label>
+                                        <select
+                                            className={`w-full text-sm rounded-xl py-2.5 px-3 border focus:ring-2 outline-none transition ${isDark ? 'bg-slate-800 border-slate-700 text-white focus:ring-slate-500/40' : 'bg-slate-50 border-slate-200 text-slate-700 focus:ring-slate-400'}`}
+                                            value={status}
+                                            onChange={(e) => { setStatus(e.target.value); updateCRM('status', e.target.value); }}
+                                        >
+                                            {config?.statuses?.map(s => <option key={s} value={s}>{s}</option>) || <option value="Nuevo">Nuevo</option>}
+                                        </select>
+                                    </div>
+
+                                    {/* Etiquetas */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase tracking-wide mb-1.5 flex items-center gap-1.5 ${isDark ? 'text-orange-400' : 'text-orange-700'}`}>
+                                            <Tag className="w-3.5 h-3.5" /> Etiquetas {contactTags.length > 0 && <span className="text-[10px] opacity-75">({contactTags.length})</span>}
+                                        </label>
+                                        <div className="flex flex-wrap gap-2">
+                                            {config?.tags?.map(tag => {
+                                                const isActive = contactTags.includes(tag);
+                                                return (
+                                                    <button
+                                                        key={tag}
+                                                        onClick={() => toggleTag(tag)}
+                                                        className={`text-xs font-semibold px-3 py-2 rounded-full border flex items-center gap-1.5 transition ${isActive ? 'bg-orange-500 text-white border-orange-600 shadow-sm' : (isDark ? 'bg-slate-800 text-slate-300 border-slate-700 hover:bg-slate-700' : 'bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100')}`}
+                                                    >
+                                                        {tag}
+                                                        {isActive && <CheckCircle className="w-3 h-3" />}
+                                                    </button>
+                                                );
+                                            })}
+                                            {(!config?.tags || config.tags.length === 0) && <p className={`text-xs italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>No hay etiquetas configuradas.</p>}
+                                        </div>
+                                    </div>
+                                </>
+                            )}
+
+                            {/* Acciones — buscar, exportar */}
+                            <div className={`pt-3 mt-1 border-t space-y-1.5 ${isDark ? 'border-white/5' : 'border-slate-100'}`}>
+                                <button
+                                    onClick={() => { setShowMobileCrmMenu(false); setShowSearch(true); }}
+                                    className={`w-full text-left px-3 py-3 rounded-xl flex items-center gap-3 text-sm font-semibold transition ${isDark ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-50 text-slate-700'}`}
+                                >
+                                    <Search className={`w-4 h-4 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} /> Buscar en la conversación
+                                </button>
+                                <button
+                                    onClick={() => { setShowMobileCrmMenu(false); handleExportPdf(); }}
+                                    disabled={isExportingPdf}
+                                    className={`w-full text-left px-3 py-3 rounded-xl flex items-center gap-3 text-sm font-semibold transition disabled:opacity-50 ${isDark ? 'hover:bg-slate-800 text-slate-200' : 'hover:bg-slate-50 text-slate-700'}`}
+                                >
+                                    {isExportingPdf ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileDown className={`w-4 h-4 ${isDark ? 'text-blue-400' : 'text-blue-500'}`} />}
+                                    {isExportingPdf ? 'Exportando…' : 'Exportar conversación a PDF'}
+                                </button>
+                            </div>
+                        </div>
                     </div>
                 </div>
             )}
