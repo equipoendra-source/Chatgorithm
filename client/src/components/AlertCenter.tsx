@@ -19,10 +19,9 @@ interface AlertCenterProps {
 // Componente global que escucha eventos team_alert por socket y muestra toasts.
 // Solo visible para administradores (los agentes no necesitan ver alertas técnicas).
 //
-// Comportamiento por severidad:
-//  - warning  → auto-dismiss en 10s
-//  - error    → auto-dismiss en 20s
-//  - critical → NUNCA se auto-dismiss (admin debe cerrar manualmente)
+// Las alertas se quedan visibles hasta que el admin las descarte manualmente
+// (botón X). Nada de auto-dismiss para que ninguna alerta se pierda aunque el
+// admin no esté mirando la pantalla en ese momento.
 //
 // Máximo 5 toasts visibles a la vez. Si llegan más, se descartan los más viejos
 // (excepto los critical, que quedan hasta cerrar).
@@ -46,14 +45,9 @@ export function AlertCenter({ socket, isAdmin }: AlertCenterProps) {
                 }
                 return next;
             });
-
-            // Auto-dismiss según severidad (critical no se auto-cierra)
-            if (alert.severity !== 'critical') {
-                const ttl = alert.severity === 'error' ? 20000 : 10000;
-                setTimeout(() => {
-                    setAlerts(prev => prev.filter(a => a.id !== withId.id));
-                }, ttl);
-            }
+            // Sin auto-dismiss: el admin debe cerrar cada alerta manualmente
+            // pulsando la X. Antes warning duraba 10s y error 20s, pero el
+            // admin se las perdía si estaba ocupado.
         };
         socket.on('team_alert', onAlert);
         return () => { socket.off('team_alert', onAlert); };

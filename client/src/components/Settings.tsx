@@ -117,7 +117,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             socket.on('quick_replies_list', (list: QuickReply[]) => setLocalQuickReplies(list));
 
             socket.on('action_error', (msg: string) => { setError(msg); setIsSaving(false); });
-            socket.on('action_success', (msg: string) => { setSuccess(msg); setIsSaving(false); closeModal(); setTimeout(() => setSuccess(''), 3000); });
+            socket.on('action_success', (msg: string) => { setSuccess(msg); setIsSaving(false); closeModal(); });
         }
         return () => {
             socket?.off('agents_list');
@@ -214,7 +214,6 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             if (data.success) {
                 setBotDepartments(cleaned); // refrescar UI con la versión saneada
                 setSuccess(`✅ ${cleaned.length} departamento${cleaned.length === 1 ? '' : 's'} guardado${cleaned.length === 1 ? '' : 's'}. Laura los aplicará en la próxima conversación.`);
-                setTimeout(() => setSuccess(''), 4000);
             } else {
                 alert('Error: ' + (data.error || 'desconocido'));
             }
@@ -272,7 +271,6 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             if (data.success) {
                 setBotEnabled(newState);
                 setSuccess(newState ? '✅ Laura ACTIVADA — responderá automáticamente' : '🔇 Laura DESACTIVADA — solo respuestas manuales');
-                setTimeout(() => setSuccess(''), 4000);
             } else {
                 alert('Error: ' + (data.error || 'desconocido'));
             }
@@ -476,9 +474,23 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                     </button>
                     <h1 className={`text-lg md:text-xl font-bold truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>{getTitle()}</h1>
                 </div>
-                <div className="fixed safe-toast-top right-4 z-[70] flex flex-col gap-2 items-end pointer-events-none">
-                    {success && <div className="bg-green-100 text-green-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto">{success}</div>}
-                    {error && <div className="bg-red-100 text-red-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto">{error}</div>}
+                <div className="fixed safe-toast-top right-4 z-[70] flex flex-col gap-2 items-end pointer-events-none max-w-[calc(100vw-2rem)]">
+                    {success && (
+                        <div className="bg-green-100 text-green-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto flex items-start gap-3 max-w-md">
+                            <span className="flex-1 leading-snug">{success}</span>
+                            <button onClick={() => setSuccess('')} className="p-1 -m-1 rounded-full hover:bg-green-200 text-green-700/70 hover:text-green-900 transition flex-shrink-0" title="Cerrar">
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                    )}
+                    {error && (
+                        <div className="bg-red-100 text-red-700 px-4 py-2 rounded-lg text-xs md:text-sm font-bold animate-in slide-in-from-right shadow-md pointer-events-auto flex items-start gap-3 max-w-md">
+                            <span className="flex-1 leading-snug">{error}</span>
+                            <button onClick={() => setError('')} className="p-1 -m-1 rounded-full hover:bg-red-200 text-red-700/70 hover:text-red-900 transition flex-shrink-0" title="Cerrar">
+                                <X className="w-4 h-4" />
+                            </button>
+                        </div>
+                    )}
                 </div>
             </div>
 
