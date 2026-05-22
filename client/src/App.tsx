@@ -226,22 +226,42 @@ function App() {
         socket.on('online_users_update', onOnlineUsersUpdate);
         socket.on('remote_typing', onRemoteTyping);
 
-        // Nueva cita reservada (Laura o manual) → toast in-app
+        // Nueva cita reservada (Laura o manual) → toast morado in-app
         const onNewAppointment = (data: any) => {
             if (!data || !data.appointmentId) return;
             const notif: AppointmentNotification = {
-                id: `${data.appointmentId}-${Date.now()}`,
+                id: `${data.appointmentId}-booked-${Date.now()}`,
                 appointmentId: data.appointmentId,
                 dateISO: data.dateISO,
                 clientName: data.clientName || 'Cliente',
                 clientPhone: data.clientPhone || '',
                 agenda: data.agenda || '',
                 humanDate: data.humanDate || '',
-                source: data.source === 'manual' ? 'manual' : 'bot'
+                source: data.source || 'manual',
+                kind: 'booked'
             };
             setAppointmentNotifs(prev => [notif, ...prev].slice(0, 5));
         };
         socket.on('new_appointment', onNewAppointment);
+
+        // Cita cancelada (Laura, cliente vía WhatsApp, o trabajador desde calendario)
+        // → toast rojo in-app, con el mismo comportamiento que las reservas.
+        const onCancelledAppointment = (data: any) => {
+            if (!data || !data.appointmentId) return;
+            const notif: AppointmentNotification = {
+                id: `${data.appointmentId}-cancelled-${Date.now()}`,
+                appointmentId: data.appointmentId,
+                dateISO: data.dateISO,
+                clientName: data.clientName || 'Cliente',
+                clientPhone: data.clientPhone || '',
+                agenda: data.agenda || '',
+                humanDate: data.humanDate || '',
+                source: data.source || 'manual',
+                kind: 'cancelled'
+            };
+            setAppointmentNotifs(prev => [notif, ...prev].slice(0, 5));
+        };
+        socket.on('appointment_cancelled', onCancelledAppointment);
 
         // Debug
         socket.onAny((event, ...args) => {
@@ -276,6 +296,7 @@ function App() {
             socket.off('remote_typing');
             socket.off('quick_replies_list');
             socket.off('new_appointment', onNewAppointment);
+            socket.off('appointment_cancelled', onCancelledAppointment);
         };
     }, [socket, user, companyConfig?.backendUrl]);
 

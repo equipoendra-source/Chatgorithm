@@ -1145,6 +1145,76 @@ function notifyNewAppointment(data: {
     }
 }
 
+// Notificación de cita cancelada — se dispara al cancelar desde cualquier vía
+// (Laura, cliente vía WhatsApp, trabajador desde el calendario).
+// Mismos 3 canales que notifyNewAppointment + registro en historial.
+function notifyCancelledAppointment(data: {
+    appointmentId: string;
+    dateISO: string;
+    clientName: string;
+    clientPhone: string;
+    agenda?: string;
+    source: 'bot' | 'manual' | 'client_whatsapp';
+}) {
+    try {
+        const humanDate = new Date(data.dateISO).toLocaleString('es-ES', {
+            timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short'
+        });
+        const title = '❌ Cita cancelada';
+        const cleanName = (data.clientName || 'Cliente').trim();
+        const agendaSuffix = data.agenda ? ` (${data.agenda})` : '';
+        const body = `${cleanName} — ${humanDate}${agendaSuffix}`;
+
+        // 1. Socket.IO: toast in-app en tiempo real
+        io.emit('appointment_cancelled', {
+            appointmentId: data.appointmentId,
+            dateISO: data.dateISO,
+            clientName: cleanName,
+            clientPhone: data.clientPhone,
+            agenda: data.agenda || '',
+            source: data.source,
+            humanDate,
+            title,
+            body
+        });
+
+        // 2. FCM: push a móviles (APK Android)
+        sendFCMNotification({
+            title,
+            body,
+            data: {
+                type: 'appointment_cancelled',
+                appointmentId: data.appointmentId,
+                dateISO: data.dateISO,
+                clientPhone: data.clientPhone || ''
+            }
+        });
+
+        // 3. Web Push: push al navegador (PWA/escritorio)
+        broadcastPushNotification({
+            title,
+            body,
+            icon: '/logo.png',
+            url: `/?view=calendar&date=${data.dateISO.slice(0, 10)}`
+        });
+
+        console.log(`🔔 [CitaCancelada] Notificado (${data.source}): ${cleanName} @ ${humanDate}`);
+
+        // Registrar en historial persistente (no bloquea ni rompe nada si falla)
+        logAppointmentEvent({
+            type: 'cancelled',
+            appointmentId: data.appointmentId,
+            clientName: cleanName,
+            clientPhone: data.clientPhone,
+            appointmentDate: data.dateISO,
+            agenda: data.agenda || '',
+            source: data.source
+        });
+    } catch (e: any) {
+        console.error('[CitaCancelada] Error enviando notificación:', e.message);
+    }
+}
+
 // Registra un evento de cita (reserva o cancelación) en Airtable para tener
 // historial persistente, y lo emite por socket para refresco en tiempo real.
 // Tolerante: si la tabla AppointmentEvents aún no existe, lo avisa una vez y
@@ -3053,13 +3123,14 @@ async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' |
             console.warn('[Cancel] Error emitiendo appointment_changed:', emitErr?.message);
         }
 
-        // Registrar en historial persistente (auditoría)
-        logAppointmentEvent({
-            type: 'cancelled',
+        // Notificar al equipo: toast in-app + push móvil + Web Push + historial.
+        // Se delega a notifyCancelledAppointment para reutilizar el mismo patrón que
+        // notifyNewAppointment (3 canales + auditoría).
+        notifyCancelledAppointment({
             appointmentId: record.id,
+            dateISO: leadDate.toISOString(),
             clientName: cancelledClientName,
             clientPhone: cancelledClientPhone,
-            appointmentDate: leadDate.toISOString(),
             agenda: leadAgenda,
             source
         });
@@ -4258,14 +4329,14 @@ app.put('/api/appointments/:id', async (req, res) => {
             console.warn('[API] Error emitiendo appointment_changed:', emitErr?.message);
         }
 
-        // Registrar cancelación manual en el historial (Booked → Available desde el calendario)
+        // Cancelación manual desde el calendario (Booked → Available).
+        // Notificar al equipo (toast in-app + push móvil + Web Push) + historial.
         if (req.body.status === 'Available' && preUpdateStatus === 'Booked') {
-            logAppointmentEvent({
-                type: 'cancelled',
+            notifyCancelledAppointment({
                 appointmentId: req.params.id,
+                dateISO: preUpdateDate,
                 clientName: preUpdateClientName,
                 clientPhone: preUpdateClientPhone,
-                appointmentDate: preUpdateDate,
                 agenda: preUpdateAgenda,
                 source: 'manual'
             });
