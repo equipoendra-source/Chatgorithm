@@ -258,7 +258,12 @@ export function Sidebar({
 
         socket.on('message', handleSidebarMessage);
 
-        const interval = setInterval(() => { if (isConnected) socket.emit('request_contacts'); }, 10000);
+        // Polling de seguridad cada 60s (antes 10s). El socket ya emite
+        // 'contact_updated_notification' en cualquier cambio relevante, así
+        // que el polling solo cubre desconexiones momentáneas. 10s generaba
+        // ~6 lecturas/min/usuario contra Airtable (riesgo de cuota con
+        // varios admins conectados).
+        const interval = setInterval(() => { if (isConnected) socket.emit('request_contacts'); }, 60000);
 
         return () => {
             socket.off('contacts_update', handleContactsUpdate);

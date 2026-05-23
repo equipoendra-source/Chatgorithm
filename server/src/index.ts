@@ -612,7 +612,9 @@ const metrics = {
 //   - 'appointment_race'   — dos clientes pelearon por la misma cita
 //   - 'ia_fallback'        — Laura mandó fallback ('he tenido un problema...')
 //   - 'gemini_quota'       — cuota Gemini agotada
-type AlertType = 'send_failed' | 'template_failed' | 'appointment_race' | 'ia_fallback' | 'gemini_quota' | 'webhook_bad_sig';
+//   - 'webhook_bad_sig'    — webhook con firma inválida (intento de ataque)
+//   - 'client_opt_out'     — cliente pidió baja por WhatsApp ("BAJA"/"STOP")
+type AlertType = 'send_failed' | 'template_failed' | 'appointment_race' | 'ia_fallback' | 'gemini_quota' | 'webhook_bad_sig' | 'client_opt_out';
 interface TeamAlert {
     type: AlertType;
     severity: 'warning' | 'error' | 'critical';
@@ -1860,6 +1862,16 @@ async function handleNotificationOptOut(phone: string, originPhoneId: string): P
         // 3. Confirmar al cliente
         await sendWhatsAppText(clean, '✅ Entendido. No recibirá más mensajes automáticos de nuestra parte. Si necesita algo, no dude en escribirnos.', originPhoneId);
 
+        // 4. Avisar al equipo (admin) para que sepa de la baja y pueda
+        //    actuar (perdió un cliente potencial, retirar de campañas, etc.).
+        const clientName = contacts.length > 0 ? ((contacts[0].get('name') as string) || clean) : clean;
+        notifyTeam(
+            'client_opt_out',
+            'warning',
+            `Cliente ${clientName} (${clean}) pidió BAJA por WhatsApp. ${pending.length} notificación(es) cancelada(s).`,
+            { phone: clean, name: clientName, cancelled: pending.length, originPhoneId }
+        );
+
         console.log(`🚫 [Notif] Opt-out: ${clean}. ${pending.length} notificaciones canceladas.`);
     } catch (e: any) {
         console.error(`❌ [Notif] Error en opt-out:`, e.message);
@@ -1901,8 +1913,12 @@ async function runNotificationScheduler() {
             const dateStr = apptDate.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Madrid' });
             const timeStr = apptDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
 
-            // T-24h: entre 22 y 26 horas antes (ventana amplia para el intervalo de 15min)
-            if (hoursUntil >= 22 && hoursUntil <= 26) {
+            // T-24h: si quedan ≤26h y la cita es FUTURA (>1h). scheduleNotification
+            // es idempotente (deduplica por type+phone+appointmentId), así que
+            // múltiples invocaciones del scheduler no duplican el aviso.
+            // Antes la ventana era 22-26h: si el servidor estaba apagado durante
+            // esas 4 horas, el T-24h se perdía y nunca se enviaba.
+            if (hoursUntil <= 26 && hoursUntil >= 1) {
                 await scheduleNotification({
                     type: 'cita_24h', phone: clientPhone, appointmentId: appt.id,
                     templateName: 'cita_recordatorio_24h',
@@ -1912,8 +1928,10 @@ async function runNotificationScheduler() {
                 await delay(200);
             }
 
-            // T-1h: entre 45 y 75 minutos antes
-            if (minutesUntil >= 45 && minutesUntil <= 75) {
+            // T-1h: si quedan ≤75 min y la cita es FUTURA (>0 min). Antes 45-75:
+            // ventana de 30 min; si el scheduler no corría en ese tramo, no se
+            // enviaba el recordatorio 1h.
+            if (minutesUntil <= 75 && minutesUntil >= 5) {
                 await scheduleNotification({
                     type: 'cita_1h', phone: clientPhone, appointmentId: appt.id,
                     templateName: 'cita_recordatorio_1h',
@@ -3488,6 +3506,21 @@ async function assignDepartment(clientPhone: string, department: string) {
             io.emit('contact_updated_notification');
             activeAiChats.delete(clean);
             io.emit('ai_active_change', { phone: clean, active: false });
+
+            // Evento específico para que el frontend del agente notificado
+            // muestre un toast "tienes un chat asignado" sin tener que pollear
+            // la lista. Lleva contexto suficiente (nombre del cliente, depto)
+            // para que la UI no tenga que volver a llamar a la API.
+            const clientName = (contacts[0].get('name') as string) || clean;
+            io.emit('chat_assigned', {
+                phone: clean,
+                clientName,
+                assignedTo: pickedAgent || '',
+                department,
+                origin: 'bot',
+                originPhoneId: (contacts[0].get('origin_phone_id') as string) || ''
+            });
+
             console.log(`📨 [AssignDept] ${clean} → depto="${department}"${pickedAgent ? `, asignado a "${pickedAgent}"` : ' (sin agente con ese depto en prefs)'}`);
             return pickedAgent
                 ? `Asignado a ${department} (${pickedAgent}).`
@@ -4361,27 +4394,50 @@ app.post('/api/admin/reload-accounts', async (req, res) => {
 app.get('/api/appointments', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
-        const records = await base('Appointments').select({ sort: [{ field: "Date", direction: "asc" }] }).all();
-        res.json(records.map(r => ({
-            id: r.id,
-            date: r.get('Date'),
-            status: r.get('Status'),
-            agenda: r.get('Agenda') || '',
-            incident: !!r.get('Incident'),
-            clientPhone: r.get('ClientPhone'),
-            clientName: r.get('ClientName'),
-            // Aliases legacy + alias genérico nuevo (field1..field5)
-            matricula: r.get('Matricula'),
-            marca: r.get('Marca'),
-            modelo: r.get('Modelo'),
-            extra: r.get('Extra'),
-            notas: r.get('Notas'),
-            field1: r.get('Matricula'),
-            field2: r.get('Marca'),
-            field3: r.get('Modelo'),
-            field4: r.get('Extra'),
-            field5: r.get('Notas')
-        })));
+        // Paralelizamos Appointments + Contacts para poder cruzar ClientPhone
+        // con origin_phone_id del contacto. El frontend usa este campo para
+        // filtrar el calendario por línea de WhatsApp seleccionada en el
+        // Sidebar (en multi-cuenta evita mezclar citas de distintas líneas).
+        const [records, contactRecords] = await Promise.all([
+            base('Appointments').select({ sort: [{ field: "Date", direction: "asc" }] }).all(),
+            base('Contacts').select().all()
+        ]);
+        const phoneToAccount: Record<string, string> = {};
+        contactRecords.forEach(c => {
+            const phone = cleanNumber((c.get('phone') as string) || '');
+            const oid = (c.get('origin_phone_id') as string) || '';
+            if (phone && oid) {
+                if (!phoneToAccount[phone]) phoneToAccount[phone] = oid;
+                if (phone.length >= 9 && !phoneToAccount[phone.slice(-9)]) phoneToAccount[phone.slice(-9)] = oid;
+            }
+        });
+        res.json(records.map(r => {
+            const cp = cleanNumber((r.get('ClientPhone') as string) || '');
+            const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
+            const oid = cp ? (phoneToAccount[cp] || phoneToAccount[last9] || '') : '';
+            return {
+                id: r.id,
+                date: r.get('Date'),
+                status: r.get('Status'),
+                agenda: r.get('Agenda') || '',
+                incident: !!r.get('Incident'),
+                clientPhone: r.get('ClientPhone'),
+                clientName: r.get('ClientName'),
+                // Aliases legacy + alias genérico nuevo (field1..field5)
+                matricula: r.get('Matricula'),
+                marca: r.get('Marca'),
+                modelo: r.get('Modelo'),
+                extra: r.get('Extra'),
+                notas: r.get('Notas'),
+                field1: r.get('Matricula'),
+                field2: r.get('Marca'),
+                field3: r.get('Modelo'),
+                field4: r.get('Extra'),
+                field5: r.get('Notas'),
+                // origen del cliente, propagado desde Contacts.origin_phone_id
+                originPhoneId: oid
+            };
+        }));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
 });
 
@@ -4783,6 +4839,33 @@ app.post('/api/send-template', async (req, res) => {
     if (!token) return res.status(500).json({ error: "Credenciales" });
     const cleanTo = cleanNumber(phone);
     try {
+        // Validar que la plantilla esté APPROVED antes de gastar la llamada
+        // a Meta. Si está PENDING/REJECTED Meta la rechaza con error críptico
+        // y el cliente cree que fue por su lado.
+        if (base && templateName) {
+            try {
+                const tplRecords = await base(TABLE_TEMPLATES).select({
+                    filterByFormula: `{Name}='${escAt(templateName)}'`,
+                    maxRecords: 1
+                }).firstPage();
+                if (tplRecords.length > 0) {
+                    const tplStatus = String(tplRecords[0].get('Status') || '').toUpperCase();
+                    if (tplStatus && tplStatus !== 'APPROVED') {
+                        const human = tplStatus === 'PENDING'
+                            ? 'La plantilla aún está pendiente de aprobación por Meta. Espera a que pase a APROBADA antes de enviarla.'
+                            : tplStatus === 'REJECTED'
+                                ? 'La plantilla fue RECHAZADA por Meta. Corrige el contenido o crea una nueva antes de enviar.'
+                                : `La plantilla no está aprobada (Status=${tplStatus}). No se puede enviar todavía.`;
+                        return res.status(400).json({ error: human, templateStatus: tplStatus });
+                    }
+                }
+                // Si no hay registro local de la plantilla, la dejamos pasar — puede
+                // haber sido creada directamente en Meta sin sincronizar aún.
+            } catch (preCheckErr: any) {
+                console.warn('[send-template] No se pudo pre-validar Status (continuando):', preCheckErr?.message);
+            }
+        }
+
         const parameters = variables.map((val: string) => ({ type: "text", text: val }));
         const templateObj: any = { name: templateName, language: { code: language } };
         if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
@@ -4954,28 +5037,44 @@ app.get('/api/analytics', async (req, res) => {
         });
 
         // Citas por cuenta (matching de teléfono tolerante con/sin prefijo)
+        // Calculamos también incidentes por cuenta para que el dashboard pueda
+        // mostrar el desglose (antes solo había total mensual global).
+        const incidentsByAccount: Record<string, { total: number, incidents: number }> = {};
+        accountIds.forEach(id => { incidentsByAccount[id] = { total: 0, incidents: 0 }; });
         allAppts.forEach(a => {
             if (a.get('Status') !== 'Booked') return;
             const cp = cleanNumber((a.get('ClientPhone') as string) || '');
             if (!cp) return;
             const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
             const oid = phoneToAccount[cp] || phoneToAccount[last9];
-            if (oid && perAccount[oid]) perAccount[oid].totalAppointments++;
+            if (oid && perAccount[oid]) {
+                perAccount[oid].totalAppointments++;
+                incidentsByAccount[oid].total++;
+                if (a.get('Incident')) incidentsByAccount[oid].incidents++;
+            }
         });
 
-        const accountsArr = Object.values(perAccount).map(a => ({
-            id: a.id,
-            name: a.name,
-            totalMessages: a.totalMessages,
-            totalContacts: a.totalContacts,
-            totalAppointments: a.totalAppointments,
-            percentBot: (a.botMessages + a.humanOutbound) > 0
-                ? Math.round((a.botMessages / (a.botMessages + a.humanOutbound)) * 100)
-                : 0,
-            avgResponseTimeMin: a.responseTimes.length > 0
-                ? Math.round(a.responseTimes.reduce((s, t) => s + t, 0) / a.responseTimes.length)
-                : null
-        })).sort((a, b) => b.totalMessages - a.totalMessages);
+        const accountsArr = Object.values(perAccount).map(a => {
+            const inc = incidentsByAccount[a.id] || { total: 0, incidents: 0 };
+            return {
+                id: a.id,
+                name: a.name,
+                totalMessages: a.totalMessages,
+                totalContacts: a.totalContacts,
+                totalAppointments: a.totalAppointments,
+                percentBot: (a.botMessages + a.humanOutbound) > 0
+                    ? Math.round((a.botMessages / (a.botMessages + a.humanOutbound)) * 100)
+                    : 0,
+                avgResponseTimeMin: a.responseTimes.length > 0
+                    ? Math.round(a.responseTimes.reduce((s, t) => s + t, 0) / a.responseTimes.length)
+                    : null,
+                incidents: {
+                    count: inc.incidents,
+                    total: inc.total,
+                    percentage: inc.total > 0 ? Math.round((inc.incidents / inc.total) * 100) : 0
+                }
+            };
+        }).sort((a, b) => b.totalMessages - a.totalMessages);
 
         // activityByAccount: para gráfica multi-serie del último 7d
         const activityByAccount = last7Days.map(date => {
@@ -5644,8 +5743,28 @@ io.on('connection', (socket) => {
         const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'` }).firstPage();
         if (r.length > 0) {
             const oldStatus = r[0].get('status') as string;
+            const oldAssignedTo = (r[0].get('assigned_to') as string) || '';
             await base('Contacts').update([{ id: r[0].id, fields: data.updates }], { typecast: true });
             io.emit('contact_updated_notification');
+
+            // Si esta actualización CAMBIA assigned_to a un valor nuevo,
+            // emitir 'chat_assigned' para que el agente reciba un toast en
+            // su frontend ("tienes un chat asignado"). No emite si el campo
+            // estaba ya con el mismo valor (evita ruido en re-asignaciones).
+            const newAssignedTo = (data.updates?.assigned_to as string) || '';
+            if (newAssignedTo && newAssignedTo !== oldAssignedTo) {
+                const clientName = (r[0].get('name') as string) || clean;
+                io.emit('chat_assigned', {
+                    phone: clean,
+                    clientName,
+                    assignedTo: newAssignedTo,
+                    department: (data.updates?.department as string) || (r[0].get('department') as string) || '',
+                    origin: 'manual',
+                    originPhoneId: (r[0].get('origin_phone_id') as string) || ''
+                });
+                console.log(`📨 [Assign] ${clean} asignado manualmente a "${newAssignedTo}"`);
+            }
+
             // Efectos secundarios del cambio de estado (secuencia postventa)
             await handleContactStatusChange(r[0], oldStatus, data.updates.status, clean);
         }

@@ -17,7 +17,7 @@ import { pushNotificationService } from './services/pushNotifications';
 import ErrorBoundary from './components/ErrorBoundary';
 import { getAuthServerUrl } from './config/api';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
-import { ToastProvider } from './context/ToastContext';
+import { ToastProvider, useToast } from './context/ToastContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
 import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
 import { AlertCenter } from './components/AlertCenter';
@@ -64,6 +64,8 @@ function App() {
     // THEME
     const { theme } = useTheme();
     const isDark = theme === 'dark';
+    // TOASTS globales para notificar asignación de chat, etc.
+    const { showToast } = useToast();
 
     // COMPANY CONFIGURATION - First level of auth
     const [companyConfig, setCompanyConfig] = useState<CompanyConfig | null>(getSavedCompanyConfig);
@@ -267,6 +269,22 @@ function App() {
         };
         socket.on('appointment_cancelled', onCancelledAppointment);
 
+        // Chat asignado a un agente — solo notificamos al destinatario
+        // (data.assignedTo === user.username). En multi-cuenta, el toast
+        // muestra el cliente y el depto/origen.
+        const onChatAssigned = (data: any) => {
+            if (!data || !user) return;
+            const me = user.username;
+            const target = (data.assignedTo || '').trim();
+            if (!target || target !== me) return; // no es para mí
+            const clientName = data.clientName || data.phone || 'Cliente';
+            const origin = data.origin === 'bot' ? 'Laura te ha pasado un chat'
+                : data.origin === 'manual' ? 'Te han asignado un chat'
+                : 'Tienes un chat asignado';
+            showToast('info', `📨 ${origin}: ${clientName}${data.department ? ` · ${data.department}` : ''}`);
+        };
+        socket.on('chat_assigned', onChatAssigned);
+
         // Debug
         socket.onAny((event, ...args) => {
             console.log(`🔌 [SOCKET] ${event}`, args.length > 0 ? args : '');
@@ -301,6 +319,7 @@ function App() {
             socket.off('quick_replies_list');
             socket.off('new_appointment', onNewAppointment);
             socket.off('appointment_cancelled', onCancelledAppointment);
+            socket.off('chat_assigned', onChatAssigned);
         };
     }, [socket, user, companyConfig?.backendUrl]);
 
@@ -496,7 +515,7 @@ function App() {
                         >
                             <ArrowLeft className="w-6 h-6 text-slate-300 group-hover:text-indigo-400 transition-colors" />
                         </button>
-                        <CalendarDashboard readOnly={user.role === 'agent'} config={config} initialDate={calendarInitialDate} onInitialDateConsumed={() => setCalendarInitialDate(null)} socket={socket} />
+                        <CalendarDashboard readOnly={user.role === 'agent'} config={config} initialDate={calendarInitialDate} onInitialDateConsumed={() => setCalendarInitialDate(null)} socket={socket} selectedAccountId={selectedAccountId} />
                     </div>
                 </div>
                 {appointmentToastNode}

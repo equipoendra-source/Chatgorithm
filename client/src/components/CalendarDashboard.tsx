@@ -25,6 +25,10 @@ interface Appointment {
     field3?: string;
     field4?: string;
     field5?: string;
+    // Línea de WhatsApp por la que entró el cliente (derivado de
+    // Contacts.origin_phone_id en el backend). Se usa para filtrar el
+    // calendario por cuenta en el Sidebar multi-cuenta.
+    originPhoneId?: string;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -85,9 +89,14 @@ interface CalendarDashboardProps {
     // WhatsApp y el calendar está abierto en otra pestaña). Además el panel
     // de Historial usa este socket para añadir nuevos eventos al instante.
     socket?: any;
+    // Filtro de cuenta heredado del Sidebar. null = todas las líneas.
+    // Cuando hay valor, ocultamos las citas reservadas que no pertenezcan a
+    // esa cuenta. Los huecos Available se siguen mostrando para que el
+    // trabajador pueda reservar — no tienen origen propio.
+    selectedAccountId?: string | null;
 }
 
-const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config, initialDate, onInitialDateConsumed, socket }) => {
+const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config, initialDate, onInitialDateConsumed, socket, selectedAccountId }) => {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
 
@@ -167,12 +176,22 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             if (timer) clearTimeout(timer);
             timer = setTimeout(() => { fetchData(); }, 300);
         };
+        // appointment_changed: cambios estructurales (status, datos).
+        // new_appointment / appointment_cancelled: notificaciones específicas.
+        // appointment_event: registro de auditoría (creación, cancelación,
+        //   marcar como incidente, etc.) — antes solo lo usaba el panel
+        //   histórico, ahora también disparamos refresh del calendario para
+        //   que cualquier acción quede reflejada al instante.
         socket.on('appointment_changed', scheduleRefresh);
         socket.on('new_appointment', scheduleRefresh);
+        socket.on('appointment_cancelled', scheduleRefresh);
+        socket.on('appointment_event', scheduleRefresh);
         return () => {
             if (timer) clearTimeout(timer);
             socket.off('appointment_changed', scheduleRefresh);
             socket.off('new_appointment', scheduleRefresh);
+            socket.off('appointment_cancelled', scheduleRefresh);
+            socket.off('appointment_event', scheduleRefresh);
         };
     }, [socket]);
 
@@ -443,6 +462,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             const sameDay = d.getDate() === day && d.getMonth() === currentDate.getMonth() && d.getFullYear() === currentDate.getFullYear();
             if (!sameDay) return false;
             if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
+            // Filtro por línea de WhatsApp (Sidebar). Solo aplica a citas
+            // RESERVADAS: los huecos Available no tienen línea de origen y se
+            // siguen mostrando para que el trabajador pueda reservar.
+            if (selectedAccountId && a.status === 'Booked' && a.originPhoneId && a.originPhoneId !== selectedAccountId) return false;
             return true;
         }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     };

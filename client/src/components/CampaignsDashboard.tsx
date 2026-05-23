@@ -827,6 +827,8 @@ const CampaignWizard: React.FC<{
     // Estado del formulario
     const [name, setName] = useState(initialData?.name || '');
     const [templateName, setTemplateName] = useState(initialData?.templateName || '');
+    const [originPhoneId, setOriginPhoneId] = useState<string>(initialData?.originPhoneId || '');
+    const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
     const [variables, setVariables] = useState<string[]>(initialData?.variables || []);
     const [recipients, setRecipients] = useState<string[]>(initialData?.recipients || []);
     const [respectOptIn, setRespectOptIn] = useState<boolean>(initialData?.respectOptIn ?? true);
@@ -855,19 +857,31 @@ const CampaignWizard: React.FC<{
     const [contactFilterDept, setContactFilterDept] = useState<string>('');
     const [contactFilterOptIn, setContactFilterOptIn] = useState<boolean>(true);
 
-    // Cargar plantillas al iniciar
+    // Cargar plantillas + cuentas WhatsApp al iniciar
     useEffect(() => {
         (async () => {
             try {
-                const r = await fetch(`${API_URL}/templates`);
-                if (r.ok) {
-                    const data = await r.json();
-                    // Filtrar solo plantillas APPROVED
+                const [tRes, aRes] = await Promise.all([
+                    fetch(`${API_URL}/templates`),
+                    fetch(`${API_URL}/accounts`)
+                ]);
+                if (tRes.ok) {
+                    const data = await tRes.json();
                     const list = Array.isArray(data) ? data : (data.data || []);
                     setTemplates(list.filter((t: any) => !t.status || t.status === 'APPROVED'));
                 }
+                if (aRes.ok) {
+                    const accs = await aRes.json();
+                    if (Array.isArray(accs)) {
+                        setAccounts(accs);
+                        // Si no había cuenta preseleccionada y solo hay una,
+                        // la usamos por defecto. Si hay varias, dejamos
+                        // vacío para que el usuario elija explícitamente.
+                        if (!originPhoneId && accs.length === 1) setOriginPhoneId(accs[0].id);
+                    }
+                }
             } catch (e) {
-                console.error('Error cargando plantillas:', e);
+                console.error('Error cargando plantillas/cuentas:', e);
             } finally {
                 setLoadingTemplates(false);
             }
@@ -944,6 +958,7 @@ const CampaignWizard: React.FC<{
         const payload: any = {
             name: name.trim(),
             templateName,
+            originPhoneId: originPhoneId || null,
             variables,
             recipients,
             respectOptIn,
@@ -1067,6 +1082,8 @@ const CampaignWizard: React.FC<{
                             templateName={templateName} setTemplateName={setTemplateName}
                             templates={templates} loading={loadingTemplates}
                             templateBodyText={templateBodyText}
+                            accounts={accounts}
+                            originPhoneId={originPhoneId} setOriginPhoneId={setOriginPhoneId}
                         />
                     )}
                     {step === 2 && (
@@ -1145,7 +1162,7 @@ const CampaignWizard: React.FC<{
 // ===========================
 //  PASOS DEL WIZARD
 // ===========================
-const Step1Template: React.FC<any> = ({ isDark, name, setName, templateName, setTemplateName, templates, loading, templateBodyText }) => (
+const Step1Template: React.FC<any> = ({ isDark, name, setName, templateName, setTemplateName, templates, loading, templateBodyText, accounts, originPhoneId, setOriginPhoneId }) => (
     <div className="space-y-5">
         <div>
             <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Nombre interno de la campaña</label>
@@ -1158,6 +1175,24 @@ const Step1Template: React.FC<any> = ({ isDark, name, setName, templateName, set
             />
             <p className={`mt-1 text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Solo lo verás tú. No se envía al cliente.</p>
         </div>
+
+        {/* Selector de línea (cuenta de WhatsApp) — solo se muestra si hay >1 */}
+        {Array.isArray(accounts) && accounts.length > 1 && (
+            <div>
+                <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Línea de envío</label>
+                <select
+                    value={originPhoneId || ''}
+                    onChange={(e) => setOriginPhoneId(e.target.value)}
+                    className={`w-full px-4 py-2.5 rounded-lg text-sm border focus:outline-none focus:ring-2 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 focus:ring-orange-500/30' : 'bg-white border-slate-200 text-slate-800 focus:ring-orange-500/30'}`}
+                >
+                    <option value="">— Línea principal (por defecto) —</option>
+                    {accounts.map((acc: { id: string; name: string }) => (
+                        <option key={acc.id} value={acc.id}>{acc.name} ({acc.id.slice(-4)})</option>
+                    ))}
+                </select>
+                <p className={`mt-1 text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Número de WhatsApp desde el que se enviará esta campaña. Útil si tienes varias líneas activas.</p>
+            </div>
+        )}
 
         <div>
             <label className={`block text-xs font-bold uppercase tracking-wide mb-1.5 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>Plantilla aprobada por Meta</label>

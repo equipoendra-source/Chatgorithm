@@ -3,7 +3,7 @@ import { AlertTriangle, AlertOctagon, Info, X } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 
 interface TeamAlert {
-    type: 'send_failed' | 'template_failed' | 'appointment_race' | 'ia_fallback' | 'gemini_quota' | 'webhook_bad_sig';
+    type: 'send_failed' | 'template_failed' | 'appointment_race' | 'ia_fallback' | 'gemini_quota' | 'webhook_bad_sig' | 'client_opt_out';
     severity: 'warning' | 'error' | 'critical';
     message: string;
     context?: any;
@@ -106,6 +106,7 @@ export function AlertCenter({ socket, isAdmin }: AlertCenterProps) {
             case 'ia_fallback': return 'Laura ha fallado';
             case 'gemini_quota': return 'Cuota IA agotada';
             case 'webhook_bad_sig': return '⚠️ Webhook sospechoso';
+            case 'client_opt_out': return '🚫 Cliente se dio de baja';
             default: return t;
         }
     };

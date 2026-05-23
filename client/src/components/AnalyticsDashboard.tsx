@@ -31,6 +31,7 @@ interface AccountStat {
   totalAppointments: number;
   percentBot: number;
   avgResponseTimeMin: number | null;
+  incidents?: { count: number; total: number; percentage: number };
 }
 interface ActivityByAccountEntry {
   date: string;
@@ -492,8 +493,15 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
                       <div className={`font-bold text-lg ${isDark ? 'text-slate-100' : 'text-slate-800'}`}>{acc.percentBot}%</div>
                     </div>
                   </div>
-                  <div className={`mt-3 pt-3 border-t flex items-center gap-2 text-[11px] ${isDark ? 'border-slate-700 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
-                    <Clock size={11} /> Resp. media del equipo: <span className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{formatMinutes(acc.avgResponseTimeMin)}</span>
+                  <div className={`mt-3 pt-3 border-t flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] ${isDark ? 'border-slate-700 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
+                    <span className="flex items-center gap-1">
+                      <Clock size={11} /> Resp. media: <span className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{formatMinutes(acc.avgResponseTimeMin)}</span>
+                    </span>
+                    {acc.incidents && acc.incidents.total > 0 && (
+                      <span className="flex items-center gap-1" title={`${acc.incidents.count} incidencia(s) sobre ${acc.incidents.total} citas`}>
+                        <Zap size={11} className={isDark ? 'text-amber-400' : 'text-amber-500'} /> Incid.: <span className={`font-bold ${acc.incidents.percentage > 20 ? 'text-amber-500' : (isDark ? 'text-slate-200' : 'text-slate-700')}`}>{acc.incidents.count}<span className="opacity-60"> ({acc.incidents.percentage}%)</span></span>
+                      </span>
+                    )}
                   </div>
                 </button>
               );
