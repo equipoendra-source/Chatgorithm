@@ -373,6 +373,13 @@ function App() {
     }, [socket]);
 
     const handleLogout = () => {
+        // Limpiar push antes de borrar el usuario: avisa al servidor para
+        // eliminar la suscripción WebPush/FCM de este dispositivo y resetea
+        // las banderas internas. Sin esto, las notificaciones del usuario
+        // saliente seguían llegando al siguiente que entre en el mismo
+        // navegador.
+        const currentUser = user?.username;
+        pushNotificationService.unregister(currentUser).catch(() => { /* no bloquear logout */ });
         localStorage.removeItem('chatgorithm_user');
         setUser(null);
         setSelectedContact(null);
@@ -380,6 +387,8 @@ function App() {
 
     const handleCompanyLogout = () => {
         // Logout from company (will go to company login screen)
+        const currentUser = user?.username;
+        pushNotificationService.unregister(currentUser).catch(() => { /* no bloquear logout */ });
         localStorage.removeItem('company_config');
         localStorage.removeItem('chatgorithm_user');
         if (socketRef.current) {

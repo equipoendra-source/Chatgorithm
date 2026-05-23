@@ -129,6 +129,46 @@ class PushNotificationService {
         }
     }
 
+    // Cierra sesión del servicio push: avisa al servidor para que borre las
+    // suscripciones asociadas a este usuario en este dispositivo, limpia el
+    // estado en memoria y resetea las banderas. Sin esto, tras un logout el
+    // endpoint del navegador seguía mapeado al usuario anterior y este recibía
+    // las notificaciones de otro user.
+    async unregister(username?: string): Promise<void> {
+        const target = username || this.lastUsername;
+        if (!target) {
+            // Sin username conocido, solo limpiamos el estado local
+            this.initialized = false;
+            this.lastUsername = null;
+            this.token = null;
+            return;
+        }
+        try {
+            // Obtener el endpoint actual para que el servidor pueda eliminar
+            // SOLO esa suscripción (no las del mismo usuario en otros devices).
+            let endpoint: string | undefined;
+            try {
+                if (!Capacitor.isNativePlatform() && 'serviceWorker' in navigator) {
+                    const reg = await navigator.serviceWorker.ready;
+                    const sub = await reg.pushManager.getSubscription();
+                    if (sub) endpoint = sub.endpoint;
+                }
+            } catch { /* opcional */ }
+
+            await fetch(`${API_URL}/webpush/unsubscribe`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ username: target, endpoint, token: this.token || undefined })
+            }).catch(e => console.warn('[Push] No se pudo notificar al servidor del logout:', e?.message));
+
+            console.log(`🚪 [Push] Sesión del servicio push cerrada para ${target}`);
+        } finally {
+            this.initialized = false;
+            this.lastUsername = null;
+            this.token = null;
+        }
+    }
+
     // Show a native local notification with proper channel
     async showLocalNotification(title: string, body: string, data?: any): Promise<void> {
         try {

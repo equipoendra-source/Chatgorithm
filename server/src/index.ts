@@ -823,16 +823,31 @@ async function loadWebPushSubscriptionsFromAirtable() {
 }
 
 // Guardar TODA la lista de suscripciones del usuario en Airtable (array JSON).
+// Si la lista queda VACÍA (todas las subs expiraron o el usuario hizo logout),
+// borramos la fila por completo en lugar de guardar '[]'. Sin esto, al
+// reiniciar el servidor cargaba una lista vacía y el usuario quedaba
+// silenciado para siempre hasta volver a suscribirse manualmente.
 async function saveWebPushSubscriptionToAirtable(username: string, _subscription: any) {
     if (!base) return;
     try {
         const list = pushSubscriptions.get(username) || [];
-        const subscriptionData = JSON.stringify(list);
         const existing = await base('WebPushSubscriptions').select({
             filterByFormula: `{username} = '${username}'`,
             maxRecords: 1
         }).firstPage();
 
+        if (list.length === 0) {
+            // No quedan suscripciones: borrar la fila entera
+            if (existing.length > 0) {
+                await base('WebPushSubscriptions').destroy([existing[0].id]);
+                console.log(`🗑️ [WebPush] Fila eliminada para ${username} (no quedan dispositivos)`);
+            } else {
+                console.log(`ℹ️ [WebPush] Nada que persistir para ${username} (lista vacía y sin fila)`);
+            }
+            return;
+        }
+
+        const subscriptionData = JSON.stringify(list);
         if (existing.length > 0) {
             await base('WebPushSubscriptions').update([{
                 id: existing[0].id,
@@ -4585,7 +4600,41 @@ app.put('/api/appointments/:id', async (req, res) => {
 
 app.delete('/api/appointments/:id', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
-    try { await base('Appointments').destroy([req.params.id]); res.json({ success: true }); } catch (e: any) { console.error('[API] Error DELETE /appointments/:id:', e.message); res.status(400).json({ error: "Error deleting" }); }
+    try {
+        // Leer datos de la cita ANTES de destruirla para poder:
+        //  - Cancelar los recordatorios cita_24h/cita_1h pendientes asociados
+        //    (sin esto, el cliente recibe recordatorio fantasma de una cita
+        //    que ya no existe en Airtable).
+        //  - Emitir socket appointment_changed para refrescar calendarios.
+        let preClientPhone = '';
+        let preStatus = '';
+        try {
+            const rec = await base('Appointments').find(req.params.id);
+            preClientPhone = (rec.get('ClientPhone') as string) || '';
+            preStatus = (rec.get('Status') as string) || '';
+        } catch { /* el record puede no existir o haber sido borrado en paralelo */ }
+
+        await base('Appointments').destroy([req.params.id]);
+
+        // Solo cancelamos recordatorios si la cita estaba reservada (Booked).
+        // Si era un slot Available no había recordatorios programados.
+        if (preStatus === 'Booked' && preClientPhone) {
+            try { await cancelPendingCitaReminders(preClientPhone); }
+            catch (remErr: any) { console.warn('[API] Error cancelando recordatorios tras DELETE:', remErr?.message); }
+        }
+
+        // Refrescar calendarios abiertos
+        try {
+            io.emit('appointment_changed', { id: req.params.id, action: 'deleted', status: preStatus });
+        } catch (emitErr: any) {
+            console.warn('[API] Error emitiendo appointment_changed tras DELETE:', emitErr?.message);
+        }
+
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('[API] Error DELETE /appointments/:id:', e.message);
+        res.status(400).json({ error: "Error deleting" });
+    }
 });
 
 // Historial de eventos de cita (reservas y cancelaciones).
@@ -6147,6 +6196,35 @@ app.delete('/api/push-notifications/unregister', (req, res) => {
 
     console.log(`📱 [FCM] Token eliminado de memoria: ${token.substring(0, 10)}...`);
     res.json({ success: true });
+});
+
+// Borrar suscripciones Web Push al cerrar sesión. Si se pasa endpoint,
+// elimina solo esa suscripción concreta (el dispositivo desde el que se
+// hizo logout — otros dispositivos del mismo usuario siguen activos).
+// Si NO se pasa endpoint, borra TODAS las del usuario (caso "olvida todas
+// las sesiones"). Sin este endpoint, tras logout las pushes seguían
+// llegando al endpoint del navegador y a quien estuviera ahora logueado.
+app.post('/api/webpush/unsubscribe', async (req, res) => {
+    const { username, endpoint } = req.body || {};
+    if (!username) return res.status(400).json({ error: 'username required' });
+
+    try {
+        if (endpoint) {
+            removePushSubscription(username, endpoint);
+        } else {
+            pushSubscriptions.delete(username);
+        }
+        // Persistir el nuevo estado en Airtable (puede dejar fila vacía
+        // o borrarla si era la última — saveWebPushSubscriptionToAirtable
+        // gestiona ambos casos).
+        try { await saveWebPushSubscriptionToAirtable(username, null); } catch {}
+        const remaining = (pushSubscriptions.get(username) || []).length;
+        console.log(`🚪 [WebPush] Unsubscribe ${username}${endpoint ? ' (endpoint específico)' : ' (todos los dispositivos)'} — quedan ${remaining} dispositivos`);
+        res.json({ success: true, remainingDevices: remaining });
+    } catch (e: any) {
+        console.error('[WebPush] Error en unsubscribe:', e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // --- WEB PUSH SUBSCRIPTION ENDPOINT ---
