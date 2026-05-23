@@ -7,6 +7,7 @@ import {
 import { PhoneDialer } from './PhoneDialer';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
+import { colorForAccount, nameForAccount } from '../utils/accountColors';
 
 export interface Contact {
     id: string;
@@ -602,12 +603,27 @@ export function Sidebar({
                                     const isTyping = typingStatus[contact.phone];
                                     const unread = unreadCounts[normalizePhone(contact.phone)] || 0;
                                     const isSelected = selectedContactId === contact.id;
+                                    // Color por cuenta (línea de WhatsApp). Solo se aplica cuando
+                                    // hay más de una cuenta activa: si solo hay un PhoneId no
+                                    // aporta nada visual.
+                                    const multiAccount = accounts.length > 1;
+                                    const acc = multiAccount && contact.origin_phone_id ? colorForAccount(contact.origin_phone_id) : null;
+                                    const accountFriendlyName = multiAccount && contact.origin_phone_id ? nameForAccount(contact.origin_phone_id, accounts) : '';
 
                                     return (
                                         <li key={contact.id || Math.random()} className="mb-2">
-                                            <button onClick={() => onSelectContact(contact)} className={`w-full flex items-start gap-3 p-3 rounded-2xl transition-all text-left group ${isSelected
-                                                ? (isDark ? 'bg-indigo-600/20 backdrop-blur-md border border-indigo-500/30 shadow-lg ring-1 ring-indigo-500/20' : 'bg-white border-l-4 border-blue-500 shadow-sm')
-                                                : `border border-transparent ${isDark ? 'hover:bg-white/5' : 'border-l-4 border-transparent hover:bg-white'}`
+                                            <button
+                                                onClick={() => onSelectContact(contact)}
+                                                // Border-left coloreado por cuenta cuando NO está seleccionado.
+                                                // Cuando está seleccionado, mantenemos el border azul/indigo
+                                                // estándar para no confundir el feedback de selección.
+                                                // Reservamos siempre 4px de border-left (transparente si no
+                                                // hay cuenta) para que el ancho de los chats no cambie al
+                                                // seleccionar uno.
+                                                style={!isSelected && acc ? { borderLeftColor: acc.hex, borderLeftWidth: '4px', borderLeftStyle: 'solid' } : undefined}
+                                                className={`w-full flex items-start gap-3 p-3 rounded-2xl transition-all text-left group ${isSelected
+                                                    ? (isDark ? 'bg-indigo-600/20 backdrop-blur-md border border-indigo-500/30 shadow-lg ring-1 ring-indigo-500/20' : 'bg-white border-l-4 border-blue-500 shadow-sm')
+                                                    : `border border-transparent border-l-4 ${acc ? '' : 'border-l-transparent'} ${isDark ? 'hover:bg-white/5' : 'hover:bg-white'}`
                                                 }`}>
 
                                                 <div className="relative">
@@ -660,9 +676,12 @@ export function Sidebar({
 
                                                         {contact.assigned_to && <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[9px] font-medium rounded border border-slate-200 flex items-center gap-1"><UserCheck className="w-3 h-3" /> {contact.assigned_to}</span>}
 
-                                                        {!selectedAccountId && contact.origin_phone_id && (
-                                                            <span className="px-1.5 py-0.5 bg-gray-100 text-gray-500 text-[9px] font-mono rounded border border-gray-200">
-                                                                #{contact.origin_phone_id.slice(-4)}
+                                                        {!selectedAccountId && multiAccount && contact.origin_phone_id && acc && (
+                                                            <span
+                                                                className={`px-1.5 py-0.5 text-[9px] font-bold rounded border flex items-center gap-1 ${isDark ? `${acc.bgDark} ${acc.textDark} ${acc.borderDark}` : `${acc.bg} ${acc.text} ${acc.border}`}`}
+                                                                title={`Línea: ${accountFriendlyName}`}
+                                                            >
+                                                                <Smartphone size={9} /> {accountFriendlyName}
                                                             </span>
                                                         )}
                                                     </div>

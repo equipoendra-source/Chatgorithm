@@ -238,7 +238,9 @@ function App() {
                 agenda: data.agenda || '',
                 humanDate: data.humanDate || '',
                 source: data.source || 'manual',
-                kind: 'booked'
+                kind: 'booked',
+                accountId: data.accountId || '',
+                accountName: data.accountName || ''
             };
             setAppointmentNotifs(prev => [notif, ...prev].slice(0, 5));
         };
@@ -257,7 +259,9 @@ function App() {
                 agenda: data.agenda || '',
                 humanDate: data.humanDate || '',
                 source: data.source || 'manual',
-                kind: 'cancelled'
+                kind: 'cancelled',
+                accountId: data.accountId || '',
+                accountName: data.accountName || ''
             };
             setAppointmentNotifs(prev => [notif, ...prev].slice(0, 5));
         };
@@ -466,7 +470,7 @@ function App() {
     // Settings view
     if (view === 'settings') return (
         <>
-            <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} updateMyPreferences={updateMyPreferences} />
+            <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} updateMyPreferences={updateMyPreferences} selectedAccountId={selectedAccountId} />
             {appointmentToastNode}
         </>
     );

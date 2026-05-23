@@ -1,5 +1,6 @@
-import { Calendar, X, CalendarX2 } from 'lucide-react';
+import { Calendar, X, CalendarX2, Smartphone } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
+import { colorForAccount } from '../utils/accountColors';
 
 export interface AppointmentNotification {
     id: string;                  // único para evitar duplicados (usamos appointmentId + timestamp)
@@ -9,10 +10,19 @@ export interface AppointmentNotification {
     clientPhone: string;
     agenda?: string;
     humanDate: string;
+    // Origen de la acción:
+    //  - 'bot'             → la hizo Laura
+    //  - 'manual'          → la hizo un trabajador desde el panel
+    //  - 'client_whatsapp' → la realizó el propio cliente por WhatsApp
     source: 'bot' | 'manual' | 'client_whatsapp';
     // 'booked' (por defecto) → toast morado "Nueva cita".
     // 'cancelled' → toast rojo "Cita cancelada".
     kind?: 'booked' | 'cancelled';
+    // Línea de WhatsApp por la que entró/se hizo la reserva. Si hay >1 cuenta
+    // activa, el toast lleva el chip con el nombre y un border lateral del
+    // color asignado por accountColors. Si solo hay 1 cuenta, no se muestra.
+    accountId?: string;
+    accountName?: string;
 }
 
 interface Props {
@@ -56,22 +66,37 @@ export function AppointmentToast({ notifications, onOpen, onDismiss }: Props) {
                     ? (isDark ? 'bg-rose-500/20 text-rose-300' : 'bg-rose-100 text-rose-700')
                     : (isDark ? 'bg-indigo-500/20 text-indigo-300' : 'bg-indigo-100 text-indigo-700');
 
+                // Color de la cuenta (línea de WhatsApp) si se conoce.
+                const acc = n.accountId ? colorForAccount(n.accountId) : null;
+
                 return (
                     <div
                         key={n.id}
                         onClick={() => onOpen(n)}
+                        // Border-left con el color de la línea cuando viene
+                        // identificada. Se ve bien al lado del border morado/rosado
+                        // del toast sin parecer doble.
+                        style={acc ? { borderLeftColor: acc.hex, borderLeftWidth: '5px', borderLeftStyle: 'solid' } : undefined}
                         className={`pointer-events-auto cursor-pointer rounded-2xl shadow-2xl border backdrop-blur-md p-4 flex items-start gap-3 animate-slide-in-right transition-all hover:scale-[1.02] active:scale-[0.98] ${cardClasses}`}
-                        title="Pinchar para ver el día en el calendario"
+                        title={isCancelled ? 'Pinchar para ver el día en el calendario' : 'Pinchar para ver la cita en el calendario'}
                     >
                         <div className={`flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center ${iconWrapClasses}`}>
                             {isCancelled ? <CalendarX2 className="w-5 h-5" /> : <Calendar className="w-5 h-5" />}
                         </div>
                         <div className="flex-1 min-w-0">
-                            <div className={`text-sm font-bold flex items-center gap-2 ${titleClasses}`}>
+                            <div className={`text-sm font-bold flex items-center gap-2 flex-wrap ${titleClasses}`}>
                                 {isCancelled ? 'Cita cancelada' : 'Nueva cita'}
                                 {sourceTag && (
                                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${tagClasses}`}>
                                         {sourceTag}
+                                    </span>
+                                )}
+                                {n.accountName && acc && (
+                                    <span
+                                        className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold flex items-center gap-1 border ${isDark ? `${acc.bgDark} ${acc.textDark} ${acc.borderDark}` : `${acc.bg} ${acc.text} ${acc.border}`}`}
+                                        title={`Línea: ${n.accountName}`}
+                                    >
+                                        <Smartphone size={9} /> {n.accountName}
                                     </span>
                                 )}
                             </div>

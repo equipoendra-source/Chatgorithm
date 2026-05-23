@@ -1069,24 +1069,65 @@ async function broadcastPushNotification(payload: { title: string, body: string,
 // (vía bookAppointment) como cuando un trabajador reserva manualmente desde la UI
 // (PUT /api/appointments/:id con status='Booked').
 // Envía 3 canales: socket en tiempo real (toast in-app), FCM (móviles) y Web Push (navegador).
-function notifyNewAppointment(data: {
+//
+// Si hay >1 cuenta de WhatsApp activa, el título/body incluyen el nombre de la
+// línea (ej. "📅 Nueva cita · Taller") y el payload del socket añade
+// accountId+accountName para que el frontend pueda colorear el toast.
+async function notifyNewAppointment(data: {
     appointmentId: string;
     dateISO: string;
     clientName: string;
     clientPhone: string;
     agenda?: string;
     source: 'bot' | 'manual';
+    originPhoneId?: string;
 }) {
+    // 0. PRIMERO emitir 'appointment_changed' de forma SÍNCRONA — esto refresca
+    //    los calendarios abiertos en otras pestañas sin depender del lookup
+    //    async del accountName. Si esto fallase, ningún calendario se enteraría
+    //    del cambio.
+    try {
+        io.emit('appointment_changed', {
+            id: data.appointmentId,
+            action: 'booked',
+            dateISO: data.dateISO,
+            clientPhone: data.clientPhone
+        });
+    } catch (emitErr: any) {
+        console.warn('[NuevaCita] Error emitiendo appointment_changed:', emitErr?.message);
+    }
+
     try {
         const humanDate = new Date(data.dateISO).toLocaleString('es-ES', {
             timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short'
         });
-        const title = '📅 Nueva cita';
+
+        // Resolver origin_phone_id si no se pasó: buscarlo en Contacts por phone.
+        let accountId = data.originPhoneId || '';
+        if (!accountId && base && data.clientPhone) {
+            try {
+                const clean = cleanNumber(data.clientPhone);
+                if (clean) {
+                    const cs = await base('Contacts').select({
+                        filterByFormula: `{phone}='${clean}'`, maxRecords: 1
+                    }).firstPage();
+                    if (cs.length > 0) accountId = (cs[0].get('origin_phone_id') as string) || '';
+                }
+            } catch { /* opcional, no rompe la notificación */ }
+        }
+        const accountName = accountId ? (ACCOUNT_META[accountId]?.name || `Línea ${accountId.slice(-4)}`) : '';
+        // Solo sufijamos el título con la cuenta cuando hay más de UNA cuenta
+        // configurada, para no molestar a quien tiene un solo número.
+        const multiAccount = Object.keys(BUSINESS_ACCOUNTS).length > 1;
+        const accountSuffix = (multiAccount && accountName) ? ` · ${accountName}` : '';
+
+        const title = `📅 Nueva cita${accountSuffix}`;
         const cleanName = (data.clientName || 'Cliente').trim();
         const agendaSuffix = data.agenda ? ` (${data.agenda})` : '';
         const body = `${cleanName} — ${humanDate}${agendaSuffix}`;
 
-        // 1. Socket.IO: toast in-app en tiempo real
+        // 1. Socket.IO: toast in-app en tiempo real (con accountId/accountName
+        //    para que el frontend pueda colorear el toast por línea).
         io.emit('new_appointment', {
             appointmentId: data.appointmentId,
             dateISO: data.dateISO,
@@ -1096,16 +1137,9 @@ function notifyNewAppointment(data: {
             source: data.source,
             humanDate,
             title,
-            body
-        });
-        // Evento genérico de refresh para el calendario (los toasts y el
-        // refresh van por canales separados para que el calendario también
-        // se actualice si está abierto en otra pestaña sin toast).
-        io.emit('appointment_changed', {
-            id: data.appointmentId,
-            action: 'booked',
-            dateISO: data.dateISO,
-            clientPhone: data.clientPhone
+            body,
+            accountId,
+            accountName
         });
 
         // 2. FCM: push a móviles (APK Android)
@@ -1116,7 +1150,9 @@ function notifyNewAppointment(data: {
                 type: 'new_appointment',
                 appointmentId: data.appointmentId,
                 dateISO: data.dateISO,
-                clientPhone: data.clientPhone || ''
+                clientPhone: data.clientPhone || '',
+                accountId,
+                accountName
             }
         });
 
@@ -1148,19 +1184,41 @@ function notifyNewAppointment(data: {
 // Notificación de cita cancelada — se dispara al cancelar desde cualquier vía
 // (Laura, cliente vía WhatsApp, trabajador desde el calendario).
 // Mismos 3 canales que notifyNewAppointment + registro en historial.
-function notifyCancelledAppointment(data: {
+// Igual que la notificación de nueva cita, propaga accountId/accountName para
+// que el toast lleve el color y el chip de la línea de WhatsApp.
+async function notifyCancelledAppointment(data: {
     appointmentId: string;
     dateISO: string;
     clientName: string;
     clientPhone: string;
     agenda?: string;
     source: 'bot' | 'manual' | 'client_whatsapp';
+    originPhoneId?: string;
 }) {
     try {
         const humanDate = new Date(data.dateISO).toLocaleString('es-ES', {
             timeZone: 'Europe/Madrid', dateStyle: 'short', timeStyle: 'short'
         });
-        const title = '❌ Cita cancelada';
+
+        // Resolver origin_phone_id si no se pasó (mismo patrón que en
+        // notifyNewAppointment).
+        let accountId = data.originPhoneId || '';
+        if (!accountId && base && data.clientPhone) {
+            try {
+                const clean = cleanNumber(data.clientPhone);
+                if (clean) {
+                    const cs = await base('Contacts').select({
+                        filterByFormula: `{phone}='${clean}'`, maxRecords: 1
+                    }).firstPage();
+                    if (cs.length > 0) accountId = (cs[0].get('origin_phone_id') as string) || '';
+                }
+            } catch { /* lookup opcional */ }
+        }
+        const accountName = accountId ? (ACCOUNT_META[accountId]?.name || `Línea ${accountId.slice(-4)}`) : '';
+        const multiAccount = Object.keys(BUSINESS_ACCOUNTS).length > 1;
+        const accountSuffix = (multiAccount && accountName) ? ` · ${accountName}` : '';
+
+        const title = `❌ Cita cancelada${accountSuffix}`;
         const cleanName = (data.clientName || 'Cliente').trim();
         const agendaSuffix = data.agenda ? ` (${data.agenda})` : '';
         const body = `${cleanName} — ${humanDate}${agendaSuffix}`;
@@ -1175,7 +1233,9 @@ function notifyCancelledAppointment(data: {
             source: data.source,
             humanDate,
             title,
-            body
+            body,
+            accountId,
+            accountName
         });
 
         // 2. FCM: push a móviles (APK Android)
@@ -2113,14 +2173,21 @@ async function saveAndEmitMessage(msg: any) {
             } catch (e) { console.error('[Push] Error obteniendo nombre del contacto para notificación:', e); }
         }
 
+        // Resolver la cuenta (línea de WhatsApp) por la que entró el mensaje
+        // para diferenciar la notificación si hay más de un PhoneId activo.
+        const accountId = (payload.origin_phone_id as string) || '';
+        const accountName = accountId ? (ACCOUNT_META[accountId]?.name || `Línea ${accountId.slice(-4)}`) : '';
+        const multiAccount = Object.keys(BUSINESS_ACCOUNTS).length > 1;
+        const accountSuffix = (multiAccount && accountName) ? ` (${accountName})` : '';
+
         // Enviar notificación FCM filtrada por preferencias/asignación
         const recipients = await getNotificationRecipients(finalSender);
-        
+
         // 1. Notificación FCM (Móviles APK)
         // Prefijo "💬 Cliente ·" para distinguir de los mensajes del chat interno
         // del equipo (un trabajador y un cliente pueden llamarse igual).
         sendFCMNotification({
-            title: `💬 Cliente · ${senderName}`,
+            title: `💬 Cliente · ${senderName}${accountSuffix}`,
             body: payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : ''),
             data: {
                 conversationId: finalSender,
@@ -2130,13 +2197,15 @@ async function saveAndEmitMessage(msg: any) {
 
         // 2. Notificación Web Push (PWA/Escritorio)
         const webPushPayload = {
-            title: `💬 Cliente · ${senderName}`,
+            title: `💬 Cliente · ${senderName}${accountSuffix}`,
             body: payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : ''),
             icon: '/logo.png',
             url: `/?phone=${finalSender}`,
             phone: finalSender,
-            // tag propio por cliente: no sobrescribe las notificaciones del equipo
-            tag: `cliente-${finalSender}`
+            // tag propio por cliente + cuenta: no sobrescribe las notificaciones
+            // del equipo y mantiene una notificación independiente por cada
+            // (cliente, línea) si el mismo cliente escribe a varios números.
+            tag: `cliente-${finalSender}${accountId ? '-' + accountId.slice(-4) : ''}`
         };
 
         // ENVIAR A TODOS (Broadcast) para asegurar que llegue mientras depuramos
@@ -4538,8 +4607,14 @@ app.post('/api/send-template', async (req, res) => {
 app.get('/api/analytics', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
-        const contacts = await base('Contacts').select().all();
-        const messages = await base('Messages').select().all();
+        // Paralelizar las 3 lecturas de Airtable (antes secuenciales). En bases
+        // con >5k mensajes la versión secuencial se acercaba al timeout del
+        // hosting (30s Render free tier).
+        const [contacts, messages, appointmentsAll] = await Promise.all([
+            base('Contacts').select().all(),
+            base('Messages').select().all(),
+            base('Appointments').select().all()
+        ]);
         const totalContacts = contacts.length;
         const totalMessages = messages.length;
         const newLeads = contacts.filter(c => c.get('status') === 'Nuevo').length;
@@ -4555,11 +4630,11 @@ app.get('/api/analytics', async (req, res) => {
         // Incidente = cita reservada marcada como tal (cita inesperada del mismo día).
         // % = incidentes / total de citas reservadas del mes (zona horaria España).
         let incidentStats = { monthLabel: '', count: 0, total: 0, percentage: 0 };
+        const allAppts: readonly any[] = appointmentsAll;
         try {
             const now = new Date();
             const monthKey = madridDay(now).slice(0, 7); // YYYY-MM
-            const appts = await base('Appointments').select().all();
-            const monthBooked = appts.filter(a => {
+            const monthBooked = allAppts.filter(a => {
                 const d = a.get('Date') as string;
                 if (!d || a.get('Status') !== 'Booked') return false;
                 return madridDay(new Date(d)).slice(0, 7) === monthKey;
@@ -4573,7 +4648,169 @@ app.get('/api/analytics', async (req, res) => {
             };
         } catch (e: any) { console.error('[API] Error calculando incidentes:', e.message); }
 
-        res.json({ kpis: { totalContacts, totalMessages, newLeads }, activity: activityData, agents: agentPerformance, statuses: statusDistribution, incidents: incidentStats });
+        // ============================================================
+        //  DESGLOSE POR CUENTA / LÍNEA DE WHATSAPP (multi-PhoneId)
+        // ============================================================
+        // Por cada cuenta conocida (BUSINESS_ACCOUNTS) + cualquier origin_phone_id
+        // visto en Contacts/Messages, calculamos:
+        //   - totalMessages: mensajes (entrantes + salientes) con ese origin_phone_id
+        //   - totalContacts: contactos únicos con ese origin_phone_id
+        //   - totalAppointments: citas Booked cuyo ClientPhone pertenece a un
+        //     contacto de esa cuenta
+        //   - percentBot: % salientes desde Bot IA sobre el total de salientes
+        //     (Laura vs trabajadores)
+        //   - avgResponseTimeMin: tiempo medio entre mensaje inbound del cliente
+        //     y la siguiente respuesta saliente (humano o bot), tope 24h.
+        // Cuenta sintética para mensajes/contactos legacy sin origin_phone_id.
+        // Sin esto, los datos antiguos quedarían fuera del desglose y los
+        // totales por cuenta no cuadrarían con los totales globales.
+        const UNASSIGNED_ID = '_unassigned';
+        const accountIds = new Set<string>();
+        Object.keys(BUSINESS_ACCOUNTS).forEach(id => accountIds.add(id));
+        contacts.forEach(c => { const oid = (c.get('origin_phone_id') as string) || ''; accountIds.add(oid || UNASSIGNED_ID); });
+        messages.forEach(m => { const oid = (m.get('origin_phone_id') as string) || ''; accountIds.add(oid || UNASSIGNED_ID); });
+
+        const perAccount: Record<string, {
+            id: string, name: string,
+            totalMessages: number, totalContacts: number, totalAppointments: number,
+            botMessages: number, humanOutbound: number,
+            responseTimes: number[]
+        }> = {};
+        accountIds.forEach(id => {
+            perAccount[id] = {
+                id,
+                name: id === UNASSIGNED_ID
+                    ? 'Sin línea (legacy)'
+                    : (ACCOUNT_META[id]?.name || `Línea ${id.slice(-4)}`),
+                totalMessages: 0,
+                totalContacts: 0,
+                totalAppointments: 0,
+                botMessages: 0,
+                humanOutbound: 0,
+                responseTimes: []
+            };
+        });
+
+        // Agrupar mensajes por (cuenta, cliente) para calcular response times
+        const phoneRegex = /^[+]?[0-9]{8,}$/;
+        const messagesByKey: Record<string, { ts: number, isInbound: boolean }[]> = {};
+        messages.forEach(m => {
+            const rawOid = (m.get('origin_phone_id') as string) || '';
+            const oid = rawOid || UNASSIGNED_ID;
+            if (!perAccount[oid]) return;
+            perAccount[oid].totalMessages++;
+            const sender = (m.get('sender') as string) || '';
+            const recipient = (m.get('recipient') as string) || '';
+            const isSenderPhone = phoneRegex.test(sender);
+            let clientPhone: string;
+            let isInbound: boolean;
+            if (isSenderPhone) { clientPhone = sender; isInbound = true; }
+            else { clientPhone = recipient; isInbound = false; }
+            // Contar salientes para % Laura vs humano
+            if (!isInbound && clientPhone) {
+                if (sender === 'Bot IA') perAccount[oid].botMessages++;
+                else if (sender && sender.toLowerCase() !== 'sistema' && !phoneRegex.test(sender)) perAccount[oid].humanOutbound++;
+            }
+            if (!clientPhone) return;
+            const ts = m.get('timestamp') as string;
+            if (!ts) return;
+            const tsMs = new Date(ts).getTime();
+            if (Number.isNaN(tsMs)) return;
+            const key = `${oid}|${clientPhone}`;
+            if (!messagesByKey[key]) messagesByKey[key] = [];
+            messagesByKey[key].push({ ts: tsMs, isInbound });
+        });
+
+        // Tiempos de respuesta: por cada "racha" de inbound del cliente, la
+        // distancia desde el PRIMER inbound de esa racha hasta la primera
+        // outbound posterior. Si el cliente manda 3 mensajes seguidos y luego
+        // contestamos, contamos UNA respuesta (no 3 que inflarían la media).
+        // Tope 24h para no contaminar con conversaciones reanudadas días
+        // después.
+        Object.entries(messagesByKey).forEach(([key, msgs]) => {
+            msgs.sort((a, b) => a.ts - b.ts);
+            const oid = key.split('|')[0];
+            for (let i = 0; i < msgs.length; i++) {
+                if (!msgs[i].isInbound) continue;
+                // Saltar inbounds que no son el primero de su racha
+                if (i > 0 && msgs[i - 1].isInbound) continue;
+                for (let j = i + 1; j < msgs.length; j++) {
+                    if (!msgs[j].isInbound) {
+                        const dt = (msgs[j].ts - msgs[i].ts) / 60000;
+                        if (dt >= 0 && dt <= 60 * 24) perAccount[oid].responseTimes.push(dt);
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Contactos por cuenta
+        const phoneToAccount: Record<string, string> = {};
+        contacts.forEach(c => {
+            const rawOid = (c.get('origin_phone_id') as string) || '';
+            const oid = rawOid || UNASSIGNED_ID;
+            if (perAccount[oid]) perAccount[oid].totalContacts++;
+            const phone = cleanNumber((c.get('phone') as string) || '');
+            if (phone && rawOid) {
+                // No sobrescribir si ya hay un mapping a otra cuenta (colisión muy
+                // rara pero posible si la BD tiene duplicados): mantenemos la
+                // primera lectura para resultados deterministas.
+                if (!phoneToAccount[phone]) phoneToAccount[phone] = rawOid;
+                if (phone.length >= 9 && !phoneToAccount[phone.slice(-9)]) phoneToAccount[phone.slice(-9)] = rawOid;
+            }
+        });
+
+        // Citas por cuenta (matching de teléfono tolerante con/sin prefijo)
+        allAppts.forEach(a => {
+            if (a.get('Status') !== 'Booked') return;
+            const cp = cleanNumber((a.get('ClientPhone') as string) || '');
+            if (!cp) return;
+            const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
+            const oid = phoneToAccount[cp] || phoneToAccount[last9];
+            if (oid && perAccount[oid]) perAccount[oid].totalAppointments++;
+        });
+
+        const accountsArr = Object.values(perAccount).map(a => ({
+            id: a.id,
+            name: a.name,
+            totalMessages: a.totalMessages,
+            totalContacts: a.totalContacts,
+            totalAppointments: a.totalAppointments,
+            percentBot: (a.botMessages + a.humanOutbound) > 0
+                ? Math.round((a.botMessages / (a.botMessages + a.humanOutbound)) * 100)
+                : 0,
+            avgResponseTimeMin: a.responseTimes.length > 0
+                ? Math.round(a.responseTimes.reduce((s, t) => s + t, 0) / a.responseTimes.length)
+                : null
+        })).sort((a, b) => b.totalMessages - a.totalMessages);
+
+        // activityByAccount: para gráfica multi-serie del último 7d
+        const activityByAccount = last7Days.map(date => {
+            const counts: Record<string, number> = {};
+            accountIds.forEach(id => { counts[id] = 0; });
+            messages.forEach(m => {
+                const mDate = (m.get('timestamp') as string || "").split('T')[0];
+                if (mDate !== date) return;
+                const rawOid = (m.get('origin_phone_id') as string) || '';
+                const oid = rawOid || UNASSIGNED_ID;
+                if (counts[oid] !== undefined) counts[oid]++;
+            });
+            return {
+                date,
+                label: new Date(date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }),
+                counts
+            };
+        });
+
+        res.json({
+            kpis: { totalContacts, totalMessages, newLeads },
+            activity: activityData,
+            activityByAccount,
+            agents: agentPerformance,
+            statuses: statusDistribution,
+            incidents: incidentStats,
+            accounts: accountsArr
+        });
     } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }
 });
 

@@ -30,13 +30,16 @@ interface SettingsProps {
     quickReplies?: any[];
     currentUser?: any;
     updateMyPreferences?: (partial: any) => void;
+    // Filtro de cuenta heredado del Sidebar para que el dashboard analytics
+    // arranque con la misma línea que el usuario tenía elegida en el listado.
+    selectedAccountId?: string | null;
 }
 
 interface Agent { id: string; name: string; role: string; preferences?: any; }
 interface ConfigItem { id: string; name: string; type: string; }
 interface QuickReply { id: string; title: string; content: string; shortcut: string; }
 
-export function Settings({ onBack, socket, currentUserRole, quickReplies = [], currentUser, updateMyPreferences }: SettingsProps) {
+export function Settings({ onBack, socket, currentUserRole, quickReplies = [], currentUser, updateMyPreferences, selectedAccountId }: SettingsProps) {
     const { theme, setTheme } = useTheme();
     const isDark = theme === 'dark';
     const isAdmin = currentUserRole === 'Admin';
@@ -603,7 +606,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
                     {/* OTROS COMPONENTES */}
                     {activeTab === 'whatsapp' && <WhatsAppTemplatesManager />}
-                    {activeTab === 'analytics' && <AnalyticsDashboard />}
+                    {activeTab === 'analytics' && <AnalyticsDashboard initialAccountId={selectedAccountId} />}
                     {activeTab === 'agenda' && <CalendarDashboard />}
                     {activeTab === 'bot_config' && (
                         <div className="max-w-4xl mx-auto space-y-6">
