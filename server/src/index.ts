@@ -912,9 +912,21 @@ async function saveFCMTokenToAirtable(tokenId: string, token: string, username: 
     }
 }
 
-// Obtener lista de usernames que deben recibir notificación para un contacto
-async function getNotificationRecipients(contactPhone: string): Promise<string[]> {
-    if (!base) return [];
+// Resultado del cálculo de destinatarios. Distingue tres casos:
+//  - { mode: 'silence' } → silencio explícito (los agentes han pedido no
+//      recibir, hay que RESPETARLO — nada de broadcast). Ej.
+//      cliente Nuevo y nadie con notifyNewLeads=true.
+//  - { mode: 'broadcast' } → no hay regla específica que aplicar, mandar
+//      a todo el equipo es razonable. Ej. depto sin agentes que lo tengan
+//      en sus prefs.
+//  - { mode: 'targeted', recipients: [...] } → enviar solo a esos usuarios.
+type NotificationDecision =
+    | { mode: 'silence' }
+    | { mode: 'broadcast' }
+    | { mode: 'targeted', recipients: string[] };
+
+async function getNotificationRecipients(contactPhone: string): Promise<NotificationDecision> {
+    if (!base) return { mode: 'silence' };
     const clean = cleanNumber(contactPhone);
 
     try {
@@ -927,12 +939,16 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
         if (contacts.length === 0) {
             // Contacto nuevo, no existe aún - notificar a todos con notifyNewLeads
             const agents = await base('Agents').select().all();
-            return agents
+            const newLeadsRecipients = agents
                 .filter(a => {
                     const prefs = a.get('Preferences') ? JSON.parse(a.get('Preferences') as string) : {};
                     return prefs.notifyNewLeads === true;
                 })
-                .map(a => a.get('name') as string);
+                .map(a => a.get('name') as string)
+                .filter(n => n);
+            // Si nadie quiere leads nuevos → silencio respetando la preferencia.
+            if (newLeadsRecipients.length === 0) return { mode: 'silence' };
+            return { mode: 'targeted', recipients: newLeadsRecipients };
         }
 
         const contact = contacts[0];
@@ -943,7 +959,7 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
         // 2. Si está asignado a alguien -> solo esa persona
         if (assignedTo && assignedTo.trim() !== '') {
             console.log(`📱 [FCM] Contacto asignado a: ${assignedTo}`);
-            return [assignedTo];
+            return { mode: 'targeted', recipients: [assignedTo] };
         }
 
         // 3. Obtener todos los agentes con preferencias
@@ -952,6 +968,7 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
             .map(a => (a.get('name') as string) || '')
             .filter(n => n);
         const recipients: string[] = [];
+        const isNewLead = status === 'Nuevo' && (!department || department.trim() === '');
 
         for (const agent of agents) {
             const agentName = agent.get('name') as string;
@@ -959,7 +976,7 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
             const prefs = prefsStr ? JSON.parse(prefsStr) : {};
 
             // Si es nuevo (sin departamento) y tiene notifyNewLeads
-            if (status === 'Nuevo' && (!department || department.trim() === '')) {
+            if (isNewLead) {
                 if (prefs.notifyNewLeads === true) {
                     recipients.push(agentName);
                 }
@@ -970,21 +987,34 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
             }
         }
 
-        // FALLBACK CRÍTICO: si HAY departamento pero NADIE en el equipo lo tiene
-        // en sus preferencias, antes devolvíamos [] (silencio total — nadie se
-        // entera del chat). Ahora hacemos broadcast a todo el equipo para que
-        // al menos alguien lo vea. Mejor sobre-notificar que perder el cliente.
-        if (recipients.length === 0 && department && department.trim() !== '') {
-            console.warn(`📱 [FCM] Sin agentes con depto "${department}" en preferencias → broadcast a todo el equipo (${allAgentNames.length} usuarios)`);
-            return allAgentNames;
+        if (recipients.length > 0) {
+            console.log(`📱 [FCM] Recipients para ${clean}: [${recipients.join(', ')}]`);
+            return { mode: 'targeted', recipients };
         }
 
-        console.log(`📱 [FCM] Recipients para ${clean}: [${recipients.join(', ')}]`);
-        return recipients;
+        // Lead nuevo y NADIE tiene notifyNewLeads=true → RESPETAR el silencio.
+        // Antes hacíamos broadcast a todos y contradecíamos la preferencia
+        // explícita del equipo de "no quiero leads sin asignar".
+        if (isNewLead) {
+            console.log(`🔕 [FCM] Lead nuevo ${clean} pero nadie tiene notifyNewLeads=true → silencio (respetando preferencia)`);
+            return { mode: 'silence' };
+        }
+
+        // Depto con agentes pero ninguno con ese depto en prefs → broadcast
+        // como red de seguridad. Antes era silencio total y se perdía el
+        // chat. Mejor sobre-notificar al equipo entero.
+        if (department && department.trim() !== '') {
+            console.warn(`📱 [FCM] Sin agentes con depto "${department}" en preferencias → broadcast a todo el equipo (${allAgentNames.length} usuarios)`);
+            return { mode: 'broadcast' };
+        }
+
+        // Caso desconocido (contacto sin status Nuevo, sin depto, sin asignar):
+        // broadcast como red de seguridad para no perder el chat.
+        return { mode: 'broadcast' };
 
     } catch (e: any) {
         console.error('📱 [FCM] Error obteniendo recipients:', e.message);
-        return [];
+        return { mode: 'silence' };
     }
 }
 
@@ -1928,30 +1958,34 @@ async function runNotificationScheduler() {
             const dateStr = apptDate.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Madrid' });
             const timeStr = apptDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
 
-            // T-24h: si quedan ≤26h y la cita es FUTURA (>1h). scheduleNotification
-            // es idempotente (deduplica por type+phone+appointmentId), así que
-            // múltiples invocaciones del scheduler no duplican el aviso.
-            // Antes la ventana era 22-26h: si el servidor estaba apagado durante
-            // esas 4 horas, el T-24h se perdía y nunca se enviaba.
+            // T-24h: programamos cuando quedan ≤26h. scheduledFor = apptDate - 24h
+            // exactos para que el scheduler dispare el envío 24h antes de la cita,
+            // no inmediatamente. Antes scheduledFor=now: si el cron creaba el
+            // registro con hoursUntil=25.9, el scheduler veía sf<=now y enviaba
+            // el "te recordamos tu cita mañana" cuando faltaban 26h. Ahora
+            // scheduleNotification crea el registro y el scheduler lo deja
+            // pendiente hasta que llegue su fecha real.
+            // Idempotencia por type+phone+appointmentId evita duplicar.
             if (hoursUntil <= 26 && hoursUntil >= 1) {
+                const sf24 = new Date(apptDate.getTime() - 24 * 60 * 60 * 1000).toISOString();
                 await scheduleNotification({
                     type: 'cita_24h', phone: clientPhone, appointmentId: appt.id,
                     templateName: 'cita_recordatorio_24h',
                     variables: JSON.stringify([clientName, dateStr, timeStr]),
-                    scheduledFor: now.toISOString(), originPhoneId: originId
+                    scheduledFor: sf24, originPhoneId: originId
                 });
                 await delay(200);
             }
 
-            // T-1h: si quedan ≤75 min y la cita es FUTURA (>0 min). Antes 45-75:
-            // ventana de 30 min; si el scheduler no corría en ese tramo, no se
-            // enviaba el recordatorio 1h.
+            // T-1h: programamos cuando quedan ≤75 min. scheduledFor = apptDate - 1h
+            // exactos por el mismo motivo que T-24h.
             if (minutesUntil <= 75 && minutesUntil >= 5) {
+                const sf1 = new Date(apptDate.getTime() - 60 * 60 * 1000).toISOString();
                 await scheduleNotification({
                     type: 'cita_1h', phone: clientPhone, appointmentId: appt.id,
                     templateName: 'cita_recordatorio_1h',
                     variables: JSON.stringify([clientName, timeStr]),
-                    scheduledFor: now.toISOString(), originPhoneId: originId
+                    scheduledFor: sf1, originPhoneId: originId
                 });
                 await delay(200);
             }
@@ -2274,49 +2308,48 @@ async function saveAndEmitMessage(msg: any) {
         const multiAccount = Object.keys(BUSINESS_ACCOUNTS).length > 1;
         const accountSuffix = (multiAccount && accountName) ? ` (${accountName})` : '';
 
-        // Enviar notificación FCM filtrada por preferencias/asignación
-        const recipients = await getNotificationRecipients(finalSender);
+        // Decidir destinatarios. La función puede devolver:
+        //  - silence  → respetar preferencia del equipo (no notificar a nadie)
+        //  - broadcast → no hay regla específica, mandar a todos
+        //  - targeted → enviar solo a esos usuarios
+        const decision = await getNotificationRecipients(finalSender);
 
-        // 1. Notificación FCM (Móviles APK)
-        // Prefijo "💬 Cliente ·" para distinguir de los mensajes del chat interno
-        // del equipo (un trabajador y un cliente pueden llamarse igual).
-        sendFCMNotification({
-            title: `💬 Cliente · ${senderName}${accountSuffix}`,
-            body: payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : ''),
-            data: {
-                conversationId: finalSender,
-                type: 'new_message'
-            }
-        }, recipients);
-
-        // 2. Notificación Web Push (PWA/Escritorio)
-        const webPushPayload = {
-            title: `💬 Cliente · ${senderName}${accountSuffix}`,
-            body: payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : ''),
-            icon: '/logo.png',
-            url: `/?phone=${finalSender}`,
-            phone: finalSender,
-            // tag propio por cliente + cuenta: no sobrescribe las notificaciones
-            // del equipo y mantiene una notificación independiente por cada
-            // (cliente, línea) si el mismo cliente escribe a varios números.
-            tag: `cliente-${finalSender}${accountId ? '-' + accountId.slice(-4) : ''}`
-        };
-
-        // WebPush con MISMO filtrado que FCM (antes hacía broadcast a TODOS los
-        // suscritos, incluso a usuarios que no tenían nada que ver con el chat).
-        // Si tenemos recipients concretos → mandar solo a ellos.
-        // Si recipients viene vacío (raro, todos los fallbacks ya activos en
-        // getNotificationRecipients), hacemos broadcast como red de seguridad
-        // para no perder mensajes.
-        if (recipients && recipients.length > 0) {
-            recipients.forEach(username => {
-                if (username && username !== 'unknown') {
-                    sendPushNotification(username, webPushPayload);
-                }
-            });
+        if (decision.mode === 'silence') {
+            console.log(`🔕 [Notif] Cliente ${finalSender} en modo silencio (preferencias del equipo) — no se envía push`);
         } else {
-            console.warn(`📲 [WebPush] Sin recipients concretos para ${finalSender} → broadcast como fallback`);
-            broadcastPushNotification(webPushPayload);
+            const fcmTitle = `💬 Cliente · ${senderName}${accountSuffix}`;
+            const fcmBody = payload.text.substring(0, 100) + (payload.text.length > 100 ? '...' : '');
+
+            // 1. Notificación FCM (Móviles APK)
+            // sendFCMNotification trata undefined como "broadcast a todos los tokens".
+            const fcmRecipients = decision.mode === 'targeted' ? decision.recipients : undefined;
+            sendFCMNotification({
+                title: fcmTitle,
+                body: fcmBody,
+                data: { conversationId: finalSender, type: 'new_message' }
+            }, fcmRecipients);
+
+            // 2. Notificación Web Push (PWA/Escritorio)
+            const webPushPayload = {
+                title: fcmTitle,
+                body: fcmBody,
+                icon: '/logo.png',
+                url: `/?phone=${finalSender}`,
+                phone: finalSender,
+                tag: `cliente-${finalSender}${accountId ? '-' + accountId.slice(-4) : ''}`
+            };
+
+            if (decision.mode === 'targeted') {
+                decision.recipients.forEach(username => {
+                    if (username && username !== 'unknown') {
+                        sendPushNotification(username, webPushPayload);
+                    }
+                });
+            } else {
+                // broadcast — solo cuando getNotificationRecipients explícitamente lo decide
+                console.log(`📲 [WebPush] Broadcast decidido por reglas: ${finalSender}`);
+                broadcastPushNotification(webPushPayload);
+            }
         }
     }
 
@@ -3506,9 +3539,37 @@ async function assignDepartment(clientPhone: string, department: string) {
                     return Array.isArray(prefs.departments) && prefs.departments.includes(department);
                 });
                 if (candidates.length > 0) {
-                    // Round-robin simple por timestamp: el que tenga el último
-                    // mensaje saliente MÁS ANTIGUO recibe el chat (reparte la carga).
-                    pickedAgent = (candidates[0].get('name') as string) || '';
+                    // Reparto entre los agentes del departamento. Antes
+                    // siempre se elegía candidates[0] (el primero del array),
+                    // así que un único agente recibía TODAS las derivaciones.
+                    // Para evitar desbalanceo usamos el agente que lleva más
+                    // tiempo sin recibir una derivación: comparamos su último
+                    // mensaje saliente desde Messages. Si no hay datos,
+                    // fallback a selección aleatoria.
+                    let bestAgent = candidates[0];
+                    let oldestMs = Infinity;
+                    for (const c of candidates) {
+                        const agentName = (c.get('name') as string) || '';
+                        if (!agentName) continue;
+                        try {
+                            const lastMsg = await base('Messages').select({
+                                filterByFormula: `AND({sender}='${escAt(agentName)}', {recipient}!='')`,
+                                sort: [{ field: 'timestamp', direction: 'desc' }],
+                                maxRecords: 1
+                            }).firstPage();
+                            const ts = lastMsg.length > 0 ? (lastMsg[0].get('timestamp') as string) : null;
+                            const tsMs = ts ? new Date(ts).getTime() : 0;
+                            // 0 = nunca respondió → máxima prioridad (recibe el chat)
+                            if (tsMs < oldestMs) { oldestMs = tsMs; bestAgent = c; }
+                        } catch { /* si falla la query, sigue con el siguiente */ }
+                    }
+                    pickedAgent = (bestAgent.get('name') as string) || '';
+                    // Si por algún motivo no resolvimos a uno concreto,
+                    // fallback aleatorio para repartir aunque sea sin datos.
+                    if (!pickedAgent) {
+                        const random = candidates[Math.floor(Math.random() * candidates.length)];
+                        pickedAgent = (random.get('name') as string) || '';
+                    }
                 }
             } catch (pickErr: any) {
                 console.warn('[AssignDept] Error eligiendo agente para departamento:', pickErr?.message);
@@ -4889,8 +4950,12 @@ app.post('/api/send-template', async (req, res) => {
     const cleanTo = cleanNumber(phone);
     try {
         // Validar que la plantilla esté APPROVED antes de gastar la llamada
-        // a Meta. Si está PENDING/REJECTED Meta la rechaza con error críptico
-        // y el cliente cree que fue por su lado.
+        // a Meta. En multi-WABA, cada WABA aprueba la plantilla por separado:
+        // puede pasar que WABA1=APPROVED y WABA2=PENDING. Buscamos el status
+        // específico de la WABA que corresponde al originPhoneId del envío
+        // mediante el campo MirroredWabas (JSON map businessId→{metaId,status}).
+        // Si no hay MirroredWabas (template creado antes del fix multi-WABA),
+        // fallback al campo Status global del registro.
         if (base && templateName) {
             try {
                 const tplRecords = await base(TABLE_TEMPLATES).select({
@@ -4898,14 +4963,45 @@ app.post('/api/send-template', async (req, res) => {
                     maxRecords: 1
                 }).firstPage();
                 if (tplRecords.length > 0) {
-                    const tplStatus = String(tplRecords[0].get('Status') || '').toUpperCase();
-                    if (tplStatus && tplStatus !== 'APPROVED') {
-                        const human = tplStatus === 'PENDING'
-                            ? 'La plantilla aún está pendiente de aprobación por Meta. Espera a que pase a APROBADA antes de enviarla.'
-                            : tplStatus === 'REJECTED'
-                                ? 'La plantilla fue RECHAZADA por Meta. Corrige el contenido o crea una nueva antes de enviar.'
-                                : `La plantilla no está aprobada (Status=${tplStatus}). No se puede enviar todavía.`;
-                        return res.status(400).json({ error: human, templateStatus: tplStatus });
+                    const tpl = tplRecords[0];
+                    const globalStatus = String(tpl.get('Status') || '').toUpperCase();
+
+                    // Resolver el businessId de la WABA desde la que enviamos
+                    const targetBusinessId = originPhoneId
+                        ? (ACCOUNT_META[originPhoneId]?.businessId || waBusinessId || '')
+                        : (waBusinessId || '');
+
+                    let effectiveStatus = globalStatus;
+                    let usedMirror = false;
+                    const mirroredRaw = tpl.get('MirroredWabas') as string;
+                    if (mirroredRaw && targetBusinessId) {
+                        try {
+                            const mirroredMap = JSON.parse(mirroredRaw) as Record<string, { metaId: string, status: string }>;
+                            if (mirroredMap && mirroredMap[targetBusinessId]?.status) {
+                                effectiveStatus = String(mirroredMap[targetBusinessId].status || '').toUpperCase();
+                                usedMirror = true;
+                            } else if (mirroredMap && Object.keys(mirroredMap).length > 0) {
+                                // La plantilla NO existe en esa WABA. Mejor avisar antes que dejar
+                                // a Meta rechazar con error críptico.
+                                return res.status(400).json({
+                                    error: `La plantilla "${templateName}" no existe en la WABA de la línea seleccionada. Crea/replica la plantilla en esa WABA antes de enviar.`,
+                                    templateStatus: 'NOT_IN_WABA',
+                                    targetBusinessId
+                                });
+                            }
+                        } catch (parseErr: any) {
+                            console.warn('[send-template] Error parseando MirroredWabas, usando Status global:', parseErr?.message);
+                        }
+                    }
+
+                    if (effectiveStatus && effectiveStatus !== 'APPROVED') {
+                        const wabaTag = usedMirror ? ` en la WABA seleccionada (${targetBusinessId.slice(-4)})` : '';
+                        const human = effectiveStatus === 'PENDING'
+                            ? `La plantilla aún está pendiente de aprobación por Meta${wabaTag}. Espera a que pase a APROBADA antes de enviarla.`
+                            : effectiveStatus === 'REJECTED'
+                                ? `La plantilla fue RECHAZADA por Meta${wabaTag}. Corrige el contenido o crea una nueva.`
+                                : `La plantilla no está aprobada (Status=${effectiveStatus})${wabaTag}. No se puede enviar todavía.`;
+                        return res.status(400).json({ error: human, templateStatus: effectiveStatus });
                     }
                 }
                 // Si no hay registro local de la plantilla, la dejamos pasar — puede
@@ -5086,8 +5182,11 @@ app.get('/api/analytics', async (req, res) => {
         });
 
         // Citas por cuenta (matching de teléfono tolerante con/sin prefijo)
-        // Calculamos también incidentes por cuenta para que el dashboard pueda
-        // mostrar el desglose (antes solo había total mensual global).
+        // totalAppointments cuenta TODAS las citas Booked (histórico).
+        // incidentsByAccount filtra SOLO las del mes en curso (mismo criterio
+        // que incidentStats global), para que los números cuadren entre la
+        // card global y las cards por línea del dashboard.
+        const incidentMonthKey = madridDay(new Date()).slice(0, 7);
         const incidentsByAccount: Record<string, { total: number, incidents: number }> = {};
         accountIds.forEach(id => { incidentsByAccount[id] = { total: 0, incidents: 0 }; });
         allAppts.forEach(a => {
@@ -5096,11 +5195,15 @@ app.get('/api/analytics', async (req, res) => {
             if (!cp) return;
             const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
             const oid = phoneToAccount[cp] || phoneToAccount[last9];
-            if (oid && perAccount[oid]) {
-                perAccount[oid].totalAppointments++;
-                incidentsByAccount[oid].total++;
-                if (a.get('Incident')) incidentsByAccount[oid].incidents++;
-            }
+            if (!oid || !perAccount[oid]) return;
+            perAccount[oid].totalAppointments++;
+            // Incidentes solo del mes en curso (Madrid timezone)
+            const dStr = a.get('Date') as string;
+            if (!dStr) return;
+            const apptMonthKey = madridDay(new Date(dStr)).slice(0, 7);
+            if (apptMonthKey !== incidentMonthKey) return;
+            incidentsByAccount[oid].total++;
+            if (a.get('Incident')) incidentsByAccount[oid].incidents++;
         });
 
         const accountsArr = Object.values(perAccount).map(a => {

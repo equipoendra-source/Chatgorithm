@@ -269,19 +269,38 @@ function App() {
         };
         socket.on('appointment_cancelled', onCancelledAppointment);
 
-        // Chat asignado a un agente — solo notificamos al destinatario
-        // (data.assignedTo === user.username). En multi-cuenta, el toast
-        // muestra el cliente y el depto/origen.
+        // Chat asignado:
+        //  - Si assignedTo coincide con yo → toast directo "te lo han asignado".
+        //  - Si NO hay assignedTo concreto pero hay department, notificar a
+        //    todos los miembros del depto (los que tienen ese depto en sus
+        //    prefs.departments). Antes en este caso NADIE veía toast: la
+        //    derivación quedaba en limbo si Laura no encontraba agente.
         const onChatAssigned = (data: any) => {
             if (!data || !user) return;
             const me = user.username;
             const target = (data.assignedTo || '').trim();
-            if (!target || target !== me) return; // no es para mí
+            const dept = (data.department || '').trim();
             const clientName = data.clientName || data.phone || 'Cliente';
-            const origin = data.origin === 'bot' ? 'Laura te ha pasado un chat'
+            const originLabel = data.origin === 'bot' ? 'Laura te ha pasado un chat'
                 : data.origin === 'manual' ? 'Te han asignado un chat'
                 : 'Tienes un chat asignado';
-            showToast('info', `📨 ${origin}: ${clientName}${data.department ? ` · ${data.department}` : ''}`);
+
+            const myPrefs = (user.preferences || {}) as { departments?: string[] };
+            const myDepts = Array.isArray(myPrefs.departments) ? myPrefs.departments : [];
+
+            if (target && target === me) {
+                // Asignación específica → toast directo
+                showToast('info', `📨 ${originLabel}: ${clientName}${dept ? ` · ${dept}` : ''}`);
+                return;
+            }
+            if (!target && dept && myDepts.includes(dept)) {
+                // Derivación a depto sin agente concreto → notificar a
+                // miembros del depto. Mensaje ligeramente distinto para
+                // dejar claro que NO es asignación personal.
+                const deptLabel = data.origin === 'bot' ? `Laura ha derivado un chat a ${dept}` : `Chat sin asignar en ${dept}`;
+                showToast('info', `📨 ${deptLabel}: ${clientName}`);
+                return;
+            }
         };
         socket.on('chat_assigned', onChatAssigned);
 
