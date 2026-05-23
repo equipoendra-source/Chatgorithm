@@ -22,17 +22,53 @@ console.log('🚀 [Push] API URL Initial:', API_URL);
 class PushNotificationService {
     private token: string | null = null;
     private notificationId = 0;
+    // Flag para evitar registrar listeners Capacitor dos veces (un mismo
+    // listener registrado N veces dispara la callback N veces). El re-envío
+    // del token al servidor (con el username actual) sigue ocurriendo en cada
+    // llamada — la idempotencia la garantiza el helper addPushSubscription
+    // del backend.
+    private initialized = false;
+    private lastUsername: string | null = null;
 
     async initialize(backendUrl?: string): Promise<void> {
         if (backendUrl) setPushApiUrl(backendUrl);
-        
-        console.log('🚀 [Push] Iniciando servicio de notificaciones...');
-        console.log('🚀 [Push] Platform:', Capacitor.getPlatform());
+
+        // Detectar el username actual del localStorage (puede haber cambiado)
+        let currentUsername: string | null = null;
+        try {
+            const userStr = localStorage.getItem('chatgorithm_user');
+            if (userStr) currentUsername = JSON.parse(userStr)?.username || null;
+        } catch { /* ignore */ }
+
+        console.log(`🚀 [Push] initialize() · user=${currentUsername || 'none'} · platform=${Capacitor.getPlatform()}`);
+
+        // Si ya estábamos inicializados Y el usuario es el mismo → no hacemos
+        // nada (evitar listeners duplicados). Si el usuario cambió, re-enviamos
+        // las credenciales al servidor con el username nuevo.
+        if (this.initialized && this.lastUsername === currentUsername) {
+            console.log('🚀 [Push] Ya inicializado para este usuario, skip.');
+            return;
+        }
+        if (this.initialized && this.lastUsername !== currentUsername) {
+            console.log(`🚀 [Push] Cambio de usuario detectado (${this.lastUsername} → ${currentUsername}). Re-registrando credenciales.`);
+            this.lastUsername = currentUsername;
+            // Re-enviar token/sub existente al servidor con el username nuevo
+            if (Capacitor.isNativePlatform() && this.token) {
+                await this.sendTokenToServer(this.token);
+            } else if (!Capacitor.isNativePlatform()) {
+                // En Web Push, volvemos a recuperar la suscripción actual y la enviamos
+                await this.subscribeWebPush();
+            }
+            return;
+        }
+
+        this.lastUsername = currentUsername;
 
         // Si es web (PWA), intentamos Web Push estándar
         if (!Capacitor.isNativePlatform()) {
             console.log('🌐 [Push] Detectado entorno Web/PWA, iniciando Web Push...');
             await this.subscribeWebPush();
+            this.initialized = true;
             return;
         }
 
@@ -87,6 +123,7 @@ class PushNotificationService {
                 console.log('Local notification action performed:', action);
                 this.handleNotificationTap(action.notification.extra);
             });
+            this.initialized = true;
         } catch (e) {
             console.error('❌ [Push] Error en initialize nativo:', e);
         }

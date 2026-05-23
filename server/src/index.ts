@@ -762,36 +762,70 @@ if (!webPushEnabled) {
     );
 }
 
-// Almacén de suscripciones push (en memoria, en producción usar DB)
-const pushSubscriptions = new Map<string, any>();
+// Almacén de suscripciones Web Push: un usuario puede tener VARIAS (escritorio,
+// móvil-PWA, otra pestaña). Antes era Map<string,any> y la última suscripción
+// sobreescribía las anteriores → el primer dispositivo dejaba de recibir
+// notificaciones. Ahora guardamos un array por usuario, deduplicado por
+// endpoint (la URL única que Web Push asigna a cada navegador/dispositivo).
+const pushSubscriptions = new Map<string, any[]>();
 
-// Cargar suscripciones Web Push desde Airtable al iniciar
+// Helper para añadir una suscripción sin duplicar (mismo endpoint = mismo dispositivo)
+function addPushSubscription(username: string, subscription: any) {
+    if (!username || !subscription?.endpoint) return false;
+    const list = pushSubscriptions.get(username) || [];
+    if (list.some(s => s?.endpoint === subscription.endpoint)) return false; // ya existe
+    list.push(subscription);
+    pushSubscriptions.set(username, list);
+    return true;
+}
+
+// Helper para eliminar una suscripción específica por endpoint (cuando expira)
+function removePushSubscription(username: string, endpoint: string) {
+    const list = pushSubscriptions.get(username);
+    if (!list) return;
+    const filtered = list.filter(s => s?.endpoint !== endpoint);
+    if (filtered.length === 0) pushSubscriptions.delete(username);
+    else pushSubscriptions.set(username, filtered);
+}
+
+// Cargar suscripciones Web Push desde Airtable al iniciar.
+// El campo `subscription` puede contener:
+//  - Un único objeto JSON (formato antiguo) → lo metemos en una lista de 1
+//  - Un array JSON (formato nuevo multi-dispositivo) → lista directa
 async function loadWebPushSubscriptionsFromAirtable() {
     if (!base) return;
     try {
-        const records = await base('WebPushSubscriptions').select({ maxRecords: 100 }).all();
+        const records = await base('WebPushSubscriptions').select({ maxRecords: 200 }).all();
+        let totalSubs = 0;
         records.forEach(r => {
             const username = r.get('username') as string;
             const subscriptionData = r.get('subscription') as string;
-            if (username && subscriptionData) {
-                try {
-                    pushSubscriptions.set(username, JSON.parse(subscriptionData));
-                } catch (e) {
-                    console.error(`❌ [WebPush] Error parseando suscripción para ${username}`);
+            if (!username || !subscriptionData) return;
+            try {
+                const parsed = JSON.parse(subscriptionData);
+                if (Array.isArray(parsed)) {
+                    pushSubscriptions.set(username, parsed);
+                    totalSubs += parsed.length;
+                } else if (parsed?.endpoint) {
+                    pushSubscriptions.set(username, [parsed]);
+                    totalSubs += 1;
                 }
+            } catch (e) {
+                console.error(`❌ [WebPush] Error parseando suscripción para ${username}`);
             }
         });
-        console.log(`🌐 [WebPush] Cargadas ${pushSubscriptions.size} suscripciones desde Airtable`);
+        console.log(`🌐 [WebPush] Cargadas ${totalSubs} suscripciones de ${pushSubscriptions.size} usuarios desde Airtable`);
     } catch (e: any) {
         console.log('🌐 [WebPush] Tabla WebPushSubscriptions no encontrada (se creará al suscribir)');
     }
 }
 
-// Guardar suscripción Web Push en Airtable
-async function saveWebPushSubscriptionToAirtable(username: string, subscription: any) {
+// Guardar TODA la lista de suscripciones del usuario en Airtable (array JSON).
+async function saveWebPushSubscriptionToAirtable(username: string, _subscription: any) {
     if (!base) return;
     try {
-        const subscriptionData = JSON.stringify(subscription);
+        const list = pushSubscriptions.get(username) || [];
+        const subscriptionData = JSON.stringify(list);
         const existing = await base('WebPushSubscriptions').select({
             filterByFormula: `{username} = '${username}'`,
             maxRecords: 1
@@ -807,7 +841,7 @@ async function saveWebPushSubscriptionToAirtable(username: string, subscription:
                 fields: { username, subscription: subscriptionData, createdAt: new Date().toISOString() }
             }]);
         }
-        console.log(`🌐 [WebPush] Suscripción persistida para ${username}`);
+        console.log(`🌐 [WebPush] Persistidas ${list.length} suscripción(es) para ${username}`);
     } catch (e: any) {
         console.error('🌐 [WebPush] Error persisitiendo en Airtable:', e.message);
     }
@@ -1046,32 +1080,47 @@ async function sendFCMNotification(payload: { title: string, body: string, data?
     }
 }
 
-// Función para enviar push notification
+// Envía Web Push a TODAS las suscripciones de un usuario (multi-dispositivo).
+// Si una suscripción está expirada (410 Gone) o desconocida (404), la
+// eliminamos para no volver a intentarlo y persistimos el cambio en Airtable.
 async function sendPushNotification(userIdentifier: string, payload: { title: string, body: string, icon?: string, url?: string, phone?: string, tag?: string }) {
-    if (!webPushEnabled) return; // VAPID keys no configuradas, push desactivado
-    const subscription = pushSubscriptions.get(userIdentifier);
-    if (!subscription) {
-        console.log(`📱 [Push] No hay suscripción para ${userIdentifier}`);
+    if (!webPushEnabled) return;
+    const subs = pushSubscriptions.get(userIdentifier);
+    if (!subs || subs.length === 0) {
+        console.log(`📱 [Push] No hay suscripciones para ${userIdentifier}`);
         return;
     }
-
-    try {
-        await webpush.sendNotification(subscription, JSON.stringify(payload));
-        console.log(`📱 [Push] Notificación enviada a ${userIdentifier}`);
-    } catch (error: any) {
-        console.error('❌ [Push] Error enviando:', error.message);
-        if (error.statusCode === 410) {
-            // Suscripción expirada, eliminarla
-            pushSubscriptions.delete(userIdentifier);
+    const payloadStr = JSON.stringify(payload);
+    const expiredEndpoints: string[] = [];
+    let okCount = 0;
+    for (const sub of subs) {
+        try {
+            await webpush.sendNotification(sub, payloadStr);
+            okCount++;
+        } catch (error: any) {
+            const code = error.statusCode;
+            if (code === 410 || code === 404) {
+                expiredEndpoints.push(sub.endpoint);
+            } else {
+                console.error(`❌ [Push] Error enviando a ${userIdentifier} (endpoint=${(sub.endpoint || '').slice(-20)}):`, error.message);
+            }
         }
+    }
+    if (okCount > 0) console.log(`📱 [Push] Enviado a ${userIdentifier} en ${okCount}/${subs.length} dispositivos`);
+    if (expiredEndpoints.length > 0) {
+        for (const ep of expiredEndpoints) removePushSubscription(userIdentifier, ep);
+        // Persistir la limpieza para que no se vuelva a cargar al reiniciar
+        try { await saveWebPushSubscriptionToAirtable(userIdentifier, null); } catch {}
+        console.log(`🧹 [Push] Limpiadas ${expiredEndpoints.length} suscripción(es) expirada(s) de ${userIdentifier}`);
     }
 }
 
-// Enviar push a TODOS los usuarios suscritos
+// Enviar push a TODOS los usuarios suscritos (todas sus suscripciones).
 async function broadcastPushNotification(payload: { title: string, body: string, icon?: string, url?: string, phone?: string, tag?: string }) {
-    console.log(`📡 [WebPush] Broadcast: enviando a ${pushSubscriptions.size} navegadores suscritos`);
+    const totalDevices = Array.from(pushSubscriptions.values()).reduce((sum, list) => sum + list.length, 0);
+    console.log(`📡 [WebPush] Broadcast: enviando a ${totalDevices} dispositivos de ${pushSubscriptions.size} usuarios`);
     const promises: Promise<void>[] = [];
-    pushSubscriptions.forEach((sub, id) => {
+    pushSubscriptions.forEach((_subs, id) => {
         promises.push(sendPushNotification(id, payload));
     });
     await Promise.all(promises);
@@ -4609,39 +4658,120 @@ app.post('/api/create-template', async (req, res) => {
             }
         }
 
-        if (waToken && waBusinessId) {
+        // Construir el payload una sola vez
+        const metaPayload: any = {
+            name: formattedName,
+            category,
+            allow_category_change: true,
+            language,
+            components: [{ type: "BODY", text: body }]
+        };
+        if (footer) metaPayload.components.push({ type: "FOOTER", text: footer });
+        const varMatchesAll = body.match(/{{\d+}}/g);
+        if (varMatchesAll && variableExamples && Object.keys(variableExamples).length > 0) {
+            const examples: string[] = [];
+            const maxVar = Math.max(...varMatchesAll.map((m: string) => parseInt(m.replace(/[^\d]/g, ''))));
+            for (let i = 1; i <= maxVar; i++) { examples.push(variableExamples[String(i)] || "Ejemplo"); }
+            metaPayload.components[0].example = { body_text: [examples] };
+        }
+
+        // Recoger todas las WABAs únicas detectadas en BUSINESS_ACCOUNTS.
+        // Antes solo se creaba en la WABA principal (waBusinessId de env), así
+        // que en multi-cuenta las plantillas no existían en las líneas
+        // secundarias y Meta rechazaba el envío. Ahora replicamos en todas.
+        const wabaTargets: { businessId: string, token: string, label: string }[] = [];
+        const seenWabas = new Set<string>();
+        if (waBusinessId && waToken) {
+            wabaTargets.push({ businessId: waBusinessId, token: waToken, label: 'Principal (env)' });
+            seenWabas.add(waBusinessId);
+        }
+        for (const [phoneId, meta] of Object.entries(ACCOUNT_META)) {
+            const bId = meta.businessId;
+            if (!bId || seenWabas.has(bId)) continue;
+            const tok = BUSINESS_ACCOUNTS[phoneId];
+            if (!tok) continue;
+            wabaTargets.push({ businessId: bId, token: tok, label: meta.name || `Línea ${phoneId.slice(-4)}` });
+            seenWabas.add(bId);
+        }
+
+        if (wabaTargets.length === 0) {
+            // Sin WABAs configuradas: guardamos local con id ficticio.
+            const createdRecords = await base(TABLE_TEMPLATES).create([{ fields: { "Name": formattedName, "Category": category, "Language": language, "Body": body, "Footer": footer, "Status": status, "MetaId": metaId, "VariableMapping": JSON.stringify(variableExamples || {}) } }]);
+            return res.json({ success: true, template: { id: createdRecords[0].id, name: formattedName, status } });
+        }
+
+        // Crear en cada WABA. Recogemos resultados y errores.
+        const results: { label: string, businessId: string, ok: boolean, metaId?: string, status?: string, error?: string }[] = [];
+        for (const target of wabaTargets) {
             try {
-                const metaPayload: any = {
-                    name: formattedName,
-                    category,
-                    allow_category_change: true,
-                    language,
-                    components: [{ type: "BODY", text: body }]
-                };
-                if (footer) metaPayload.components.push({ type: "FOOTER", text: footer });
-
-                const varMatches = body.match(/{{\d+}}/g);
-                if (varMatches && variableExamples && Object.keys(variableExamples).length > 0) {
-                    const examples = [];
-                    const maxVar = Math.max(...varMatches.map((m: string) => parseInt(m.replace(/[^\d]/g, ''))));
-                    for (let i = 1; i <= maxVar; i++) { examples.push(variableExamples[String(i)] || "Ejemplo"); }
-                    metaPayload.components[0].example = { body_text: [examples] };
-                }
-
-                console.log("📤 PAYLOAD A META:", JSON.stringify(metaPayload, null, 2));
-
-                const metaRes = await axios.post(`https://graph.facebook.com/v18.0/${waBusinessId}/message_templates`, metaPayload, { headers: { 'Authorization': `Bearer ${waToken}`, 'Content-Type': 'application/json' } });
-                metaId = metaRes.data.id;
-                status = metaRes.data.status || "PENDING";
+                console.log(`📤 [Template] Creando "${formattedName}" en WABA ${target.label} (${target.businessId})`);
+                const metaRes = await axios.post(
+                    `https://graph.facebook.com/v18.0/${target.businessId}/message_templates`,
+                    metaPayload,
+                    { headers: { 'Authorization': `Bearer ${target.token}`, 'Content-Type': 'application/json' } }
+                );
+                results.push({ label: target.label, businessId: target.businessId, ok: true, metaId: metaRes.data.id, status: metaRes.data.status || "PENDING" });
             } catch (metaError: any) {
-                console.error("❌ ERROR META DETALLADO:", JSON.stringify(metaError.response?.data, null, 2));
-                const userMsg = metaError.response?.data?.error?.error_user_msg || metaError.response?.data?.error?.message || "Error desconocido de Meta";
-                return res.status(400).json({ success: false, error: `Meta rechazó la plantilla: ${userMsg}` });
+                const userMsg = metaError.response?.data?.error?.error_user_msg || metaError.response?.data?.error?.message || "Error desconocido";
+                console.warn(`⚠️ [Template] WABA ${target.label} rechazó la plantilla: ${userMsg}`);
+                results.push({ label: target.label, businessId: target.businessId, ok: false, error: userMsg });
             }
         }
 
-        const createdRecords = await base(TABLE_TEMPLATES).create([{ fields: { "Name": formattedName, "Category": category, "Language": language, "Body": body, "Footer": footer, "Status": status, "MetaId": metaId, "VariableMapping": JSON.stringify(variableExamples || {}) } }]);
-        res.json({ success: true, template: { id: createdRecords[0].id, name: formattedName, status } });
+        // Si TODAS las WABAs fallaron, devolver error (no guardar en Airtable).
+        const successful = results.filter(r => r.ok);
+        if (successful.length === 0) {
+            const errSummary = results.map(r => `${r.label}: ${r.error}`).join(' | ');
+            return res.status(400).json({ success: false, error: `Meta rechazó la plantilla en todas las WABAs: ${errSummary}` });
+        }
+
+        // Guardamos el primer éxito como representación en Airtable (compatible
+        // con el esquema existente). Los demás metaIds se guardan en un campo
+        // JSON nuevo MirroredWabas para tener trazabilidad.
+        metaId = successful[0].metaId || metaId;
+        status = successful[0].status || status;
+        const mirroredMap: Record<string, { metaId: string, status: string }> = {};
+        for (const r of successful) {
+            if (r.metaId) mirroredMap[r.businessId] = { metaId: r.metaId, status: r.status || 'PENDING' };
+        }
+        const failed = results.filter(r => !r.ok);
+        if (failed.length > 0) {
+            console.warn(`⚠️ [Template] Creada en ${successful.length}/${results.length} WABAs. Fallidas: ${failed.map(f => f.label + ' (' + f.error + ')').join(', ')}`);
+        } else {
+            console.log(`✅ [Template] Creada en las ${successful.length} WABAs.`);
+        }
+
+        const recordFields: any = {
+            "Name": formattedName,
+            "Category": category,
+            "Language": language,
+            "Body": body,
+            "Footer": footer,
+            "Status": status,
+            "MetaId": metaId,
+            "VariableMapping": JSON.stringify(variableExamples || {})
+        };
+        // Campo opcional: si la tabla tiene MirroredWabas, lo rellenamos.
+        // El helper updateAppointmentFields hace catch graceful para columnas
+        // que no existen — aquí, en cambio, ponemos el campo y si Airtable se
+        // queja, reintentamos sin él.
+        let createdRecords;
+        try {
+            createdRecords = await base(TABLE_TEMPLATES).create([{ fields: { ...recordFields, "MirroredWabas": JSON.stringify(mirroredMap) } }]);
+        } catch (e: any) {
+            if (/MirroredWabas/i.test(e?.message || '')) {
+                console.warn('[Template] Campo MirroredWabas no existe en Airtable (opcional). Guardando sin él.');
+                createdRecords = await base(TABLE_TEMPLATES).create([{ fields: recordFields }]);
+            } else throw e;
+        }
+
+        res.json({
+            success: true,
+            template: { id: createdRecords[0].id, name: formattedName, status },
+            wabasOk: successful.length,
+            wabasFailed: failed.length,
+            mirroredWabas: Object.keys(mirroredMap)
+        });
     } catch (error: any) { res.status(400).json({ success: false, error: error.message }); }
 });
 
@@ -5704,19 +5834,20 @@ io.on('connection', (socket) => {
 
             // 2. Web (WebPush) — solo si VAPID está configurado
             if (webPushEnabled) {
-                Array.from(pushSubscriptions.entries()).forEach(([username, sub]) => {
+                // Iterar TODOS los usuarios suscritos y enviar a TODAS sus
+                // suscripciones (multi-dispositivo). Antes solo se enviaba a
+                // la última suscripción de cada usuario.
+                pushSubscriptions.forEach((_subs, username) => {
                     if (username === msg.sender) return; // No notificar al remitente
                     if (isPrivate && username !== u1 && username !== u2) return; // Filtro chat privado
-
-                    try {
-                        // tag propio del chat de equipo: no sobrescribe las de clientes
-                        const payload = JSON.stringify({ title: pushTitle, body: pushBody, url: '/team', tag: `equipo-${msg.channel}` });
-                        webpush.sendNotification(sub, payload).catch(e => {
-                            console.error('❌ [WebPush] Error enviando team chat:', e.statusCode || e.message);
-                        });
-                    } catch (e) {
-                        console.error('Error procesando WebPush de equipo:', e);
-                    }
+                    // Usamos sendPushNotification que ya itera las subs del
+                    // usuario y limpia las expiradas automáticamente.
+                    sendPushNotification(username, {
+                        title: pushTitle,
+                        body: pushBody,
+                        url: '/team',
+                        tag: `equipo-${msg.channel}`
+                    }).catch(e => console.error('❌ [WebPush] Error enviando team chat:', e?.message));
                 });
             }
 
@@ -5900,6 +6031,9 @@ app.delete('/api/push-notifications/unregister', (req, res) => {
 });
 
 // --- WEB PUSH SUBSCRIPTION ENDPOINT ---
+// Permite múltiples suscripciones por usuario (escritorio + móvil PWA + ...).
+// Si el mismo dispositivo se vuelve a suscribir (mismo endpoint), se ignora
+// el duplicado. Si es un dispositivo nuevo, se añade a la lista.
 app.post('/api/webpush/subscribe', (req, res) => {
     const { subscription, username } = req.body;
 
@@ -5908,13 +6042,14 @@ app.post('/api/webpush/subscribe', (req, res) => {
     }
 
     const user = username || 'unknown';
-    pushSubscriptions.set(user, subscription);
+    const added = addPushSubscription(user, subscription);
 
-    // Persistir en Airtable
+    // Persistir SIEMPRE el estado actual (la lista completa) en Airtable.
     saveWebPushSubscriptionToAirtable(user, subscription);
 
-    console.log(`🌐 [WebPush] Suscripción registrada para: ${user}`);
-    res.status(201).json({ success: true });
+    const list = pushSubscriptions.get(user) || [];
+    console.log(`🌐 [WebPush] ${added ? 'Nueva suscripción' : 'Ya estaba registrada'} para ${user} — total dispositivos: ${list.length}`);
+    res.status(201).json({ success: true, devices: list.length });
 });
 
 // ==========================================

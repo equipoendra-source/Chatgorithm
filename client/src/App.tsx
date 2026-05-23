@@ -304,13 +304,19 @@ function App() {
         };
     }, [socket, user, companyConfig?.backendUrl]);
 
-    // Initialize push notifications for native platforms
+    // Initialize push notifications.
+    // CRÍTICO: arrancamos SOLO cuando el usuario ya hizo login (user.username
+    // existe), no en cuanto haya backendUrl. Antes el servicio se inicializaba
+    // antes del login y enviaba al servidor `username='unknown'`, dejando los
+    // tokens FCM y las suscripciones Web Push huérfanas. Tras login el token
+    // no se re-enviaba con el username real → las notificaciones individuales
+    // (filtradas por destinatario) nunca llegaban al usuario real.
     useEffect(() => {
-        if (companyConfig?.backendUrl) {
-            console.log('📱 [Push] Inicializando servicio nativo con:', companyConfig.backendUrl);
+        if (companyConfig?.backendUrl && user?.username) {
+            console.log(`📱 [Push] Inicializando servicio para ${user.username} en:`, companyConfig.backendUrl);
             pushNotificationService.initialize(companyConfig.backendUrl);
         }
-    }, [companyConfig?.backendUrl]);
+    }, [companyConfig?.backendUrl, user?.username]);
 
     // Handlers
     const handleCompanyLoginSuccess = (config: CompanyConfig) => {
