@@ -897,6 +897,9 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
 
         // 3. Obtener todos los agentes con preferencias
         const agents = await base('Agents').select().all();
+        const allAgentNames = agents
+            .map(a => (a.get('name') as string) || '')
+            .filter(n => n);
         const recipients: string[] = [];
 
         for (const agent of agents) {
@@ -914,6 +917,15 @@ async function getNotificationRecipients(contactPhone: string): Promise<string[]
             else if (department && prefs.departments?.includes(department)) {
                 recipients.push(agentName);
             }
+        }
+
+        // FALLBACK CRÍTICO: si HAY departamento pero NADIE en el equipo lo tiene
+        // en sus preferencias, antes devolvíamos [] (silencio total — nadie se
+        // entera del chat). Ahora hacemos broadcast a todo el equipo para que
+        // al menos alguien lo vea. Mejor sobre-notificar que perder el cliente.
+        if (recipients.length === 0 && department && department.trim() !== '') {
+            console.warn(`📱 [FCM] Sin agentes con depto "${department}" en preferencias → broadcast a todo el equipo (${allAgentNames.length} usuarios)`);
+            return allAgentNames;
         }
 
         console.log(`📱 [FCM] Recipients para ${clean}: [${recipients.join(', ')}]`);
@@ -2208,16 +2220,21 @@ async function saveAndEmitMessage(msg: any) {
             tag: `cliente-${finalSender}${accountId ? '-' + accountId.slice(-4) : ''}`
         };
 
-        // ENVIAR A TODOS (Broadcast) para asegurar que llegue mientras depuramos
-        broadcastPushNotification(webPushPayload);
-
-        // También enviar a específicos si los hay (por si acaso hay lógica de filtrado futura)
+        // WebPush con MISMO filtrado que FCM (antes hacía broadcast a TODOS los
+        // suscritos, incluso a usuarios que no tenían nada que ver con el chat).
+        // Si tenemos recipients concretos → mandar solo a ellos.
+        // Si recipients viene vacío (raro, todos los fallbacks ya activos en
+        // getNotificationRecipients), hacemos broadcast como red de seguridad
+        // para no perder mensajes.
         if (recipients && recipients.length > 0) {
             recipients.forEach(username => {
-                if (username !== 'unknown') {
+                if (username && username !== 'unknown') {
                     sendPushNotification(username, webPushPayload);
                 }
             });
+        } else {
+            console.warn(`📲 [WebPush] Sin recipients concretos para ${finalSender} → broadcast como fallback`);
+            broadcastPushNotification(webPushPayload);
         }
     }
 
@@ -3204,6 +3221,17 @@ async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' |
             source
         });
 
+        // CRÍTICO: cancelar los recordatorios cita_24h / cita_1h pendientes
+        // asociados a este cliente. Sin esto, el cliente recibe el recordatorio
+        // de una cita que ya canceló (efecto "recordatorio fantasma"). Antes
+        // solo se hacía cuando el propio cliente respondía "no" al recordatorio
+        // — ahora también cuando cancela Laura por tool o un trabajador por PUT.
+        try {
+            await cancelPendingCitaReminders(clean);
+        } catch (remErr: any) {
+            console.warn(`[Cancel] Error cancelando recordatorios pendientes:`, remErr?.message);
+        }
+
         return `✅ CITA_CANCELADA: ${humanDate}`;
     } catch (e: any) {
         console.error(`❌ [Cancel] Error:`, e.message);
@@ -3381,11 +3409,40 @@ async function assignDepartment(clientPhone: string, department: string) {
         const clean = cleanNumber(clientPhone);
         const contacts = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'` }).firstPage();
         if (contacts.length > 0) {
-            await base('Contacts').update([{ id: contacts[0].id, fields: { "department": department, "status": "Abierto" } }]);
+            // Intentar elegir un agente concreto del departamento para rellenar
+            // assigned_to. Sin esto, getNotificationRecipients no encontraba un
+            // destinatario claro y las notificaciones FCM individuales se
+            // perdían. Si no hay agentes con ese departamento en sus
+            // preferencias, dejamos assigned_to vacío (el fallback de
+            // getNotificationRecipients hará broadcast a todo el equipo).
+            let pickedAgent = '';
+            try {
+                const agents = await base('Agents').select().all();
+                const candidates = agents.filter(a => {
+                    const prefsStr = a.get('Preferences') as string;
+                    const prefs = prefsStr ? JSON.parse(prefsStr) : {};
+                    return Array.isArray(prefs.departments) && prefs.departments.includes(department);
+                });
+                if (candidates.length > 0) {
+                    // Round-robin simple por timestamp: el que tenga el último
+                    // mensaje saliente MÁS ANTIGUO recibe el chat (reparte la carga).
+                    pickedAgent = (candidates[0].get('name') as string) || '';
+                }
+            } catch (pickErr: any) {
+                console.warn('[AssignDept] Error eligiendo agente para departamento:', pickErr?.message);
+            }
+
+            const fields: any = { "department": department, "status": "Abierto" };
+            if (pickedAgent) fields.assigned_to = pickedAgent;
+
+            await base('Contacts').update([{ id: contacts[0].id, fields }]);
             io.emit('contact_updated_notification');
             activeAiChats.delete(clean);
             io.emit('ai_active_change', { phone: clean, active: false });
-            return `Asignado a ${department}.`;
+            console.log(`📨 [AssignDept] ${clean} → depto="${department}"${pickedAgent ? `, asignado a "${pickedAgent}"` : ' (sin agente con ese depto en prefs)'}`);
+            return pickedAgent
+                ? `Asignado a ${department} (${pickedAgent}).`
+                : `Asignado a ${department}.`;
         }
         return "Contacto no encontrado.";
     } catch (e) { return "Error asignando."; }
@@ -4400,6 +4457,8 @@ app.put('/api/appointments/:id', async (req, res) => {
 
         // Cancelación manual desde el calendario (Booked → Available).
         // Notificar al equipo (toast in-app + push móvil + Web Push) + historial.
+        // Y cancelar también los recordatorios pendientes (cita_24h, cita_1h)
+        // para que el cliente NO reciba avisos de una cita que ya está cancelada.
         if (req.body.status === 'Available' && preUpdateStatus === 'Booked') {
             notifyCancelledAppointment({
                 appointmentId: req.params.id,
@@ -4409,6 +4468,10 @@ app.put('/api/appointments/:id', async (req, res) => {
                 agenda: preUpdateAgenda,
                 source: 'manual'
             });
+            if (preUpdateClientPhone) {
+                try { await cancelPendingCitaReminders(preUpdateClientPhone); }
+                catch (remErr: any) { console.warn('[API] Error cancelando recordatorios tras cancel manual:', remErr?.message); }
+            }
         }
 
         res.json({ success: true });
