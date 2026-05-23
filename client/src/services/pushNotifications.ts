@@ -136,6 +136,7 @@ class PushNotificationService {
     // las notificaciones de otro user.
     async unregister(username?: string): Promise<void> {
         const target = username || this.lastUsername;
+        const tokenAtUnregister = this.token; // capturar antes de limpiar
         if (!target) {
             // Sin username conocido, solo limpiamos el estado local
             this.initialized = false;
@@ -144,22 +145,47 @@ class PushNotificationService {
             return;
         }
         try {
-            // Obtener el endpoint actual para que el servidor pueda eliminar
-            // SOLO esa suscripción (no las del mismo usuario en otros devices).
+            // === WEB ===
+            // Obtener el endpoint actual con TIMEOUT para evitar cuelgue
+            // indefinido en browsers viejos sin ServiceWorker activo (en ese
+            // caso `navigator.serviceWorker.ready` no se resuelve nunca).
+            // Sin timeout, el fetch posterior nunca llegaba y el push del
+            // usuario anterior seguía activo.
             let endpoint: string | undefined;
-            try {
-                if (!Capacitor.isNativePlatform() && 'serviceWorker' in navigator) {
-                    const reg = await navigator.serviceWorker.ready;
-                    const sub = await reg.pushManager.getSubscription();
-                    if (sub) endpoint = sub.endpoint;
-                }
-            } catch { /* opcional */ }
+            if (!Capacitor.isNativePlatform() && 'serviceWorker' in navigator) {
+                try {
+                    const swPromise = navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription());
+                    const timeout = new Promise<null>(resolve => setTimeout(() => resolve(null), 1500));
+                    const sub = await Promise.race([swPromise, timeout]);
+                    if (sub && (sub as any).endpoint) endpoint = (sub as any).endpoint;
+                } catch { /* opcional */ }
+            }
 
-            await fetch(`${API_URL}/webpush/unsubscribe`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ username: target, endpoint, token: this.token || undefined })
-            }).catch(e => console.warn('[Push] No se pudo notificar al servidor del logout:', e?.message));
+            // Disparar las dos llamadas en paralelo (no bloqueamos el logout):
+            //  - /webpush/unsubscribe siempre (aunque endpoint sea undefined →
+            //    el server borra todas las del usuario).
+            //  - /push-notifications/unregister SOLO si hay token FCM nativo.
+            //    Esto cubre el bug detectado por QA: en APK Android el token
+            //    FCM seguía mapeado al usuario anterior tras logout, así que
+            //    el siguiente que entrase recibía las notifs del anterior.
+            const calls: Promise<any>[] = [];
+            calls.push(
+                fetch(`${API_URL}/webpush/unsubscribe`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username: target, endpoint, token: tokenAtUnregister || undefined })
+                }).catch(e => console.warn('[Push] webpush unsubscribe falló:', e?.message))
+            );
+            if (Capacitor.isNativePlatform() && tokenAtUnregister) {
+                calls.push(
+                    fetch(`${API_URL}/push-notifications/unregister`, {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ token: tokenAtUnregister })
+                    }).catch(e => console.warn('[Push] FCM unregister falló:', e?.message))
+                );
+            }
+            await Promise.allSettled(calls);
 
             console.log(`🚪 [Push] Sesión del servicio push cerrada para ${target}`);
         } finally {

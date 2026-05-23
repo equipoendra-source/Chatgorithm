@@ -3539,33 +3539,42 @@ async function assignDepartment(clientPhone: string, department: string) {
                     return Array.isArray(prefs.departments) && prefs.departments.includes(department);
                 });
                 if (candidates.length > 0) {
-                    // Reparto entre los agentes del departamento. Antes
-                    // siempre se elegía candidates[0] (el primero del array),
-                    // así que un único agente recibía TODAS las derivaciones.
-                    // Para evitar desbalanceo usamos el agente que lleva más
-                    // tiempo sin recibir una derivación: comparamos su último
-                    // mensaje saliente desde Messages. Si no hay datos,
-                    // fallback a selección aleatoria.
-                    let bestAgent = candidates[0];
-                    let oldestMs = Infinity;
-                    for (const c of candidates) {
-                        const agentName = (c.get('name') as string) || '';
-                        if (!agentName) continue;
-                        try {
-                            const lastMsg = await base('Messages').select({
-                                filterByFormula: `AND({sender}='${escAt(agentName)}', {recipient}!='')`,
-                                sort: [{ field: 'timestamp', direction: 'desc' }],
-                                maxRecords: 1
-                            }).firstPage();
-                            const ts = lastMsg.length > 0 ? (lastMsg[0].get('timestamp') as string) : null;
-                            const tsMs = ts ? new Date(ts).getTime() : 0;
-                            // 0 = nunca respondió → máxima prioridad (recibe el chat)
-                            if (tsMs < oldestMs) { oldestMs = tsMs; bestAgent = c; }
-                        } catch { /* si falla la query, sigue con el siguiente */ }
+                    // Atajo: si solo hay un candidato, no hace falta consultar
+                    // su historial — ese se lleva el chat por descarte.
+                    if (candidates.length === 1) {
+                        pickedAgent = (candidates[0].get('name') as string) || '';
+                    } else {
+                        // Reparto: recopilar tsMs (último mensaje saliente) de
+                        // cada candidato, luego escoger entre los que comparten
+                        // el MÍNIMO con random. Antes candidates[0] siempre
+                        // ganaba cuando todos empataban con 0 (agentes nuevos),
+                        // así que el primero del array se comía todas las
+                        // derivaciones.
+                        const tsByIndex: { c: any, tsMs: number }[] = [];
+                        for (const c of candidates) {
+                            const agentName = (c.get('name') as string) || '';
+                            if (!agentName) continue;
+                            let tsMs = 0;
+                            try {
+                                const lastMsg = await base('Messages').select({
+                                    filterByFormula: `AND({sender}='${escAt(agentName)}', {recipient}!='')`,
+                                    sort: [{ field: 'timestamp', direction: 'desc' }],
+                                    maxRecords: 1
+                                }).firstPage();
+                                const ts = lastMsg.length > 0 ? (lastMsg[0].get('timestamp') as string) : null;
+                                tsMs = ts ? new Date(ts).getTime() : 0;
+                            } catch { /* sigue con el siguiente */ }
+                            tsByIndex.push({ c, tsMs });
+                        }
+                        if (tsByIndex.length > 0) {
+                            const oldestMs = tsByIndex.reduce((m, x) => Math.min(m, x.tsMs), Infinity);
+                            // Candidatos que empatan con el mínimo (mayor prioridad)
+                            const winners = tsByIndex.filter(x => x.tsMs === oldestMs);
+                            const chosen = winners[Math.floor(Math.random() * winners.length)];
+                            pickedAgent = (chosen.c.get('name') as string) || '';
+                        }
                     }
-                    pickedAgent = (bestAgent.get('name') as string) || '';
-                    // Si por algún motivo no resolvimos a uno concreto,
-                    // fallback aleatorio para repartir aunque sea sin datos.
+                    // Fallback aleatorio si por algún motivo no resolvimos
                     if (!pickedAgent) {
                         const random = candidates[Math.floor(Math.random() * candidates.length)];
                         pickedAgent = (random.get('name') as string) || '';
@@ -4575,6 +4584,13 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.field5 !== undefined) f["Notas"] = req.body.field5;
         // Marcar/desmarcar la cita como incidente manualmente desde el popup
         if (req.body.incident !== undefined) f["Incident"] = !!req.body.incident;
+        // Reprogramación: si el frontend envía una nueva fecha, la aceptamos.
+        // Más abajo detectamos si cambió respecto a la anterior y cancelamos
+        // los recordatorios cita_24h/cita_1h pendientes para que el cron los
+        // recree con scheduledFor calculado contra la fecha NUEVA. Sin esto,
+        // el cliente recibe el recordatorio "te recordamos tu cita mañana"
+        // contra la fecha vieja aunque la cita se haya movido.
+        if (req.body.date !== undefined) f["Date"] = req.body.date;
 
         // Antes de aplicar la actualización, leemos el estado actual para detectar
         // si esto es una cancelación manual (Booked → Available). Si lo es,
@@ -4652,6 +4668,20 @@ app.put('/api/appointments/:id', async (req, res) => {
             if (preUpdateClientPhone) {
                 try { await cancelPendingCitaReminders(preUpdateClientPhone); }
                 catch (remErr: any) { console.warn('[API] Error cancelando recordatorios tras cancel manual:', remErr?.message); }
+            }
+        }
+
+        // Reprogramación: si la cita estaba Booked y la fecha cambió, los
+        // recordatorios cita_24h/cita_1h pendientes apuntan a la fecha vieja.
+        // Hay que cancelarlos para que el cron los recree con scheduledFor
+        // calculado contra la nueva fecha. Sin esto, el cliente recibe
+        // "te recordamos tu cita mañana" cuando ya no es mañana.
+        if (req.body.date && preUpdateStatus === 'Booked' && preUpdateClientPhone && preUpdateDate !== req.body.date) {
+            try {
+                await cancelPendingCitaReminders(preUpdateClientPhone);
+                console.log(`📅 [API] Cita ${req.params.id} reprogramada (${preUpdateDate} → ${req.body.date}). Recordatorios cancelados; el cron los recreará.`);
+            } catch (remErr: any) {
+                console.warn('[API] Error cancelando recordatorios tras reprogramación:', remErr?.message);
             }
         }
 
