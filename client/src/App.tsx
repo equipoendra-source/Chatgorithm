@@ -332,6 +332,27 @@ function App() {
         };
         socket.on('chat_assigned', onChatAssigned);
 
+        // Recordatorio interno al equipo de cita inminente (24h o 30min).
+        // Lo recibe TODO el equipo (no es push del cliente), pero solo
+        // mostramos toast al usuario CORRESPONDIENTE: si hay assignedAgent
+        // que coincide conmigo, o si soy del depto cuando no hay agente.
+        const onTeamReminder = (data: any) => {
+            if (!data || !user) return;
+            const me = user.username;
+            const assigned = (data.assignedAgent || '').trim();
+            const dept = (data.department || '').trim();
+            const myPrefs = (user.preferences || {}) as { departments?: string[] };
+            const myDepts = Array.isArray(myPrefs.departments) ? myPrefs.departments : [];
+
+            const isMine = (assigned && assigned === me) || (!assigned && dept && myDepts.includes(dept));
+            if (!isMine) return;
+
+            const titlePrefix = data.lookahead === '30min' ? '⏰ Cita en 30 min' : '📅 Cita mañana';
+            const txt = `${titlePrefix}: ${data.clientName}${data.timeStr ? ` a las ${data.timeStr}` : ''}${dept ? ` · ${dept}` : ''}`;
+            showToast('info', txt);
+        };
+        socket.on('team_appointment_reminder', onTeamReminder);
+
         // Debug
         socket.onAny((event, ...args) => {
             console.log(`🔌 [SOCKET] ${event}`, args.length > 0 ? args : '');
@@ -367,6 +388,7 @@ function App() {
             socket.off('new_appointment', onNewAppointment);
             socket.off('appointment_cancelled', onCancelledAppointment);
             socket.off('chat_assigned', onChatAssigned);
+            socket.off('team_appointment_reminder', onTeamReminder);
         };
     }, [socket, user, companyConfig?.backendUrl]);
 

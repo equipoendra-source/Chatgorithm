@@ -39,6 +39,15 @@ interface ActivityByAccountEntry {
   counts: Record<string, number>;
 }
 interface ActivityEntry { date: string; label: string; count: number; }
+interface ConversionKpis {
+  conversionRate: number;
+  leadsWithBooking: number;
+  totalLeads: number;
+  avgTimeToBookingMin: number | null;
+  reviewResponseRate: number;
+  reviewSentTotal: number;
+  reviewReplied: number;
+}
 
 interface AnalyticsDashboardProps {
   // Filtro inicial heredado del Sidebar (App.tsx) para que abrir Analíticas
@@ -450,6 +459,63 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
           )}
         </div>
       </div>
+
+      {/* KPIs de conversión — funnel desde lead hasta reseña */}
+      {data?.conversion && (
+        <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+          <h3 className={`font-bold mb-4 flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-700'}`}>
+            <TrendingUp size={18} className="text-emerald-500" /> Funnel de conversión
+          </h3>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            {/* Conversión de leads a citas */}
+            <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`} title="Porcentaje de clientes que han escrito al bot y han acabado reservando al menos una cita">
+              <div className={`text-[10px] font-bold uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Conversión Lead → Cita
+              </div>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className={`text-3xl font-bold ${isDark ? 'text-emerald-300' : 'text-emerald-600'}`}>{data.conversion.conversionRate}%</span>
+                <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                  {data.conversion.leadsWithBooking} / {data.conversion.totalLeads}
+                </span>
+              </div>
+              <p className={`text-[11px] mt-2 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                Clientes que escribieron y acabaron reservando
+              </p>
+            </div>
+
+            {/* Tiempo medio hasta reserva */}
+            <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`} title="Tiempo medio desde el primer mensaje del cliente hasta que reservó su primera cita">
+              <div className={`text-[10px] font-bold uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Tiempo medio hasta reserva
+              </div>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className={`text-3xl font-bold ${isDark ? 'text-blue-300' : 'text-blue-600'}`}>
+                  {data.conversion.avgTimeToBookingMin === null ? '—' : formatMinutes(data.conversion.avgTimeToBookingMin)}
+                </span>
+              </div>
+              <p className={`text-[11px] mt-2 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                Desde primer mensaje hasta primera cita
+              </p>
+            </div>
+
+            {/* Tasa de respuesta a reseñas */}
+            <div className={`p-4 rounded-xl border ${isDark ? 'bg-slate-800/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`} title="Porcentaje de clientes que respondieron tras enviarles la plantilla solicitud_resena">
+              <div className={`text-[10px] font-bold uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                Tasa respuesta reseñas
+              </div>
+              <div className="flex items-baseline gap-2 mt-1">
+                <span className={`text-3xl font-bold ${isDark ? 'text-orange-300' : 'text-orange-600'}`}>{data.conversion.reviewResponseRate}%</span>
+                <span className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                  {data.conversion.reviewReplied} / {data.conversion.reviewSentTotal}
+                </span>
+              </div>
+              <p className={`text-[11px] mt-2 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                Clientes que respondieron al pedir reseña
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Resumen por línea — solo cuando multi-cuenta y sin filtro activo */}
       {multiAccount && !selectedAccount && accountStats.length > 0 && (

@@ -2046,6 +2046,39 @@ async function runNotificationScheduler() {
                 });
                 await delay(200);
             }
+
+            // === RECORDATORIOS PARA EL EQUIPO (no llaman a Meta) ===
+            // Avisan al agente asignado (o al depto) de que mañana / en 30 min
+            // tienen una cita con el cliente. Útil para que el trabajador
+            // tenga el día organizado y se acuerde de la cita inminente.
+            // Estos NO usan template WhatsApp — son toast + FCM + WebPush
+            // internos. El "phone" del registro es el del cliente (sirve de
+            // contexto), pero el templateName empieza por __team_ para que
+            // la fase 2 detecte que es interno.
+            const assignedAgent = (contact.length > 0 && contact[0].get('assigned_to') as string) || '';
+            const apptDept = (contact.length > 0 && contact[0].get('department') as string) || '';
+            // T-24h equipo: si la cita es mañana
+            if (hoursUntil <= 26 && hoursUntil >= 1) {
+                const sf24 = new Date(apptDate.getTime() - 24 * 60 * 60 * 1000).toISOString();
+                await scheduleNotification({
+                    type: 'team_cita_24h', phone: clientPhone, appointmentId: appt.id,
+                    templateName: '__team_internal',
+                    variables: JSON.stringify({ clientName, dateStr, timeStr, assignedAgent, department: apptDept, lookahead: '24h' }),
+                    scheduledFor: sf24, originPhoneId: originId
+                });
+                await delay(200);
+            }
+            // T-30m equipo: avisa media hora antes que la cita está al caer
+            if (minutesUntil <= 45 && minutesUntil >= 5) {
+                const sf30m = new Date(apptDate.getTime() - 30 * 60 * 1000).toISOString();
+                await scheduleNotification({
+                    type: 'team_cita_30m', phone: clientPhone, appointmentId: appt.id,
+                    templateName: '__team_internal',
+                    variables: JSON.stringify({ clientName, dateStr, timeStr, assignedAgent, department: apptDept, lookahead: '30min' }),
+                    scheduledFor: sf30m, originPhoneId: originId
+                });
+                await delay(200);
+            }
         }
 
         // ============================================
@@ -2063,10 +2096,60 @@ async function runNotificationScheduler() {
 
         for (const notif of duePending) {
             const phone = cleanNumber(notif.get('phone') as string);
+            const notifType = (notif.get('type') as string) || '';
             const templateName = notif.get('templateName') as string;
-            const variables: string[] = JSON.parse((notif.get('variables') as string) || '[]');
+            const variablesRaw = (notif.get('variables') as string) || '[]';
             const originId = (notif.get('origin_phone_id') as string) || waPhoneId || 'default';
             const retryCount = (notif.get('retryCount') as number) || 0;
+
+            // RECORDATORIOS DEL EQUIPO (internos): toast + FCM + WebPush al
+            // agente o depto. No tocan Meta. Si fallan, log y marcar sent
+            // igual (no tiene sentido reintentar una notif interna 3 veces).
+            if (notifType.startsWith('team_')) {
+                try {
+                    const data = JSON.parse(variablesRaw);
+                    const lookahead = data.lookahead || '24h';
+                    const titlePrefix = lookahead === '30min' ? '⏰ Cita en 30min' : '📅 Mañana: cita';
+                    const body = `${data.clientName || 'Cliente'} — ${data.dateStr || ''} ${data.timeStr || ''}`;
+                    // Emitir socket — frontend lo recoge como toast
+                    io.emit('team_appointment_reminder', {
+                        appointmentId: notif.get('appointmentId') as string,
+                        clientPhone: phone,
+                        clientName: data.clientName,
+                        dateStr: data.dateStr,
+                        timeStr: data.timeStr,
+                        assignedAgent: data.assignedAgent || '',
+                        department: data.department || '',
+                        lookahead,
+                        title: titlePrefix,
+                        body
+                    });
+                    // FCM + WebPush al agente asignado (o broadcast si no hay)
+                    if (data.assignedAgent) {
+                        sendFCMNotification({ title: titlePrefix, body, data: { type: 'team_reminder', clientPhone: phone, appointmentId: notif.get('appointmentId') as string } }, [data.assignedAgent]);
+                        sendPushNotification(data.assignedAgent, { title: titlePrefix, body, icon: '/logo.png', url: `/?phone=${phone}`, phone, tag: `team-reminder-${phone}` });
+                    } else {
+                        // Sin agente concreto → broadcast al equipo
+                        sendFCMNotification({ title: titlePrefix, body, data: { type: 'team_reminder', clientPhone: phone, appointmentId: notif.get('appointmentId') as string } });
+                        broadcastPushNotification({ title: titlePrefix, body, icon: '/logo.png', url: `/?phone=${phone}`, phone, tag: `team-reminder-${phone}` });
+                    }
+                    await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
+                        id: notif.id, fields: { status: 'sent', sentAt: new Date().toISOString() }
+                    }]);
+                    console.log(`📅 [TeamReminder] Enviado a ${data.assignedAgent || '(equipo)'} para cita de ${data.clientName}`);
+                } catch (teamErr: any) {
+                    console.error('[TeamReminder] Error:', teamErr?.message);
+                    // Marcar como failed sin reintentos (es interno, no crítico)
+                    await base(TABLE_SCHEDULED_NOTIFICATIONS).update([{
+                        id: notif.id, fields: { status: 'failed', error: `Team reminder error: ${teamErr?.message || 'unknown'}`.slice(0, 500) }
+                    }]).catch(() => {});
+                }
+                await delay(200);
+                continue; // siguiente notificación
+            }
+
+            // RECORDATORIOS AL CLIENTE (template WhatsApp via Meta)
+            const variables: string[] = JSON.parse(variablesRaw);
 
             // Verificar opt-out antes de enviar
             const contactCheck = await base('Contacts').select({
@@ -5523,10 +5606,120 @@ app.get('/api/analytics', async (req, res) => {
             agents: agentPerformance,
             statuses: statusDistribution,
             incidents: incidentStats,
-            accounts: accountsArr
+            accounts: accountsArr,
+            conversion: computeConversionKpis(contacts, messages, allAppts)
         });
     } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }
 });
+
+// =========================================================================
+// KPIs DE CONVERSIÓN
+// =========================================================================
+// Tres métricas que ayudan a medir el funnel del negocio:
+//  - conversionRate: % de leads (contactos status='Nuevo' o 'Cerrado')
+//    que acabaron con al menos una cita reservada.
+//  - reviewResponseRate: % de clientes a los que se les envió la plantilla
+//    `solicitud_resena` y que respondieron (al menos un mensaje suyo
+//    posterior al envío).
+//  - avgTimeToBookingMin: tiempo medio desde el PRIMER mensaje del cliente
+//    hasta su PRIMERA cita reservada (calculado contra appointment.Date).
+function computeConversionKpis(contacts: readonly any[], messages: readonly any[], appts: readonly any[]) {
+    const phoneRegex = /^[+]?[0-9]{8,}$/;
+    // Indexar primer mensaje INBOUND por cliente
+    const firstInboundByPhone: Record<string, number> = {};
+    messages.forEach(m => {
+        const sender = (m.get('sender') as string) || '';
+        if (!phoneRegex.test(sender)) return; // solo inbound
+        const ts = (m.get('timestamp') as string) || '';
+        const tsMs = ts ? new Date(ts).getTime() : 0;
+        if (!tsMs || Number.isNaN(tsMs)) return;
+        const phone = cleanNumber(sender);
+        if (!phone) return;
+        if (!firstInboundByPhone[phone] || tsMs < firstInboundByPhone[phone]) {
+            firstInboundByPhone[phone] = tsMs;
+        }
+    });
+
+    // Indexar primera cita Booked por phone
+    const firstBookingByPhone: Record<string, number> = {};
+    appts.forEach(a => {
+        if (a.get('Status') !== 'Booked') return;
+        const cp = cleanNumber((a.get('ClientPhone') as string) || '');
+        if (!cp) return;
+        const dateStr = a.get('Date') as string;
+        const dMs = dateStr ? new Date(dateStr).getTime() : 0;
+        if (!dMs || Number.isNaN(dMs)) return;
+        // Comparar por últimos 9 dígitos para tolerar prefijos
+        const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
+        if (!firstBookingByPhone[last9] || dMs < firstBookingByPhone[last9]) {
+            firstBookingByPhone[last9] = dMs;
+        }
+    });
+
+    // Conversion rate: cuántos clientes tienen primer inbound Y al menos
+    // una cita Booked
+    const leadsWithBooking = Object.keys(firstInboundByPhone).filter(p => {
+        const last9 = p.length >= 9 ? p.slice(-9) : p;
+        return !!firstBookingByPhone[last9];
+    }).length;
+    const totalLeads = Object.keys(firstInboundByPhone).length;
+    const conversionRate = totalLeads > 0 ? Math.round((leadsWithBooking / totalLeads) * 100) : 0;
+
+    // Tiempo medio hasta primera cita (en minutos). Solo cuenta cuando el
+    // booking ocurrió DESPUÉS del primer inbound (caso normal). Limitamos a
+    // citas reservadas hasta 30 días después del primer mensaje para evitar
+    // outliers (clientes que volvieron meses después).
+    const tiempos: number[] = [];
+    Object.entries(firstInboundByPhone).forEach(([phone, inboundMs]) => {
+        const last9 = phone.length >= 9 ? phone.slice(-9) : phone;
+        const bookMs = firstBookingByPhone[last9];
+        if (!bookMs) return;
+        const dt = (bookMs - inboundMs) / 60000; // min
+        if (dt > 0 && dt <= 60 * 24 * 30) tiempos.push(dt);
+    });
+    const avgTimeToBookingMin = tiempos.length > 0
+        ? Math.round(tiempos.reduce((s, t) => s + t, 0) / tiempos.length)
+        : null;
+
+    // Tasa de respuesta a reseñas: por cada mensaje saliente con
+    // texto que contiene '📝 [Plantilla] solicitud_resena', vemos si
+    // hubo respuesta inbound posterior.
+    const reviewSent: Record<string, number> = {}; // phone → timestamp del envío
+    messages.forEach(m => {
+        const text = ((m.get('text') as string) || '').toLowerCase();
+        if (!text.includes('solicitud_resena')) return;
+        const recipient = cleanNumber((m.get('recipient') as string) || '');
+        const ts = (m.get('timestamp') as string) || '';
+        const tsMs = ts ? new Date(ts).getTime() : 0;
+        if (recipient && tsMs) {
+            if (!reviewSent[recipient] || tsMs > reviewSent[recipient]) reviewSent[recipient] = tsMs;
+        }
+    });
+    let reviewReplied = 0;
+    Object.entries(reviewSent).forEach(([phone, sentMs]) => {
+        // Buscar mensaje inbound del cliente con timestamp > sentMs
+        const replied = messages.some(m => {
+            const sender = cleanNumber((m.get('sender') as string) || '');
+            if (sender !== phone) return false;
+            const ts = (m.get('timestamp') as string) || '';
+            const tsMs = ts ? new Date(ts).getTime() : 0;
+            return tsMs > sentMs;
+        });
+        if (replied) reviewReplied++;
+    });
+    const reviewSentTotal = Object.keys(reviewSent).length;
+    const reviewResponseRate = reviewSentTotal > 0 ? Math.round((reviewReplied / reviewSentTotal) * 100) : 0;
+
+    return {
+        conversionRate,        // %
+        leadsWithBooking,
+        totalLeads,
+        avgTimeToBookingMin,   // null si no hay datos
+        reviewResponseRate,    // %
+        reviewSentTotal,
+        reviewReplied
+    };
+}
 
 app.get('/api/media/:id', async (req, res) => { if (!waToken) return res.sendStatus(500); try { const urlRes = await axios.get(`https://graph.facebook.com/v21.0/${req.params.id}`, { headers: { 'Authorization': `Bearer ${waToken}` } }); const mediaRes = await axios.get(urlRes.data.url, { headers: { 'Authorization': `Bearer ${waToken}` }, responseType: 'stream' }); res.setHeader('Content-Type', mediaRes.headers['content-type']); mediaRes.data.pipe(res); } catch (e) { res.sendStatus(404); } });
 // Función para convertir audio WebM a OGG Opus usando FFmpeg
