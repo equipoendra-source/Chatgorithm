@@ -1,9 +1,36 @@
+// ⚠️ SENTRY DEBE INICIALIZARSE LO PRIMERO DE TODO para que pueda capturar
+// errores ocurridos durante el resto del bootstrap. Se activa solo si la
+// variable de entorno SENTRY_DSN está definida (en Render → Environment).
+// Si no está, no se inicializa y la app funciona normal sin Sentry.
+import * as Sentry from '@sentry/node';
+import dotenv from 'dotenv';
+dotenv.config();
+const SENTRY_DSN = process.env.SENTRY_DSN;
+if (SENTRY_DSN) {
+    Sentry.init({
+        dsn: SENTRY_DSN,
+        environment: process.env.NODE_ENV || 'production',
+        tracesSampleRate: 0.1,              // 10% de las requests trazadas (rendimiento)
+        sendDefaultPii: false,              // NO mandar IPs ni headers de usuario por privacidad
+        beforeSend(event) {
+            // Filtrar errores irrelevantes (timeouts esperados, rate limits Meta, etc.)
+            const msg = event.message || event.exception?.values?.[0]?.value || '';
+            if (typeof msg === 'string' && (
+                msg.includes('RATE_LIMIT') ||
+                msg.includes('aborted') ||
+                msg.includes('TIMEOUT_HANDLED')
+            )) return null;
+            return event;
+        }
+    });
+    console.log('🔍 [Sentry] Inicializado para el entorno:', process.env.NODE_ENV || 'production');
+}
+
 import express from 'express';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
 import Airtable from 'airtable';
-import dotenv from 'dotenv';
 import axios from 'axios';
 import multer from 'multer';
 import FormData from 'form-data';
@@ -28,7 +55,7 @@ const VoiceGrant = AccessToken.VoiceGrant;
 const MODEL_NAME = "gemini-2.5-flash";
 
 console.log(`🚀 [BOOT] Arrancando servidor MAESTRO (Gemini ${MODEL_NAME} + Fix Recipient)...`);
-dotenv.config();
+// dotenv.config() ya se llamó arriba (junto a Sentry.init). No re-importar.
 
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
@@ -9156,5 +9183,27 @@ app.get('/api/audit/response-times', async (req, res) => {
 // Lanzar el scheduler de campañas en intervalos y al arrancar
 setInterval(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error periódico:', e.message)), 300000); // cada 5 min
 setTimeout(() => runCampaignScheduler().catch(e => console.error('[CampaignScheduler] Error inicial:', e.message)), 45000); // a los 45s del arranque
+
+// Error handler de Sentry — DEBE ir DESPUÉS de todos los app.use/app.get/...
+// pero ANTES de app.listen. Captura cualquier error no manejado que se
+// propague por la cadena de middlewares de Express y lo envía a Sentry.
+// No-op si Sentry no está inicializado (no se llamó a Sentry.init).
+if (SENTRY_DSN) {
+    Sentry.setupExpressErrorHandler(app);
+    console.log('🔍 [Sentry] Error handler de Express activado');
+}
+
+// Process-level safety nets: capturar promesas no manejadas y excepciones
+// no capturadas. Sentry las recoge automáticamente con su init, pero
+// también queremos un log explícito para depuración local.
+process.on('unhandledRejection', (reason: any, promise) => {
+    console.error('🚨 [unhandledRejection]', reason);
+    if (SENTRY_DSN) Sentry.captureException(reason instanceof Error ? reason : new Error(String(reason)));
+});
+process.on('uncaughtException', (err: any) => {
+    console.error('🚨 [uncaughtException]', err);
+    if (SENTRY_DSN) Sentry.captureException(err);
+    // No matamos el proceso — Render reiniciaría el servidor.
+});
 
 httpServer.listen(PORT, () => { console.log(`🚀 Servidor Listo ${PORT}`); });
