@@ -17,6 +17,8 @@ import BotKnowledgeManager from './BotKnowledgeManager';
 // @ts-ignore
 import AnalyticsDashboard from './AnalyticsDashboard';
 // @ts-ignore
+import AuditLogView from './AuditLogView';
+// @ts-ignore
 import CalendarDashboard from './CalendarDashboard';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
@@ -46,7 +48,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const { showToast } = useToast();
 
     // Non-admins default to notifications tab
-    const [activeTab, setActiveTab] = useState<'team' | 'config' | 'whatsapp' | 'quick_replies' | 'analytics' | 'agenda' | 'bot_config' | 'notifications' | 'data' | 'appearance'>(isAdmin ? 'analytics' : 'notifications');
+    const [activeTab, setActiveTab] = useState<'team' | 'config' | 'whatsapp' | 'quick_replies' | 'analytics' | 'audit' | 'agenda' | 'bot_config' | 'notifications' | 'data' | 'appearance'>(isAdmin ? 'analytics' : 'notifications');
 
     // Estados de Datos
     const [agents, setAgents] = useState<Agent[]>([]);
@@ -462,6 +464,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             case 'whatsapp': return 'Plantillas WhatsApp';
             case 'quick_replies': return 'Respuestas Rápidas';
             case 'analytics': return 'Analíticas';
+            case 'audit': return 'Auditoría';
             case 'agenda': return 'Agenda';
             case 'bot_config': return 'Configuración IA';
             case 'notifications': return 'Notificaciones';
@@ -504,6 +507,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                             <div className="h-px bg-slate-100 my-2"></div>
                             <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wider px-2 pt-2">Administración</p>
                             <button id="settings-analytics-tab" onClick={() => handleTabClick('analytics')} className={`w-full flex items-center gap-3 p-4 rounded-xl text-sm font-bold transition-all active:scale-95 ${activeTab === 'analytics' ? (isDark ? 'bg-indigo-500/20 text-indigo-400 shadow-sm' : 'bg-indigo-50 text-indigo-600 shadow-sm') : (isDark ? 'text-slate-400 hover:bg-slate-700 border border-transparent' : 'text-slate-500 hover:bg-slate-50 border border-transparent hover:border-slate-100')}`}><BarChart3 className="w-5 h-5" /> Analíticas</button>
+                            <button id="settings-audit-tab" onClick={() => handleTabClick('audit')} className={`w-full flex items-center gap-3 p-4 rounded-xl text-sm font-bold transition-all active:scale-95 ${activeTab === 'audit' ? (isDark ? 'bg-rose-500/20 text-rose-400 shadow-sm' : 'bg-rose-50 text-rose-600 shadow-sm') : (isDark ? 'text-slate-400 hover:bg-slate-700 border border-transparent' : 'text-slate-500 hover:bg-slate-50 border border-transparent hover:border-slate-100')}`}><Clock className="w-5 h-5" /> Auditoría</button>
                             <button id="settings-calendar-tab" onClick={() => handleTabClick('agenda')} className={`w-full flex items-center gap-3 p-4 rounded-xl text-sm font-bold transition-all active:scale-95 ${activeTab === 'agenda' ? (isDark ? 'bg-purple-500/20 text-purple-400 shadow-sm' : 'bg-purple-50 text-purple-600 shadow-sm') : (isDark ? 'text-slate-400 hover:bg-slate-700 border border-transparent' : 'text-slate-500 hover:bg-slate-50 border border-transparent hover:border-slate-100')}`}><Calendar className="w-5 h-5" /> Agenda</button>
                             <button id="settings-import-tab" onClick={() => handleTabClick('data')} className={`w-full flex items-center gap-3 p-4 rounded-xl text-sm font-bold transition-all active:scale-95 ${activeTab === 'data' ? (isDark ? 'bg-emerald-500/20 text-emerald-400 shadow-sm' : 'bg-emerald-50 text-emerald-600 shadow-sm') : (isDark ? 'text-slate-400 hover:bg-slate-700 border border-transparent' : 'text-slate-500 hover:bg-slate-50 border border-transparent hover:border-slate-100')}`}><Database className="w-5 h-5" /> Datos e Importación</button>
                             <div className="h-px bg-slate-100 my-2"></div>
@@ -607,6 +611,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                     {/* OTROS COMPONENTES */}
                     {activeTab === 'whatsapp' && <WhatsAppTemplatesManager />}
                     {activeTab === 'analytics' && <AnalyticsDashboard initialAccountId={selectedAccountId} />}
+                    {activeTab === 'audit' && <AuditLogView />}
                     {activeTab === 'agenda' && <CalendarDashboard />}
                     {activeTab === 'bot_config' && (
                         <div className="max-w-4xl mx-auto space-y-6">

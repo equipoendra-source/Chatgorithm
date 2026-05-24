@@ -381,6 +381,7 @@ const TABLE_CAMPAIGNS = 'Campaigns';
 const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
 const TABLE_VEHICLES = 'Vehicles'; // Vehículos/items registrados por cliente (multi-coche)
 const TABLE_APPOINTMENT_EVENTS = 'AppointmentEvents'; // Historial de reservas y cancelaciones (auditoría)
+const TABLE_AUDIT_LOG = 'AuditLog'; // Audit log: quién hizo qué cambio en cuándo (admin/agente)
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 // BUSINESS_ACCOUNTS: phoneId → token. Se puebla desde la tabla WhatsAppAccounts
@@ -1426,6 +1427,62 @@ async function logAppointmentEvent(data: {
             }
         } else {
             console.error('[AppointmentEvents] Error registrando evento:', e.message);
+        }
+    }
+}
+
+// =========================================================================
+// AUDIT LOG — registro de acciones administrativas
+// =========================================================================
+// Quién hizo qué cambio en qué momento. Útil para depurar incidencias:
+// "¿por qué la cita de Pedro está cancelada si yo no la toqué?" → mira el
+// audit log y ves qué usuario y desde qué interfaz la cambió.
+// Best-effort: si la tabla no existe en Airtable, log a consola y seguimos.
+type AuditAction =
+    | 'appointment.create' | 'appointment.update' | 'appointment.cancel' | 'appointment.delete'
+    | 'contact.assign' | 'contact.unassign' | 'contact.status_change' | 'contact.update'
+    | 'bot.toggle' | 'bot.config_update'
+    | 'template.create' | 'template.delete'
+    | 'campaign.create' | 'campaign.update' | 'campaign.delete' | 'campaign.send'
+    | 'agent.create' | 'agent.delete' | 'agent.update';
+
+let _auditLogTableMissingWarned = false;
+async function logAudit(entry: {
+    action: AuditAction;
+    user: string;                              // 'system' / 'bot' / username del agente
+    targetType: 'appointment' | 'contact' | 'bot' | 'template' | 'campaign' | 'agent';
+    targetId?: string;                         // id de Airtable o phone si es contact
+    targetName?: string;                       // nombre legible (cliente, plantilla...)
+    summary: string;                           // descripción humana ("Cancelada cita 15/06 12:00")
+    changes?: Record<string, { from?: any; to?: any }>; // diff opcional
+    origin?: 'web' | 'api' | 'bot' | 'whatsapp' | 'scheduler';
+}): Promise<void> {
+    const createdAt = new Date().toISOString();
+    // Log siempre en consola para tener trazabilidad incluso si Airtable falla
+    console.log(`📜 [Audit] ${entry.user} · ${entry.action} · ${entry.summary}`);
+    if (!base) return;
+    try {
+        await base(TABLE_AUDIT_LOG).create([{
+            fields: {
+                action: entry.action,
+                user: entry.user || 'system',
+                targetType: entry.targetType,
+                targetId: entry.targetId || '',
+                targetName: entry.targetName || '',
+                summary: entry.summary,
+                changes: entry.changes ? JSON.stringify(entry.changes) : '',
+                origin: entry.origin || 'api',
+                createdAt
+            }
+        }]);
+    } catch (e: any) {
+        if (/could not find|unknown.*table|table.*not found/i.test(e.message || '')) {
+            if (!_auditLogTableMissingWarned) {
+                console.warn(`⚠️ [Audit] La tabla "${TABLE_AUDIT_LOG}" no existe en Airtable. Créala con campos: action (single line), user (single line), targetType (single line), targetId (single line), targetName (single line), summary (long text), changes (long text), origin (single line), createdAt (date+time). El audit log queda en consola hasta que se cree.`);
+                _auditLogTableMissingWarned = true;
+            }
+        } else {
+            console.error('[Audit] Error guardando entry:', e.message);
         }
     }
 }
@@ -4727,6 +4784,25 @@ app.put('/api/appointments/:id', async (req, res) => {
             }
         }
 
+        // Audit log: registrar la acción para trazabilidad. El usuario viene
+        // en req.body.actorUsername (que el frontend ya rellena desde user.username).
+        try {
+            const actor = String(req.body.actorUsername || 'system');
+            const isCancel = req.body.status === 'Available' && preUpdateStatus === 'Booked';
+            const isBook = req.body.status === 'Booked' && preUpdateStatus !== 'Booked';
+            const isReschedule = req.body.date && preUpdateDate && preUpdateDate !== req.body.date;
+            let action: AuditAction = 'appointment.update';
+            let summary = `Actualizada cita ${req.params.id}`;
+            if (isCancel) { action = 'appointment.cancel'; summary = `Cancelada cita de ${preUpdateClientName || preUpdateClientPhone || '?'}`; }
+            else if (isBook) { action = 'appointment.create'; summary = `Reservada cita para ${req.body.clientName || preUpdateClientName || '?'}`; }
+            else if (isReschedule) { summary = `Reprogramada cita de ${preUpdateClientName || preUpdateClientPhone || '?'} (${preUpdateDate} → ${req.body.date})`; }
+            logAudit({
+                action, user: actor, targetType: 'appointment', targetId: req.params.id,
+                targetName: preUpdateClientName || (req.body.clientName as string) || '',
+                summary, changes: f, origin: 'web'
+            }).catch(() => {});
+        } catch (_) { /* nunca bloquear por audit */ }
+
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
 });
@@ -4762,6 +4838,16 @@ app.delete('/api/appointments/:id', async (req, res) => {
         } catch (emitErr: any) {
             console.warn('[API] Error emitiendo appointment_changed tras DELETE:', emitErr?.message);
         }
+
+        // Audit log
+        try {
+            const actor = String((req.body && req.body.actorUsername) || (req.query.actorUsername as string) || 'system');
+            logAudit({
+                action: 'appointment.delete', user: actor, targetType: 'appointment', targetId: req.params.id,
+                summary: `Borrada cita ${req.params.id}${preClientPhone ? ' (cliente ' + preClientPhone + ')' : ''}`,
+                origin: 'web'
+            }).catch(() => {});
+        } catch (_) { /* never block on audit */ }
 
         res.json({ success: true });
     } catch (e: any) {
@@ -4799,6 +4885,118 @@ app.get('/api/appointment-events', async (req, res) => {
         }
         console.error('[API] Error GET /appointment-events:', e.message);
         res.status(500).json({ error: 'Error obteniendo historial' });
+    }
+});
+
+// BÚSQUEDA GLOBAL — busca q en Contacts (name/phone/notes) y Messages (text).
+// Devuelve resultados agrupados por contacto. limit por defecto 50 contactos.
+app.get('/api/search', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    const q = String(req.query.q || '').trim();
+    if (!q || q.length < 2) return res.json({ contacts: [], messages: [], warning: 'Escribe al menos 2 caracteres' });
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit) || 50));
+    const safeQ = escAt(q.toLowerCase());
+
+    try {
+        // Buscar contactos por nombre, teléfono o notas
+        const [contactRecords, messageRecords] = await Promise.all([
+            base('Contacts').select({
+                filterByFormula: `OR(FIND('${safeQ}', LOWER({name}&''))>0, FIND('${safeQ}', LOWER({phone}&''))>0, FIND('${safeQ}', LOWER({notes}&''))>0)`,
+                sort: [{ field: 'last_message_time', direction: 'desc' }],
+                maxRecords: limit
+            }).firstPage(),
+            base('Messages').select({
+                filterByFormula: `FIND('${safeQ}', LOWER({text}&''))>0`,
+                sort: [{ field: 'timestamp', direction: 'desc' }],
+                maxRecords: 200 // más mensajes que contactos para captar matches dispersos
+            }).firstPage()
+        ]);
+
+        const contacts = contactRecords.map(r => ({
+            id: r.id,
+            phone: cleanNumber((r.get('phone') as string) || ''),
+            name: (r.get('name') as string) || '',
+            notes: ((r.get('notes') as string) || '').substring(0, 200),
+            status: (r.get('status') as string) || '',
+            assigned_to: (r.get('assigned_to') as string) || '',
+            originPhoneId: (r.get('origin_phone_id') as string) || '',
+            lastMessageTime: (r.get('last_message_time') as string) || ''
+        }));
+
+        // Agrupar mensajes por conversación (sender/recipient phone)
+        const phoneRegex = /^[+]?[0-9]{8,}$/;
+        type MsgHit = { id: string, text: string, sender: string, recipient: string, timestamp: string, phone: string };
+        const messagesGrouped: Record<string, MsgHit[]> = {};
+        messageRecords.forEach(r => {
+            const sender = (r.get('sender') as string) || '';
+            const recipient = (r.get('recipient') as string) || '';
+            const text = (r.get('text') as string) || '';
+            const timestamp = (r.get('timestamp') as string) || '';
+            // Determinar el "phone" del cliente (lo que NO es Bot IA ni trabajador)
+            let clientPhone = '';
+            if (phoneRegex.test(sender)) clientPhone = cleanNumber(sender);
+            else if (phoneRegex.test(recipient)) clientPhone = cleanNumber(recipient);
+            else return; // no podemos agrupar
+            if (!messagesGrouped[clientPhone]) messagesGrouped[clientPhone] = [];
+            // Solo conservamos 3 hits máximo por contacto para no saturar UI
+            if (messagesGrouped[clientPhone].length < 3) {
+                messagesGrouped[clientPhone].push({ id: r.id, text: text.substring(0, 200), sender, recipient, timestamp, phone: clientPhone });
+            }
+        });
+
+        // Construir lista de mensajes-hit por cliente (top 30)
+        const messages = Object.entries(messagesGrouped).slice(0, 30).map(([phone, hits]) => ({
+            phone,
+            hitCount: hits.length,
+            preview: hits[0],
+            allHits: hits
+        }));
+
+        res.json({ contacts, messages, query: q });
+    } catch (e: any) {
+        console.error('[Search] Error:', e.message);
+        res.status(500).json({ error: 'Error en búsqueda' });
+    }
+});
+
+// AUDIT LOG — historial de cambios administrativos
+// Filtros disponibles: action, targetType, user, limit. Si no se pasan,
+// devuelve los últimos 100 eventos ordenados por createdAt DESC.
+app.get('/api/audit-log', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    try {
+        const limit = Math.min(500, Math.max(1, Number(req.query.limit) || 100));
+        const filters: string[] = [];
+        if (req.query.action) filters.push(`{action}='${escAt(String(req.query.action))}'`);
+        if (req.query.targetType) filters.push(`{targetType}='${escAt(String(req.query.targetType))}'`);
+        if (req.query.user) filters.push(`{user}='${escAt(String(req.query.user))}'`);
+        const formula = filters.length > 0 ? `AND(${filters.join(', ')})` : undefined;
+
+        const records = await base(TABLE_AUDIT_LOG).select({
+            sort: [{ field: 'createdAt', direction: 'desc' }],
+            maxRecords: limit,
+            ...(formula ? { filterByFormula: formula } : {})
+        }).firstPage();
+
+        const events = records.map(r => ({
+            id: r.id,
+            action: (r.get('action') as string) || '',
+            user: (r.get('user') as string) || '',
+            targetType: (r.get('targetType') as string) || '',
+            targetId: (r.get('targetId') as string) || '',
+            targetName: (r.get('targetName') as string) || '',
+            summary: (r.get('summary') as string) || '',
+            changes: (r.get('changes') as string) || '',
+            origin: (r.get('origin') as string) || '',
+            createdAt: (r.get('createdAt') as string) || ''
+        }));
+        res.json({ events });
+    } catch (e: any) {
+        if (/could not find|unknown.*table|table.*not found/i.test(e.message || '')) {
+            return res.json({ events: [], warning: `Tabla "${TABLE_AUDIT_LOG}" no existe en Airtable. Créala con campos: action, user, targetType, targetId, targetName, summary (long text), changes (long text), origin, createdAt (date+time).` });
+        }
+        console.error('[API] Error GET /audit-log:', e.message);
+        res.status(500).json({ error: 'Error obteniendo audit log' });
     }
 });
 
@@ -5540,10 +5738,20 @@ app.post('/api/bot/status', async (req, res) => {
         } else {
             await base('BotSettings').create([{ fields: { Setting: 'bot_globally_enabled', Value: valueStr } }]);
         }
+        const oldEnabled = botGloballyEnabled;
         botGloballyEnabled = enabled;
         console.log(`🤖 [Bot] Estado global cambiado a: ${enabled ? 'ACTIVA' : 'DESACTIVADA'}`);
         // Notificar a todos los frontends conectados en tiempo real
         try { io.emit('bot_status_changed', { enabled }); } catch (_) {}
+        // Audit log
+        try {
+            const actor = String(req.body.actorUsername || 'system');
+            logAudit({
+                action: 'bot.toggle', user: actor, targetType: 'bot',
+                summary: `Laura ${enabled ? 'ACTIVADA' : 'DESACTIVADA'} globalmente`,
+                changes: { enabled: { from: oldEnabled, to: enabled } }, origin: 'web'
+            }).catch(() => {});
+        } catch (_) { }
         res.json({ success: true, enabled });
     } catch (e: any) {
         console.error('[Bot status] Error guardando:', e.message);
@@ -5976,8 +6184,8 @@ io.on('connection', (socket) => {
             // su frontend ("tienes un chat asignado"). No emite si el campo
             // estaba ya con el mismo valor (evita ruido en re-asignaciones).
             const newAssignedTo = (data.updates?.assigned_to as string) || '';
+            const clientName = (r[0].get('name') as string) || clean;
             if (newAssignedTo && newAssignedTo !== oldAssignedTo) {
-                const clientName = (r[0].get('name') as string) || clean;
                 io.emit('chat_assigned', {
                     phone: clean,
                     clientName,
@@ -5988,6 +6196,27 @@ io.on('connection', (socket) => {
                 });
                 console.log(`📨 [Assign] ${clean} asignado manualmente a "${newAssignedTo}"`);
             }
+
+            // Audit log: registrar el cambio de asignación o status para
+            // trazabilidad ("quién asignó este chat a Pedro").
+            try {
+                const actor = String(data.actorUsername || socket.data?.username || 'system');
+                if (newAssignedTo && newAssignedTo !== oldAssignedTo) {
+                    logAudit({
+                        action: 'contact.assign', user: actor, targetType: 'contact', targetId: clean, targetName: clientName,
+                        summary: `Asignó ${clientName} a "${newAssignedTo}"${oldAssignedTo ? ` (antes "${oldAssignedTo}")` : ''}`,
+                        changes: { assigned_to: { from: oldAssignedTo, to: newAssignedTo } }, origin: 'web'
+                    }).catch(() => {});
+                }
+                const newStatus = (data.updates?.status as string) || '';
+                if (newStatus && newStatus !== oldStatus) {
+                    logAudit({
+                        action: 'contact.status_change', user: actor, targetType: 'contact', targetId: clean, targetName: clientName,
+                        summary: `Status de ${clientName}: "${oldStatus}" → "${newStatus}"`,
+                        changes: { status: { from: oldStatus, to: newStatus } }, origin: 'web'
+                    }).catch(() => {});
+                }
+            } catch (_) { /* never block on audit */ }
 
             // Efectos secundarios del cambio de estado (secuencia postventa)
             await handleContactStatusChange(r[0], oldStatus, data.updates.status, clean);

@@ -5,7 +5,7 @@ import { CompanyLogin } from './components/CompanyLogin';
 import { ChatWindow } from './components/ChatWindow';
 import { Sidebar, Contact } from './components/Sidebar';
 import { Settings } from './components/Settings';
-import { MessageCircle, LogOut, Settings as SettingsIcon, WifiOff, ArrowLeft, Building2 } from 'lucide-react';
+import { MessageCircle, LogOut, Settings as SettingsIcon, WifiOff, ArrowLeft, Building2, Search } from 'lucide-react';
 import ChatTemplateSelector from './components/ChatTemplateSelector';
 // @ts-ignore
 import CalendarDashboard from './components/CalendarDashboard';
@@ -22,6 +22,7 @@ import { ThemeSelectionModal } from './components/ThemeSelectionModal';
 import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
 import { AlertCenter } from './components/AlertCenter';
 import { AppointmentToast, AppointmentNotification } from './components/AppointmentToast';
+import GlobalSearch from './components/GlobalSearch';
 
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -101,6 +102,33 @@ function App() {
 
     // PRODUCT TOUR STATE
     const [showThemeModal, setShowThemeModal] = useState(false);
+
+    // Modal de búsqueda global (Ctrl+K / Cmd+K). Listener global del teclado.
+    const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+                e.preventDefault();
+                setShowGlobalSearch(prev => !prev);
+            }
+        };
+        window.addEventListener('keydown', onKey);
+        return () => window.removeEventListener('keydown', onKey);
+    }, []);
+
+    // Handler para abrir un chat desde el resultado de búsqueda
+    const handleSearchSelectContact = (phone: string) => {
+        // Buscamos el contacto en memoria. Si no existe, creamos uno mínimo
+        // para que ChatWindow pueda renderizar y cargar el historial.
+        const cleanPhone = phone.replace(/\D/g, '');
+        const stubContact: Contact = {
+            id: cleanPhone,
+            phone: cleanPhone,
+            name: ''
+        };
+        setSelectedContact(stubContact);
+        setView('chat');
+    };
 
 
 
@@ -508,6 +536,13 @@ function App() {
     // Toast de nuevas citas — reutilizable en TODAS las vistas (chat, calendario, settings, etc).
     // Antes solo se renderizaba en la vista chat, así que las reservas hechas desde el calendario
     // emitían el evento pero el toast no estaba montado y no aparecía. Ahora siempre está visible.
+    const globalSearchNode = showGlobalSearch && (
+        <GlobalSearch
+            onSelectContact={handleSearchSelectContact}
+            onClose={() => setShowGlobalSearch(false)}
+        />
+    );
+
     const appointmentToastNode = (
         <AppointmentToast
             notifications={appointmentNotifs}
@@ -525,6 +560,7 @@ function App() {
         <>
             <Settings onBack={() => setView('chat')} socket={socket} currentUserRole={user.role} quickReplies={quickReplies} currentUser={user} updateMyPreferences={updateMyPreferences} selectedAccountId={selectedAccountId} />
             {appointmentToastNode}
+            {globalSearchNode}
         </>
     );
 
@@ -547,6 +583,7 @@ function App() {
                     </div>
                 </div>
                 {appointmentToastNode}
+            {globalSearchNode}
             </div>
         );
     }
@@ -567,6 +604,7 @@ function App() {
                     </div>
                 </div>
                 {appointmentToastNode}
+            {globalSearchNode}
             </div>
         );
     }
@@ -630,6 +668,13 @@ function App() {
                     <div className={`p-4 border-t flex gap-3 z-20 items-center justify-between ${isDark ? 'border-white/5 bg-black/20 backdrop-blur-md' : 'border-slate-200 bg-slate-100'}`}>
                         <button id="tour-settings-btn" onClick={() => setView('settings')} className={`p-2.5 rounded-xl transition-all ${isDark ? 'text-slate-400 hover:text-white hover:bg-white/10' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200'}`} title="Configuración">
                             <SettingsIcon className="w-5 h-5" />
+                        </button>
+                        <button
+                            onClick={() => setShowGlobalSearch(true)}
+                            className={`p-2.5 rounded-xl transition-all ${isDark ? 'text-slate-400 hover:text-white hover:bg-white/10' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200'}`}
+                            title="Buscar (Ctrl+K)"
+                        >
+                            <Search className="w-5 h-5" />
                         </button>
 
                         <div id="tour-user-profile" className={`flex items-center gap-3 px-4 py-2 rounded-xl border flex-1 justify-center ${isDark ? 'bg-white/5 border-white/5' : 'bg-white border-slate-200'}`}>
@@ -700,6 +745,7 @@ function App() {
 
             {/* Toast de nuevas citas (Laura y manual). Al pinchar abre el calendario en el día. */}
             {appointmentToastNode}
+            {globalSearchNode}
 
             {/* THEME SELECTION - STRICT BLOCKING */}
             {showThemeModal && (
