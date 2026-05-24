@@ -498,8 +498,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
                       <Clock size={11} /> Resp. media: <span className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{formatMinutes(acc.avgResponseTimeMin)}</span>
                     </span>
                     {acc.incidents && acc.incidents.total > 0 && (
-                      <span className="flex items-center gap-1" title={`${acc.incidents.count} incidencia(s) sobre ${acc.incidents.total} citas`}>
-                        <Zap size={11} className={isDark ? 'text-amber-400' : 'text-amber-500'} /> Incid.: <span className={`font-bold ${acc.incidents.percentage > 20 ? 'text-amber-500' : (isDark ? 'text-slate-200' : 'text-slate-700')}`}>{acc.incidents.count}<span className="opacity-60"> ({acc.incidents.percentage}%)</span></span>
+                      <span className="flex items-center gap-1" title={`${acc.incidents.count} incidencia(s) sobre ${acc.incidents.total} citas de ${incidents.monthLabel || 'este mes'}`}>
+                        <Zap size={11} className={isDark ? 'text-amber-400' : 'text-amber-500'} /> Incid.{incidents.monthLabel ? ` ${incidents.monthLabel}` : ' (mes)'}: <span className={`font-bold ${acc.incidents.percentage > 20 ? 'text-amber-500' : (isDark ? 'text-slate-200' : 'text-slate-700')}`}>{acc.incidents.count}<span className="opacity-60"> ({acc.incidents.percentage}%)</span></span>
                       </span>
                     )}
                   </div>

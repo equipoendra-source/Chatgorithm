@@ -2505,13 +2505,48 @@ async function generateAgentCard(agentName: string): Promise<string> {
 }
 
 async function sendAgentCardIfNeeded(cleanTo: string, agentName: string, originPhoneId: string, token: string): Promise<void> {
-    const lastAgent = lastAgentPerContact.get(cleanTo);
+    // Cache en memoria primero (rápido). Si no está, consultamos Airtable
+    // (campo last_agent del contacto) para no re-enviar tarjetas tras
+    // reinicio de Render. Si la columna no existe, el getter devuelve
+    // undefined y caemos al comportamiento antiguo (re-envío post-reinicio).
+    let lastAgent = lastAgentPerContact.get(cleanTo);
+    if (lastAgent === undefined && base) {
+        try {
+            const cs = await base('Contacts').select({
+                filterByFormula: `{phone}='${cleanTo}'`, maxRecords: 1
+            }).firstPage();
+            if (cs.length > 0) {
+                const persisted = (cs[0].get('last_agent') as string) || '';
+                if (persisted) {
+                    lastAgent = persisted;
+                    lastAgentPerContact.set(cleanTo, persisted); // calentamos cache
+                }
+            }
+        } catch { /* opcional */ }
+    }
 
     // Mismo agente que antes → no enviar tarjeta
     if (lastAgent === agentName) return;
 
-    // Actualizar tracking
+    // Actualizar tracking en memoria y persistir en Airtable (best-effort).
     lastAgentPerContact.set(cleanTo, agentName);
+    if (base) {
+        try {
+            const cs = await base('Contacts').select({
+                filterByFormula: `{phone}='${cleanTo}'`, maxRecords: 1
+            }).firstPage();
+            if (cs.length > 0) {
+                try {
+                    await base('Contacts').update([{ id: cs[0].id, fields: { last_agent: agentName } }]);
+                } catch (e: any) {
+                    // Si la columna 'last_agent' no existe en Airtable, no rompe.
+                    if (!/unknown field|last_agent/i.test(e?.message || '')) {
+                        console.warn('[AgentCard] No se pudo persistir last_agent:', e?.message);
+                    }
+                }
+            }
+        } catch { /* opcional */ }
+    }
 
     try {
         console.log(`🪪 [AgentCard] Cambio de agente detectado para ${cleanTo}: "${lastAgent || '(ninguno)'}" → "${agentName}"`);
@@ -3359,6 +3394,13 @@ async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' |
 async function cancelPendingCitaReminders(phone: string): Promise<number> {
     if (!base) return 0;
     const clean = cleanNumber(phone);
+    // Guard contra phone vacío: sin esto, el filtro {phone}='' empareja
+    // todas las filas legacy con teléfono vacío en ScheduledNotifications
+    // y cancelaríamos por error recordatorios de otros clientes.
+    if (!clean) {
+        console.warn('[CancelReply] cancelPendingCitaReminders llamado con phone vacío — no-op por seguridad.');
+        return 0;
+    }
     try {
         const pend = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
             filterByFormula: `AND({phone}='${clean}', {status}='pending', FIND('cita', {type})>0)`
