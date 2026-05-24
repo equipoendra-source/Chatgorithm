@@ -116,17 +116,45 @@ function App() {
         return () => window.removeEventListener('keydown', onKey);
     }, []);
 
-    // Handler para abrir un chat desde el resultado de búsqueda
-    const handleSearchSelectContact = (phone: string) => {
-        // Buscamos el contacto en memoria. Si no existe, creamos uno mínimo
-        // para que ChatWindow pueda renderizar y cargar el historial.
-        const cleanPhone = phone.replace(/\D/g, '');
-        const stubContact: Contact = {
-            id: cleanPhone,
+    // Handler para abrir un chat desde el resultado de búsqueda.
+    // El backend (/api/search) y GlobalSearch ahora devuelven el contacto
+    // completo (name, status, assigned_to, department, tags, email, address,
+    // avatar, notes, origin_phone_id) cuando el match viene de la tabla
+    // Contacts. Así, al pinchar un resultado, ChatWindow se abre con TODOS
+    // los datos en lugar de un stub vacío que pisaba la info del CRM.
+    // Si el match viene SÓLO de un mensaje y no existe contacto, GlobalSearch
+    // pasa { phone } y reconstruimos un Contact mínimo para que la vista de
+    // chat pueda renderizar igualmente (el historial se carga por teléfono).
+    const handleSearchSelectContact = (c: {
+        id?: string;
+        phone: string;
+        name?: string;
+        status?: string;
+        assigned_to?: string;
+        department?: string;
+        tags?: string[];
+        email?: string;
+        address?: string;
+        avatar?: string;
+        notes?: string;
+        origin_phone_id?: string;
+    }) => {
+        const cleanPhone = (c.phone || '').replace(/\D/g, '');
+        const next: Contact = {
+            id: c.id || cleanPhone,
             phone: cleanPhone,
-            name: ''
+            name: c.name,
+            status: c.status,
+            assigned_to: c.assigned_to,
+            department: c.department,
+            tags: c.tags,
+            email: c.email,
+            address: c.address,
+            avatar: c.avatar,
+            notes: c.notes,
+            origin_phone_id: c.origin_phone_id,
         };
-        setSelectedContact(stubContact);
+        setSelectedContact(next);
         setView('chat');
     };
 

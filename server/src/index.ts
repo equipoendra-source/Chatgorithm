@@ -5029,7 +5029,13 @@ app.get('/api/search', async (req, res) => {
             notes: ((r.get('notes') as string) || '').substring(0, 200),
             status: (r.get('status') as string) || '',
             assigned_to: (r.get('assigned_to') as string) || '',
-            originPhoneId: (r.get('origin_phone_id') as string) || '',
+            department: (r.get('department') as string) || '',
+            // tags se guarda como Multiselect en Airtable → array de strings
+            tags: (r.get('tags') as string[]) || [],
+            email: (r.get('email') as string) || '',
+            address: (r.get('address') as string) || '',
+            avatar: (r.get('avatar') as string) || '',
+            origin_phone_id: (r.get('origin_phone_id') as string) || '',
             lastMessageTime: (r.get('last_message_time') as string) || ''
         }));
 
@@ -5652,7 +5658,18 @@ app.get('/api/analytics', async (req, res) => {
 //    hasta su PRIMERA cita reservada (calculado contra appointment.Date).
 function computeConversionKpis(contacts: readonly any[], messages: readonly any[], appts: readonly any[]) {
     const phoneRegex = /^[+]?[0-9]{8,}$/;
-    // Indexar primer mensaje INBOUND por cliente
+
+    // Helper para normalizar phone a los últimos 9 dígitos (formato común
+    // español). Esto evita el doble conteo cuando el mismo cliente aparece
+    // con dos formatos: '666123456' y '34666123456' apuntarían a leads
+    // distintos si indexáramos por phone completo. Con last9, ambos
+    // colapsan a una única clave.
+    const toLast9 = (s: string) => {
+        const c = cleanNumber(s);
+        return c.length >= 9 ? c.slice(-9) : c;
+    };
+
+    // Indexar primer mensaje INBOUND por cliente (clave = last9)
     const firstInboundByPhone: Record<string, number> = {};
     messages.forEach(m => {
         const sender = (m.get('sender') as string) || '';
@@ -5660,46 +5677,39 @@ function computeConversionKpis(contacts: readonly any[], messages: readonly any[
         const ts = (m.get('timestamp') as string) || '';
         const tsMs = ts ? new Date(ts).getTime() : 0;
         if (!tsMs || Number.isNaN(tsMs)) return;
-        const phone = cleanNumber(sender);
-        if (!phone) return;
-        if (!firstInboundByPhone[phone] || tsMs < firstInboundByPhone[phone]) {
-            firstInboundByPhone[phone] = tsMs;
+        const key = toLast9(sender);
+        if (!key) return;
+        if (!firstInboundByPhone[key] || tsMs < firstInboundByPhone[key]) {
+            firstInboundByPhone[key] = tsMs;
         }
     });
 
-    // Indexar primera cita Booked por phone
+    // Indexar primera cita Booked por phone (también con last9 para alinear)
     const firstBookingByPhone: Record<string, number> = {};
     appts.forEach(a => {
         if (a.get('Status') !== 'Booked') return;
-        const cp = cleanNumber((a.get('ClientPhone') as string) || '');
+        const cp = (a.get('ClientPhone') as string) || '';
         if (!cp) return;
         const dateStr = a.get('Date') as string;
         const dMs = dateStr ? new Date(dateStr).getTime() : 0;
         if (!dMs || Number.isNaN(dMs)) return;
-        // Comparar por últimos 9 dígitos para tolerar prefijos
-        const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
-        if (!firstBookingByPhone[last9] || dMs < firstBookingByPhone[last9]) {
-            firstBookingByPhone[last9] = dMs;
+        const key = toLast9(cp);
+        if (!key) return;
+        if (!firstBookingByPhone[key] || dMs < firstBookingByPhone[key]) {
+            firstBookingByPhone[key] = dMs;
         }
     });
 
-    // Conversion rate: cuántos clientes tienen primer inbound Y al menos
-    // una cita Booked
-    const leadsWithBooking = Object.keys(firstInboundByPhone).filter(p => {
-        const last9 = p.length >= 9 ? p.slice(-9) : p;
-        return !!firstBookingByPhone[last9];
-    }).length;
+    // Conversion rate: cuántos clientes (last9 únicos) tienen primer inbound
+    // Y al menos una cita Booked
+    const leadsWithBooking = Object.keys(firstInboundByPhone).filter(p => !!firstBookingByPhone[p]).length;
     const totalLeads = Object.keys(firstInboundByPhone).length;
     const conversionRate = totalLeads > 0 ? Math.round((leadsWithBooking / totalLeads) * 100) : 0;
 
-    // Tiempo medio hasta primera cita (en minutos). Solo cuenta cuando el
-    // booking ocurrió DESPUÉS del primer inbound (caso normal). Limitamos a
-    // citas reservadas hasta 30 días después del primer mensaje para evitar
-    // outliers (clientes que volvieron meses después).
+    // Tiempo medio hasta primera cita (en minutos). Tope 30 días.
     const tiempos: number[] = [];
     Object.entries(firstInboundByPhone).forEach(([phone, inboundMs]) => {
-        const last9 = phone.length >= 9 ? phone.slice(-9) : phone;
-        const bookMs = firstBookingByPhone[last9];
+        const bookMs = firstBookingByPhone[phone];
         if (!bookMs) return;
         const dt = (bookMs - inboundMs) / 60000; // min
         if (dt > 0 && dt <= 60 * 24 * 30) tiempos.push(dt);
@@ -5709,28 +5719,38 @@ function computeConversionKpis(contacts: readonly any[], messages: readonly any[
         : null;
 
     // Tasa de respuesta a reseñas: por cada mensaje saliente con
-    // texto que contiene '📝 [Plantilla] solicitud_resena', vemos si
-    // hubo respuesta inbound posterior.
-    const reviewSent: Record<string, number> = {}; // phone → timestamp del envío
+    // texto que contiene 'solicitud_resena', vemos si hubo respuesta
+    // inbound posterior. Indexamos por last9 para no contar dos veces
+    // al mismo cliente que apareció con prefijo y sin prefijo.
+    // Excluimos respuestas "BAJA"/"STOP"/"CANCELAR" para no inflar el KPI
+    // con clientes que se dieron de baja en vez de responder a la reseña.
+    const OPT_OUT_RE = /^(stop|baja|cancelar|cancela|unsubscribe|opt[ _-]?out)\b/i;
+    const reviewSent: Record<string, number> = {}; // last9 → timestamp del envío
     messages.forEach(m => {
         const text = ((m.get('text') as string) || '').toLowerCase();
         if (!text.includes('solicitud_resena')) return;
-        const recipient = cleanNumber((m.get('recipient') as string) || '');
+        const recipient = (m.get('recipient') as string) || '';
         const ts = (m.get('timestamp') as string) || '';
         const tsMs = ts ? new Date(ts).getTime() : 0;
-        if (recipient && tsMs) {
-            if (!reviewSent[recipient] || tsMs > reviewSent[recipient]) reviewSent[recipient] = tsMs;
+        const key = toLast9(recipient);
+        if (key && tsMs) {
+            if (!reviewSent[key] || tsMs > reviewSent[key]) reviewSent[key] = tsMs;
         }
     });
     let reviewReplied = 0;
-    Object.entries(reviewSent).forEach(([phone, sentMs]) => {
+    Object.entries(reviewSent).forEach(([phoneKey, sentMs]) => {
         // Buscar mensaje inbound del cliente con timestamp > sentMs
+        // que NO sea un opt-out (BAJA, STOP...).
         const replied = messages.some(m => {
-            const sender = cleanNumber((m.get('sender') as string) || '');
-            if (sender !== phone) return false;
+            const senderRaw = (m.get('sender') as string) || '';
+            if (!phoneRegex.test(senderRaw)) return false;
+            if (toLast9(senderRaw) !== phoneKey) return false;
             const ts = (m.get('timestamp') as string) || '';
             const tsMs = ts ? new Date(ts).getTime() : 0;
-            return tsMs > sentMs;
+            if (tsMs <= sentMs) return false;
+            const txt = ((m.get('text') as string) || '').trim();
+            if (OPT_OUT_RE.test(txt)) return false; // baja, no respuesta real
+            return true;
         });
         if (replied) reviewReplied++;
     });

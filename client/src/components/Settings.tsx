@@ -276,7 +276,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             const r = await fetch(`${API_URL}/bot/status`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ enabled: newState })
+                body: JSON.stringify({ enabled: newState, actorUsername: currentUser?.username || 'system' })
             });
             const data = await r.json();
             if (data.success) {

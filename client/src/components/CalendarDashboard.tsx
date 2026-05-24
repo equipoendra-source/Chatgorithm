@@ -96,6 +96,20 @@ interface CalendarDashboardProps {
     selectedAccountId?: string | null;
 }
 
+// Helper para obtener el username actual desde localStorage. Se usa para
+// rellenar `actorUsername` en las llamadas que registran cambios en el
+// audit log del servidor (PUT/DELETE de citas, cancelaciones, etc.).
+// Sin esto el audit log mostraría 'system' para todas las acciones desde
+// el panel web y perdería el 80% de su utilidad.
+function getCurrentUsername(): string {
+    try {
+        const raw = localStorage.getItem('chatgorithm_user') || sessionStorage.getItem('chatgorithm_user');
+        if (!raw) return 'system';
+        const u = JSON.parse(raw);
+        return (u && u.username) || 'system';
+    } catch { return 'system'; }
+}
+
 const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false, config, initialDate, onInitialDateConsumed, socket, selectedAccountId }) => {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
@@ -361,7 +375,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     modelo: editModelo,
                     extra: editExtra,
                     notas: editNotas,
-                    incident: editIncident
+                    incident: editIncident,
+                    actorUsername: getCurrentUsername()
                 })
             });
             if (!res.ok) { alert("Error guardando"); return; }
@@ -401,7 +416,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     clientPhone: '',
                     matricula: '',
                     marca: '',
-                    modelo: ''
+                    modelo: '',
+                    actorUsername: getCurrentUsername()
                 })
             });
             if (res.ok) { await fetchData(); setSelectedAppt(null); }
@@ -428,7 +444,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
     const handleDelete = async (id: string) => {
         if (!window.confirm("¿Seguro que quieres borrar este hueco?")) return;
-        await fetch(`${API_URL}/appointments/${id}`, { method: 'DELETE' });
+        await fetch(`${API_URL}/appointments/${id}`, {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ actorUsername: getCurrentUsername() })
+        });
         setAppointments(prev => prev.filter(a => a.id !== id));
         if (selectedAppt?.id === id) setSelectedAppt(null);
     };

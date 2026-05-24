@@ -10,7 +10,12 @@ interface ContactHit {
     notes: string;
     status: string;
     assigned_to: string;
-    originPhoneId: string;
+    department?: string;
+    tags?: string[];
+    email?: string;
+    address?: string;
+    avatar?: string;
+    origin_phone_id?: string;
     lastMessageTime: string;
 }
 
@@ -31,20 +36,30 @@ interface MessageGroup {
 }
 
 interface Props {
-    onSelectContact: (phone: string) => void;
+    // Recibe los datos completos del contacto cuando hace click en un
+    // resultado. App.tsx usa estos campos para abrir el ChatWindow con
+    // assigned_to, department, tags, etc., en lugar de un stub vacío.
+    onSelectContact: (contact: { id?: string, phone: string, name?: string, status?: string, assigned_to?: string, department?: string, tags?: string[], email?: string, address?: string, avatar?: string, notes?: string, origin_phone_id?: string }) => void;
     onClose: () => void;
 }
 
 // Resalta los matches de q en el texto sin XSS (split + spans).
+// IMPORTANTE: el regex de split usa flag /g (necesario para split global),
+// pero el .test() de cada parte NO debe usar /g porque mantiene `lastIndex`
+// entre llamadas y alternaría matches false/true sobre la misma cadena.
+// Comparamos cada parte case-insensitive contra q directamente.
 function Highlight({ text, q }: { text: string, q: string }) {
     if (!q) return <>{text}</>;
     const escaped = q.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&');
-    const re = new RegExp(`(${escaped})`, 'ig');
-    const parts = text.split(re);
+    const splitRe = new RegExp(`(${escaped})`, 'ig');
+    const parts = text.split(splitRe);
+    const qLower = q.toLowerCase();
     return (
         <>
             {parts.map((p, i) =>
-                re.test(p) ? <mark key={i} className="bg-yellow-200 text-slate-900 rounded px-0.5">{p}</mark> : <span key={i}>{p}</span>
+                p && p.toLowerCase() === qLower
+                    ? <mark key={i} className="bg-yellow-200 text-slate-900 rounded px-0.5">{p}</mark>
+                    : <span key={i}>{p}</span>
             )}
         </>
     );
@@ -174,7 +189,7 @@ export default function GlobalSearch({ onSelectContact, onClose }: Props) {
                             {contacts.map(c => (
                                 <button
                                     key={c.id}
-                                    onClick={() => { onSelectContact(c.phone); onClose(); }}
+                                    onClick={() => { onSelectContact(c); onClose(); }}
                                     className={`w-full text-left p-3 rounded-lg flex items-start gap-3 transition ${isDark ? 'hover:bg-white/5' : 'hover:bg-slate-50'}`}
                                 >
                                     <div className={`w-9 h-9 rounded-full flex items-center justify-center font-bold text-xs flex-shrink-0 ${isDark ? 'bg-indigo-900/40 text-indigo-300' : 'bg-indigo-100 text-indigo-700'}`}>
@@ -206,10 +221,16 @@ export default function GlobalSearch({ onSelectContact, onClose }: Props) {
                             <div className={`px-3 py-1.5 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                                 Mensajes ({messages.length})
                             </div>
-                            {messages.map((m, idx) => (
+                            {messages.map((m, idx) => {
+                                // Para mensajes intentamos enriquecer con datos del contacto si
+                                // está en la lista de contactos (puede que la búsqueda haya hecho
+                                // match en el mensaje pero también haya un contacto con ese phone).
+                                const enriched = contacts.find(c => c.phone === m.phone);
+                                const target = enriched || { phone: m.phone };
+                                return (
                                 <button
                                     key={idx}
-                                    onClick={() => { onSelectContact(m.phone); onClose(); }}
+                                    onClick={() => { onSelectContact(target); onClose(); }}
                                     className={`w-full text-left p-3 rounded-lg flex items-start gap-3 transition ${isDark ? 'hover:bg-white/5' : 'hover:bg-slate-50'}`}
                                 >
                                     <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${isDark ? 'bg-emerald-900/40 text-emerald-300' : 'bg-emerald-100 text-emerald-700'}`}>
@@ -230,7 +251,8 @@ export default function GlobalSearch({ onSelectContact, onClose }: Props) {
                                         </div>
                                     </div>
                                 </button>
-                            ))}
+                                );
+                            })}
                         </div>
                     )}
                 </div>
