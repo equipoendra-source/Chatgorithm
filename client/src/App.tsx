@@ -390,8 +390,15 @@ function App() {
             const depts = list.filter(i => i.type === 'Department').map(i => i.name);
             const stats = list.filter(i => i.type === 'Status').map(i => i.name);
             const tags = list.filter(i => i.type === 'Tag').map(i => i.name);
+            // No hacemos fallback a valores hardcoded (Ventas/Taller/Admin) —
+            // antes pisaba la lista real del cliente si Airtable tardaba en
+            // responder o si el cliente acababa de empezar y no había
+            // departamentos creados. Si la lista llega vacía, mostramos vacío
+            // (con mensaje "crea uno en Ajustes") en lugar de datos falsos.
+            // Mantenemos solo fallback de statuses porque son estados de chat
+            // que el backend usa internamente (Nuevo/Abierto/Cerrado).
             setConfig({
-                departments: depts.length > 0 ? depts : ['Ventas', 'Taller', 'Admin'],
+                departments: depts,
                 statuses: stats.length > 0 ? stats : ['Nuevo', 'Abierto', 'Cerrado'],
                 tags: tags
             });

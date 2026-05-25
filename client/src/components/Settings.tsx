@@ -70,7 +70,9 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
     // Forms State
     const [formName, setFormName] = useState('');
-    const [formRole, setFormRole] = useState('Ventas');
+    // Default seguro al montar el componente. openCreateAgent lo reasigna al
+    // primer departamento real configurado en CRM cuando se abre el modal.
+    const [formRole, setFormRole] = useState('Admin');
     const [formPass, setFormPass] = useState('');
     const [formType, setFormType] = useState('Department');
 
@@ -385,7 +387,15 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
     // Modales Agentes / Config
     const closeModal = () => { setModalType('none'); setFormName(''); setFormPass(''); setError(''); setSelectedItem(null); setQrTitle(''); setQrContent(''); setQrShortcut(''); setIsSaving(false); };
-    const openCreateAgent = () => { setModalType('create_agent'); setFormName(''); setFormRole('Ventas'); setFormPass(''); };
+    const openCreateAgent = () => {
+        setModalType('create_agent');
+        setFormName('');
+        // Preselección dinámica: si hay departamentos en CRM, primero de la
+        // lista; si no, Admin (siempre disponible). Evita que el admin
+        // cree agentes por inercia con un rol que no existe en su CRM.
+        setFormRole(departments[0]?.name || 'Admin');
+        setFormPass('');
+    };
     const openEditAgent = (agent: Agent) => { setSelectedItem(agent); setFormName(agent.name); setFormRole(agent.role); setFormPass(''); setModalType('edit_agent'); };
     const openDeleteAgent = (agent: Agent) => { setSelectedItem(agent); setModalType('delete_agent'); };
 
@@ -1022,13 +1032,24 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                         </div>
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 uppercase ml-1 mb-1 block">Rol</label>
+                                            {/* Opción C: Admin fijo arriba (es permiso, no depto) + lista dinámica
+                                                de departamentos del CRM. Si el agente tenía un rol antiguo que ya
+                                                no existe en la lista (depto borrado), se muestra como "(antiguo)"
+                                                para no perder el dato al editar. */}
                                             <select value={formRole} onChange={e => setFormRole(e.target.value)} className={`w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500/50 ${isDark ? 'bg-slate-900/50 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}>
-                                                <option value="Ventas">Ventas</option>
-                                                <option value="Taller">Taller</option>
-                                                <option value="Recambios">Recambios</option>
-                                                <option value="Administración">Administración</option>
-                                                <option value="Admin">Admin</option>
+                                                <option value="Admin">Admin (permisos completos)</option>
+                                                {departments.map(d => (
+                                                    <option key={d.id} value={d.name}>{d.name}</option>
+                                                ))}
+                                                {formRole && formRole !== 'Admin' && !departments.some(d => d.name === formRole) && (
+                                                    <option value={formRole}>{formRole} (antiguo)</option>
+                                                )}
                                             </select>
+                                            {departments.length === 0 && (
+                                                <p className={`text-[11px] mt-1 ml-1 ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>
+                                                    Si acabas de abrir la app, espera unos segundos a que carguen los departamentos del CRM. Si no aparece ninguno, créalos en la pestaña <strong>CRM</strong>.
+                                                </p>
+                                            )}
                                         </div>
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 uppercase ml-1 mb-1 block">Contraseña</label>
