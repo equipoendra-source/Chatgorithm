@@ -1411,6 +1411,134 @@ async function notifyCancelledAppointment(data: {
     }
 }
 
+// Avisa al cliente por WhatsApp de que su cita ha sido cancelada por el equipo
+// (cancelación manual desde calendario o DELETE). Sin esto, el cliente seguía
+// creyendo que tenía cita y se presentaba.
+//
+// Lógica de envío:
+//   - Si hay un mensaje entrante del cliente en las últimas 24h → texto libre
+//     (la API de WhatsApp permite cualquier texto dentro de esa ventana).
+//   - Si está fuera de la ventana 24h → avisa al equipo con notifyTeam para que
+//     llame manualmente al cliente. Una plantilla aprobada de Meta sería el
+//     siguiente paso (requiere alta en Business Manager).
+//
+// Idempotencia: el campo Appointments.NotifiedClientCancellation evita
+// duplicados si el agente toca el slot varias veces. Si el campo no existe,
+// el aviso se envía igual (sólo perdemos la protección anti-duplicado).
+//
+// Skip si: phone vacío, cita en el pasado, ya avisado, opt-out de notificaciones.
+async function notifyClientOfManualCancellation(data: {
+    appointmentId: string;
+    clientPhone: string;
+    clientName: string;
+    dateISO: string;
+    agenda?: string;
+    skipIdempotencyCheck?: boolean; // true cuando viene de DELETE (el record ya no existe)
+}): Promise<void> {
+    try {
+        if (!data.clientPhone) return;
+        if (!base) return;
+        const cleanPhone = cleanNumber(data.clientPhone);
+        if (!cleanPhone) return;
+
+        // Skip si la cita ya pasó — no avisar a citas antiguas
+        const apptDate = new Date(data.dateISO);
+        if (!isNaN(apptDate.getTime()) && apptDate.getTime() < Date.now()) {
+            console.log(`[ManualCancelNotify] Cita ${data.appointmentId} ya en el pasado (${data.dateISO}) — no se avisa al cliente.`);
+            return;
+        }
+
+        // Idempotencia: si la cita ya tiene NotifiedClientCancellation=true, salir.
+        // Saltamos esta comprobación cuando viene de DELETE (el record ya no existe).
+        if (!data.skipIdempotencyCheck) {
+            try {
+                const rec = await base('Appointments').find(data.appointmentId);
+                if (rec.get('NotifiedClientCancellation')) {
+                    console.log(`[ManualCancelNotify] Cita ${data.appointmentId} ya avisada — skip.`);
+                    return;
+                }
+            } catch { /* record puede no existir, seguimos */ }
+        }
+
+        // Resolver el contacto para: (a) origin_phone_id (qué WABA usar) y (b) opt-out de notificaciones.
+        let originPhoneId = '';
+        let optedOutNotifs = false;
+        try {
+            const cs = await base('Contacts').select({
+                filterByFormula: `{phone}='${escAt(cleanPhone)}'`, maxRecords: 1
+            }).firstPage();
+            if (cs.length > 0) {
+                originPhoneId = (cs[0].get('origin_phone_id') as string) || '';
+                optedOutNotifs = !!cs[0].get('opted_out_notifications');
+            }
+        } catch { /* opcional */ }
+        if (optedOutNotifs) {
+            console.log(`[ManualCancelNotify] Cliente ${cleanPhone} con opted_out_notifications=true — no se avisa.`);
+            return;
+        }
+        if (!originPhoneId) originPhoneId = waPhoneId || 'default';
+
+        // Construir mensaje
+        const humanDate = !isNaN(apptDate.getTime())
+            ? apptDate.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'long', timeStyle: 'short' })
+            : (data.dateISO || '');
+        const cleanName = (data.clientName || '').trim();
+        const greeting = cleanName ? `Hola ${cleanName.split(/\s+/)[0]}, ` : 'Hola, ';
+        const agendaInfo = data.agenda ? ` (${data.agenda})` : '';
+        const body = `${greeting}le informamos de que su cita del ${humanDate}${agendaInfo} ha sido CANCELADA por nuestro equipo. Si quiere reprogramar, respóndanos a este mensaje. Disculpe las molestias.`;
+
+        // Detectar ventana 24h leyendo el último mensaje entrante del cliente
+        let inWindow = false;
+        try {
+            const last = await base('Messages').select({
+                filterByFormula: `{sender}='${escAt(cleanPhone)}'`,
+                sort: [{ field: 'timestamp', direction: 'desc' }],
+                maxRecords: 1
+            }).firstPage();
+            if (last.length > 0) {
+                const ts = last[0].get('timestamp') as string;
+                const tsMs = ts ? new Date(ts).getTime() : 0;
+                inWindow = tsMs > 0 && (Date.now() - tsMs) < (24 * 60 * 60 * 1000);
+            }
+        } catch { /* tolerar fallo de lookup */ }
+
+        let sent = false;
+        if (inWindow) {
+            const res = await sendWhatsAppText(cleanPhone, body, originPhoneId);
+            sent = !!res.ok;
+            if (sent) console.log(`✅ [ManualCancelNotify] Cliente ${cleanPhone} avisado de cancelación.`);
+        } else {
+            // Fuera de ventana 24h y sin plantilla aprobada — notificar al equipo
+            // para que llame manualmente. Cuando se cree una plantilla aprobada
+            // (p.ej. "cita_cancelada_manual"), añadir aquí sendTemplateMessage.
+            notifyTeam(
+                'send_failed', 'warning',
+                `No se pudo avisar al cliente ${cleanPhone}${cleanName ? ' (' + cleanName + ')' : ''} de la cancelación de su cita del ${humanDate}: ventana 24h cerrada. Llámalo manualmente o crea la plantilla "cita_cancelada_manual" en Meta.`,
+                { phone: cleanPhone, appointmentId: data.appointmentId, code: 131047 }
+            );
+            console.warn(`[ManualCancelNotify] Ventana 24h cerrada con ${cleanPhone} — equipo notificado.`);
+        }
+
+        // Marcar la cita como ya avisada (sólo si se envió y el record sigue vivo)
+        if (sent && !data.skipIdempotencyCheck) {
+            try {
+                await base('Appointments').update([{
+                    id: data.appointmentId,
+                    fields: { NotifiedClientCancellation: true }
+                }], { typecast: true });
+            } catch (markErr: any) {
+                if (/NotifiedClientCancellation|unknown field/i.test(markErr.message || '')) {
+                    console.warn('[ManualCancelNotify] El campo "NotifiedClientCancellation" (checkbox) no existe en Appointments. Créalo para evitar avisos duplicados.');
+                } else {
+                    console.warn('[ManualCancelNotify] Error marcando NotifiedClientCancellation:', markErr.message);
+                }
+            }
+        }
+    } catch (e: any) {
+        console.error('[ManualCancelNotify] Error general:', e.message);
+    }
+}
+
 // Registra un evento de cita (reserva o cancelación) en Airtable para tener
 // historial persistente, y lo emite por socket para refresco en tiempo real.
 // Tolerante: si la tabla AppointmentEvents aún no existe, lo avisa una vez y
@@ -2813,33 +2941,18 @@ function shouldDedupSend(phone: string, body: string): boolean {
     return false;
 }
 
-async function sendWhatsAppText(to: string, body: string, originPhoneId: string): Promise<SendResult> {
-    const token = getToken(originPhoneId);
-    if (!token) {
-        console.error("❌ Error: Token no encontrado para", originPhoneId);
-        return { ok: false, metaError: 'NO_TOKEN' };
-    }
-    if (!body || !body.trim()) {
-        console.warn("⚠️ sendWhatsAppText: body vacío, ignorando.");
-        return { ok: false, metaError: 'EMPTY_BODY' };
-    }
-
-    // Limpieza aquí también
-    const cleanTo = cleanNumber(to);
-    if (!cleanTo) {
-        console.error("❌ sendWhatsAppText: número destino vacío tras limpiar");
-        return { ok: false, metaError: 'INVALID_RECIPIENT' };
-    }
-
-    // Idempotencia: si en los últimos 10s hemos mandado el MISMO body a este número,
-    // evitamos doble envío (clicks duplicados, retries de webhook, redundancia IA).
-    if (shouldDedupSend(cleanTo, body)) {
-        console.warn(`🔁 [WA] Mensaje duplicado a ${cleanTo} bloqueado por dedupe (<${DEDUP_WINDOW_MS}ms)`);
-        return { ok: true, dedup: true };
-    }
-
-    // Reintentos para errores transitorios (timeout, 5xx, rate limit).
-    // No reintentamos 4xx no transitorios (24h window, template no aprobado, número inválido).
+// Helper interno: hace el envío con reintentos + alerta al equipo si falla,
+// pero NO persiste en Airtable ni emite por socket. Permite que dos callers
+// distintos hagan su propia persistencia: sendWhatsAppText (mensajes de Laura)
+// y el handler socket chatMessage (mensajes del agente — ya persistidos antes).
+// Sin este split, llamar a sendWhatsAppText desde chatMessage duplicaría el
+// mensaje en Airtable (uno con sender=agente + otro con sender="Bot IA").
+async function sendWhatsAppRawWithRetries(
+    cleanTo: string,
+    body: string,
+    originPhoneId: string,
+    token: string
+): Promise<SendResult> {
     const MAX_ATTEMPTS = 3;
     let lastError: any = null;
     for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
@@ -2849,18 +2962,6 @@ async function sendWhatsAppText(to: string, body: string, originPhoneId: string)
                 { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body } },
                 { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
             );
-
-            // Éxito: guardar mensaje y actualizar contacto
-            metrics.outboundMessages++;
-            await saveAndEmitMessage({
-                text: body,
-                sender: "Bot IA",
-                recipient: cleanTo,
-                timestamp: new Date().toISOString(),
-                type: "text",
-                origin_phone_id: originPhoneId
-            });
-            await handleContactUpdate(cleanTo, `🤖 Laura: ${body}`, undefined, originPhoneId);
             return { ok: true };
         } catch (e: any) {
             lastError = e;
@@ -2878,7 +2979,7 @@ async function sendWhatsAppText(to: string, body: string, originPhoneId: string)
                 continue;
             }
 
-            // Errores permanentes (no reintentar)
+            // Errores permanentes (no reintentar) — notificar al equipo
             metrics.outboundFailures++;
             console.error(`❌ [WA] Envío falló a ${cleanTo} [HTTP ${status}, code ${metaCode}]:`, metaMsg);
 
@@ -2906,6 +3007,52 @@ async function sendWhatsAppText(to: string, body: string, originPhoneId: string)
     metrics.outboundFailures++;
     notifyTeam('send_failed', 'error', `Envío falló tras ${MAX_ATTEMPTS} reintentos a ${cleanTo}: ${lastError?.message || 'unknown'}`, { phone: cleanTo });
     return { ok: false, metaError: lastError?.message || 'MAX_RETRIES' };
+}
+
+async function sendWhatsAppText(to: string, body: string, originPhoneId: string): Promise<SendResult> {
+    const token = getToken(originPhoneId);
+    if (!token) {
+        console.error("❌ Error: Token no encontrado para", originPhoneId);
+        return { ok: false, metaError: 'NO_TOKEN' };
+    }
+    if (!body || !body.trim()) {
+        console.warn("⚠️ sendWhatsAppText: body vacío, ignorando.");
+        return { ok: false, metaError: 'EMPTY_BODY' };
+    }
+
+    // Limpieza aquí también
+    const cleanTo = cleanNumber(to);
+    if (!cleanTo) {
+        console.error("❌ sendWhatsAppText: número destino vacío tras limpiar");
+        return { ok: false, metaError: 'INVALID_RECIPIENT' };
+    }
+
+    // Idempotencia: si en los últimos 10s hemos mandado el MISMO body a este número,
+    // evitamos doble envío (clicks duplicados, retries de webhook, redundancia IA).
+    if (shouldDedupSend(cleanTo, body)) {
+        console.warn(`🔁 [WA] Mensaje duplicado a ${cleanTo} bloqueado por dedupe (<${DEDUP_WINDOW_MS}ms)`);
+        return { ok: true, dedup: true };
+    }
+
+    // Reintentos para errores transitorios (timeout, 5xx, rate limit).
+    // No reintentamos 4xx no transitorios (24h window, template no aprobado, número inválido).
+    const result = await sendWhatsAppRawWithRetries(cleanTo, body, originPhoneId, token);
+
+    if (result.ok) {
+        // Éxito: guardar mensaje y actualizar contacto. El helper raw no lo hace
+        // para no duplicar persistencia cuando el caller ya guardó.
+        metrics.outboundMessages++;
+        await saveAndEmitMessage({
+            text: body,
+            sender: "Bot IA",
+            recipient: cleanTo,
+            timestamp: new Date().toISOString(),
+            type: "text",
+            origin_phone_id: originPhoneId
+        });
+        await handleContactUpdate(cleanTo, `🤖 Laura: ${body}`, undefined, originPhoneId);
+    }
+    return result;
 }
 
 // ==========================================
@@ -4047,7 +4194,8 @@ REGLAS:
 - Usa el nombre del departamento EXACTAMENTE como aparece arriba (mayúsculas, tildes, espacios).
 - Si dudas entre varios, elige el que más se ajuste por la descripción.
 - Si el cliente menciona algo que claramente cae en uno, deriva sin preguntar de nuevo.
-- Tras llamar a assign_department, llama también a stop_conversation.`;
+- Tras llamar a assign_department, llama también a stop_conversation.
+- NO escribas customer_message ni respuesta final tras llamar a assign_department: el sistema envía automáticamente un aviso al cliente ("Te he derivado al equipo de X..."). Si tú también escribes algo, el cliente recibiría dos mensajes redundantes.`;
 
             // Instrucciones de agendas — se inyectan cuando hay >1 agenda O cuando alguna agenda tiene servicios.
             let agendasInstr = '';
@@ -4229,6 +4377,41 @@ Cuando el cliente indique qué tipo de servicio necesita:
                     await sendWhatsAppText(clean, toolResult, originPhoneId);
                 }
 
+                // Igual que con book_appointment: cuando Laura llama a
+                // assign_department, suele encadenarlo con stop_conversation y
+                // se queda sin enviar texto al cliente — el cliente quedaba
+                // mudo esperando al humano sin entender qué pasó. Aquí enviamos
+                // un mensaje fijo de cortesía. La bandera assignmentMsgSent en
+                // el bucle externo evita que processJsonResponse duplique con
+                // un customer_message de Gemini si lo devuelve igualmente.
+                if (call.name === "assign_department") {
+                    const deptName = String(args.department);
+                    if (toolResult.startsWith("Asignado")) {
+                        // Detección robusta de si quedó un agente concreto: el
+                        // resultado con agente termina exactamente en ").", el
+                        // resultado sin agente termina en una letra + ".".
+                        const hasAgent = toolResult.endsWith(").");
+                        const msg = hasAgent
+                            ? `Te he derivado al equipo de ${deptName}. En unos minutos un compañero te atenderá por aquí 🙏`
+                            : `Te he derivado al equipo de ${deptName}. En cuanto haya alguien disponible te contactaremos.`;
+                        await sendWhatsAppText(clean, msg, originPhoneId);
+                    } else {
+                        // assignDepartment devolvió "Contacto no encontrado.",
+                        // "Error asignando." o similar → el cliente seguiría
+                        // mudo. Avisamos con un fallback y alertamos al equipo.
+                        await sendWhatsAppText(
+                            clean,
+                            'Disculpa, hemos tenido un problema técnico al pasarte con un compañero. Un miembro del equipo te contactará en breve.',
+                            originPhoneId
+                        );
+                        notifyTeam(
+                            'send_failed', 'warning',
+                            `assignDepartment falló para ${clean} (depto "${deptName}"): "${toolResult}". El cliente ha sido avisado con fallback. Atiéndelo manualmente.`,
+                            { phone: clean, department: deptName, toolResult }
+                        );
+                    }
+                }
+
                 return toolResult;
             };
 
@@ -4278,6 +4461,7 @@ Cuando el cliente indique qué tipo de servicio necesita:
             const MAX_TOOL_ROUNDS = 6; // Seguridad: cap por si Gemini entra en bucle
             let toolRound = 0;
             let bookingConfirmedDirectly = false; // Si book_appointment ya envió mensaje, no duplicar texto final
+            let assignmentMsgSent = false; // Si assign_department ya envió "te derivo a X", no duplicar
 
             while (toolRound < MAX_TOOL_ROUNDS) {
                 const calls = currentResponse.functionCalls();
@@ -4296,6 +4480,13 @@ Cuando el cliente indique qué tipo de servicio necesita:
 
                     if (call.name === "book_appointment" && toolResult.startsWith("✅")) {
                         bookingConfirmedDirectly = true;
+                    }
+                    // assignmentMsgSent se marca tanto en éxito como en el
+                    // fallback de error: en ambos casos executeTool ya envió
+                    // un mensaje al cliente (aviso de derivación o disculpa
+                    // técnica), así que processJsonResponse NO debe duplicar.
+                    if (call.name === "assign_department") {
+                        assignmentMsgSent = true;
                     }
 
                     functionResponses.push({
@@ -4319,9 +4510,16 @@ Cuando el cliente indique qué tipo de servicio necesita:
             // Procesar texto final de Gemini (si lo hay)
             const finalTxt = currentResponse.text();
             if (finalTxt && finalTxt.trim()) {
-                await processJsonResponse(finalTxt, clean, originPhoneId);
-            } else if (!bookingConfirmedDirectly) {
-                // Gemini se quedó mudo y no fue una reserva — avisar al cliente para no dejar el mensaje sin contestar
+                // Si ya enviamos el aviso de derivación al cliente, ignoramos el
+                // customer_message de Gemini para no duplicar (el system prompt
+                // se lo pide, pero no podemos confiar 100% en que obedezca).
+                if (assignmentMsgSent) {
+                    console.log('🤐 [IA] Texto final de Gemini ignorado: ya se envió mensaje de derivación al cliente.');
+                } else {
+                    await processJsonResponse(finalTxt, clean, originPhoneId);
+                }
+            } else if (!bookingConfirmedDirectly && !assignmentMsgSent) {
+                // Gemini se quedó mudo y no fue una reserva NI una derivación — avisar al cliente para no dejarlo sin respuesta
                 console.warn(`⚠️ [IA] Respuesta final vacía de Gemini tras ${toolRound} ronda(s) de tools. Enviando fallback.`);
                 await sendWhatsAppText(
                     clean,
@@ -4846,6 +5044,21 @@ app.put('/api/appointments/:id', async (req, res) => {
             } catch (notifErr: any) {
                 console.error('[API] Error notificando nueva cita manual:', notifErr.message);
             }
+            // Reset del flag de aviso al cliente: si el slot se reutiliza para
+            // un cliente nuevo, queremos volver a poder avisarle si lo cancelan.
+            // Tolerante: si el campo no existe en Airtable, se ignora el error.
+            try {
+                await base('Appointments').update([{
+                    id: req.params.id,
+                    fields: { NotifiedClientCancellation: false }
+                }], { typecast: true });
+            } catch (resetErr: any) {
+                if (/NotifiedClientCancellation|unknown field/i.test(resetErr.message || '')) {
+                    /* el campo no existe aún en Airtable — se crea al primer aviso */
+                } else {
+                    console.warn('[API] Error reseteando NotifiedClientCancellation tras rebook:', resetErr.message);
+                }
+            }
         }
 
         // Emitir evento genérico para que los calendarios abiertos se
@@ -4878,6 +5091,17 @@ app.put('/api/appointments/:id', async (req, res) => {
                 try { await cancelPendingCitaReminders(preUpdateClientPhone); }
                 catch (remErr: any) { console.warn('[API] Error cancelando recordatorios tras cancel manual:', remErr?.message); }
             }
+            // Avisar al cliente por WhatsApp de la cancelación. Antes esto se
+            // omitía y el cliente seguía creyendo que tenía cita y se presentaba.
+            // El helper gestiona ventana 24h, opt-out y fallback notifyTeam.
+            // Fire-and-forget para no bloquear la respuesta HTTP al frontend.
+            notifyClientOfManualCancellation({
+                appointmentId: req.params.id,
+                clientPhone: preUpdateClientPhone,
+                clientName: preUpdateClientName,
+                dateISO: preUpdateDate,
+                agenda: preUpdateAgenda
+            }).catch(err => console.warn('[API] notifyClientOfManualCancellation falló:', err?.message));
         }
 
         // Reprogramación: si la cita estaba Booked y la fecha cambió, los
@@ -4925,12 +5149,19 @@ app.delete('/api/appointments/:id', async (req, res) => {
         //    (sin esto, el cliente recibe recordatorio fantasma de una cita
         //    que ya no existe en Airtable).
         //  - Emitir socket appointment_changed para refrescar calendarios.
+        //  - Avisar al cliente por WhatsApp de que su cita ha sido cancelada.
         let preClientPhone = '';
         let preStatus = '';
+        let preClientName = '';
+        let preDate = '';
+        let preAgenda = '';
         try {
             const rec = await base('Appointments').find(req.params.id);
             preClientPhone = (rec.get('ClientPhone') as string) || '';
             preStatus = (rec.get('Status') as string) || '';
+            preClientName = (rec.get('ClientName') as string) || '';
+            preDate = (rec.get('Date') as string) || '';
+            preAgenda = (rec.get('Agenda') as string) || '';
         } catch { /* el record puede no existir o haber sido borrado en paralelo */ }
 
         await base('Appointments').destroy([req.params.id]);
@@ -4940,6 +5171,18 @@ app.delete('/api/appointments/:id', async (req, res) => {
         if (preStatus === 'Booked' && preClientPhone) {
             try { await cancelPendingCitaReminders(preClientPhone); }
             catch (remErr: any) { console.warn('[API] Error cancelando recordatorios tras DELETE:', remErr?.message); }
+
+            // Avisar al cliente por WhatsApp (mismo helper que el PUT manual).
+            // Pasamos skipIdempotencyCheck=true porque el record ya no existe
+            // (no se puede leer NotifiedClientCancellation ni marcarlo).
+            notifyClientOfManualCancellation({
+                appointmentId: req.params.id,
+                clientPhone: preClientPhone,
+                clientName: preClientName,
+                dateISO: preDate,
+                agenda: preAgenda,
+                skipIdempotencyCheck: true
+            }).catch(err => console.warn('[API] notifyClientOfManualCancellation falló tras DELETE:', err?.message));
         }
 
         // Refrescar calendarios abiertos
@@ -6513,6 +6756,10 @@ io.on('connection', (socket) => {
         }
 
         if (token) {
+            // Timestamp único: lo guardamos para poder localizar luego el record
+            // en Airtable si el envío a Meta falla (y marcarlo como failed).
+            const sentTimestamp = new Date().toISOString();
+
             // 1. SIEMPRE guardar y emitir el mensaje al UI (prioridad alta)
             try {
                 await saveAndEmitMessage({
@@ -6521,7 +6768,7 @@ io.on('connection', (socket) => {
                     recipient: cleanTo,
                     type: msg.type || 'text',
                     origin_phone_id: originId,
-                    timestamp: new Date().toISOString()
+                    timestamp: sentTimestamp
                 });
 
                 const prev = msg.type === 'note' ? `📝 Nota: ${msg.text}` : `Tú: ${msg.text}`;
@@ -6535,13 +6782,56 @@ io.on('connection', (socket) => {
                 await sendAgentCardIfNeeded(cleanTo, msg.sender, originId, token);
             }
 
-            // 3. Intentar enviar por WhatsApp (puede fallar sin afectar al UI)
+            // 3. Enviar por WhatsApp con retry + alerta al equipo si falla.
+            //    Antes usábamos un axios.post directo cuyo catch sólo logueaba:
+            //    el agente veía el mensaje en su UI como enviado aunque Meta lo
+            //    rechazara (ventana 24h cerrada, token caducado, >4096 chars).
+            //    Ahora pasamos por sendWhatsAppRawWithRetries — mismo retry y
+            //    notifyTeam que sendWhatsAppText, pero SIN persistencia para no
+            //    duplicar el record que ya creamos arriba (saveAndEmitMessage).
+            //    Si falla de forma permanente: marcamos el record como failed en
+            //    Airtable y reemitimos por socket message_status para que el
+            //    ChatWindow pinte un icono de error junto al mensaje.
             if (msg.type !== 'note') {
-                try {
-                    await axios.post(`https://graph.facebook.com/v21.0/${originId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "text", text: { body: msg.text } }, { headers: { Authorization: `Bearer ${token}` } });
+                const sendRes = await sendWhatsAppRawWithRetries(cleanTo, msg.text, originId, token);
+                if (sendRes.ok) {
                     console.log(`✅ [WA] Mensaje enviado a ${cleanTo}`);
-                } catch (e: any) {
-                    console.error("⚠️ [WA] Error enviando por WhatsApp (mensaje guardado en UI):", e.response?.data || e.message);
+                } else {
+                    // Marcar en Airtable: tolerante si los campos delivery_* aún
+                    // no existen — el equipo ya recibió la alerta vía notifyTeam.
+                    if (base) {
+                        try {
+                            const r = await base('Messages').select({
+                                filterByFormula: `AND({sender}='${escAt(msg.sender)}',{recipient}='${escAt(cleanTo)}',{timestamp}='${escAt(sentTimestamp)}')`,
+                                maxRecords: 1
+                            }).firstPage();
+                            if (r.length > 0) {
+                                await base('Messages').update([{
+                                    id: r[0].id,
+                                    fields: {
+                                        delivery_status: 'failed',
+                                        delivery_error: sendRes.metaError || '',
+                                        delivery_code: sendRes.code || 0
+                                    }
+                                }], { typecast: true });
+                            }
+                        } catch (markErr: any) {
+                            if (/delivery_status|delivery_error|delivery_code|unknown field/i.test(markErr.message || '')) {
+                                console.warn('[chatMessage] Crea los campos delivery_status (text), delivery_error (text), delivery_code (number) en Messages para que el frontend pueda marcar mensajes fallidos.');
+                            } else {
+                                console.warn('[chatMessage] No se pudo marcar mensaje como fallido en Airtable:', markErr.message);
+                            }
+                        }
+                    }
+                    // Reemitir para que el ChatWindow ya abierto pinte el icono de error
+                    io.emit('message_status', {
+                        recipient: cleanTo,
+                        sender: msg.sender,
+                        timestamp: sentTimestamp,
+                        status: 'failed',
+                        code: sendRes.code || 0,
+                        metaError: sendRes.metaError || ''
+                    });
                 }
             }
         }

@@ -5,7 +5,7 @@ import {
     Volume2, VolumeX, ArrowLeft, UserPlus, ChevronDown, ChevronUp, UserCheck, Users,
     Info, Lock, StickyNote, Mail, Phone, MapPin, Calendar, Save, Search,
     LayoutTemplate, Tag, Zap, Bot, UploadCloud, Camera, Megaphone, Loader2, Car, Trash2, FileDown,
-    MoreVertical
+    MoreVertical, AlertCircle
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
@@ -42,6 +42,13 @@ interface Message {
     timestamp: string;
     type?: string;
     mediaId?: string;
+    // Marca opcional que pinta el server cuando un mensaje saliente del agente
+    // no pudo entregarse a Meta (ventana 24h cerrada, token caducado, etc.).
+    // El ChatWindow muestra un icono AlertCircle rojo junto a la hora si está
+    // 'failed'. delivery_code lleva el código Meta (131047 = 24h, 131026 = no WA).
+    delivery_status?: 'sent' | 'failed';
+    delivery_code?: number;
+    delivery_error?: string;
 }
 
 interface Agent {
@@ -320,7 +327,36 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         }
     };
 
-    useEffect(() => { const handleHistory = (history: Message[]) => setMessages(history); const handleNewMessage = (msg: any) => { if (msg.sender === contact.phone || msg.sender === 'Agente' || msg.sender === 'Bot IA' || msg.recipient === contact.phone) { setMessages((prev) => [...prev, msg]); } }; if (socket) { socket.on('conversation_history', handleHistory); socket.on('message', handleNewMessage); return () => { socket.off('conversation_history', handleHistory); socket.off('message', handleNewMessage); }; } }, [socket, contact.phone]);
+    useEffect(() => {
+        const handleHistory = (history: Message[]) => setMessages(history);
+        const handleNewMessage = (msg: any) => {
+            if (msg.sender === contact.phone || msg.sender === 'Agente' || msg.sender === 'Bot IA' || msg.recipient === contact.phone) {
+                setMessages((prev) => [...prev, msg]);
+            }
+        };
+        // Listener para actualizar el estado de entrega de un mensaje ya enviado.
+        // El server emite esto cuando un envío saliente a Meta falla (ventana
+        // 24h cerrada, token, etc.). Localizamos el mensaje por (sender,
+        // timestamp) y lo marcamos como failed para que se pinte el icono.
+        const handleMessageStatus = (data: { recipient: string; sender: string; timestamp: string; status: 'sent' | 'failed'; code?: number; metaError?: string }) => {
+            if (data.recipient !== contact.phone) return;
+            setMessages(prev => prev.map(m =>
+                m.sender === data.sender && m.timestamp === data.timestamp
+                    ? { ...m, delivery_status: data.status, delivery_code: data.code, delivery_error: data.metaError }
+                    : m
+            ));
+        };
+        if (socket) {
+            socket.on('conversation_history', handleHistory);
+            socket.on('message', handleNewMessage);
+            socket.on('message_status', handleMessageStatus);
+            return () => {
+                socket.off('conversation_history', handleHistory);
+                socket.off('message', handleNewMessage);
+                socket.off('message_status', handleMessageStatus);
+            };
+        }
+    }, [socket, contact.phone]);
 
     const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => { setInput(e.target.value); const now = Date.now(); if (socket && (now - lastTypingTimeRef.current > 2000)) { socket.emit('typing', { user: user.username, phone: contact.phone }); lastTypingTimeRef.current = now; } };
 
@@ -585,7 +621,25 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                 : m.type === 'document' && m.mediaId ? <div className={`flex items-center gap-3 p-3 rounded-xl border min-w-[200px] transition-colors ${isDark ? 'bg-slate-900/50 border-white/10 hover:bg-slate-800/50' : 'bg-slate-50 border-slate-200'}`}><div className={`p-2.5 rounded-full ${isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-500'}`}><FileText className="w-5 h-5" /></div><div className="flex-1 min-w-0"><p className={`font-semibold truncate text-xs ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{m.text}</p><p className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>Documento</p></div><a href={`${API_URL}/api/media/${m.mediaId}`} target="_blank" rel="noopener noreferrer" className={`p-2 rounded-full transition ${isDark ? 'text-slate-400 hover:text-white hover:bg-white/10' : 'text-slate-400 hover:text-blue-500 hover:bg-slate-100'}`}><Download className="w-4 h-4" /></a></div>
                                     : <p className="whitespace-pre-wrap break-words leading-relaxed">{messageContent}</p>}
 
-                        <span className={`text-[10px] block text-right mt-1.5 opacity-70 ${isNote ? (isDark ? 'text-yellow-500' : 'text-yellow-600') : (isDark ? 'text-slate-400' : 'text-slate-400')}`}>{safeTime(m.timestamp)}</span>
+                        <span className={`text-[10px] block text-right mt-1.5 opacity-70 ${isNote ? (isDark ? 'text-yellow-500' : 'text-yellow-600') : (isDark ? 'text-slate-400' : 'text-slate-400')}`}>
+                            {isMe && m.delivery_status === 'failed' && (
+                                <span
+                                    title={
+                                        m.delivery_code === 131047
+                                            ? 'No entregado: la ventana de 24h con el cliente está cerrada. Envía una plantilla para reanudar.'
+                                            : m.delivery_code === 131026
+                                                ? 'No entregado: el número no tiene WhatsApp.'
+                                                : m.delivery_error
+                                                    ? 'No entregado por WhatsApp (' + m.delivery_error + ')'
+                                                    : 'No entregado por WhatsApp'
+                                    }
+                                    className="inline-flex items-center mr-1 align-middle"
+                                >
+                                    <AlertCircle className="w-3 h-3 text-red-400 inline-block" />
+                                </span>
+                            )}
+                            {safeTime(m.timestamp)}
+                        </span>
                     </div>
                 </div>
             </div>
