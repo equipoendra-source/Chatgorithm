@@ -6501,10 +6501,63 @@ io.on('connection', (socket) => {
         return; // no llamar next() — el evento se descarta
     });
 
-    socket.on('request_config', async () => { if (base) { const r = await base('Config').select().all(); socket.emit('config_list', r.map(x => ({ id: x.id, name: x.get('name'), type: x.get('type') }))); } });
-    socket.on('add_config', async (data) => { if (base) { await base('Config').create([{ fields: { "name": data.name, "type": data.type } }]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
-    socket.on('delete_config', async (id) => { if (base) { const realId = (typeof id === 'object' && id.id) ? id.id : id; await base('Config').destroy([realId]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
-    socket.on('update_config', async (d) => { if (base) { await base('Config').update([{ id: d.id, fields: { "name": d.name } }]); io.emit('config_list', (await base('Config').select().all()).map(r => ({ id: r.id, name: r.get('name'), type: r.get('type') }))); } });
+    // Helper: serializa filas de Config incluyendo description (campo opcional
+    // en Airtable — si no existe, se devuelve '' tolerantemente).
+    const serializeConfigRow = (r: any) => ({
+        id: r.id,
+        name: r.get('name'),
+        type: r.get('type'),
+        description: r.get('description') || ''
+    });
+    socket.on('request_config', async () => {
+        if (!base) return;
+        const r = await base('Config').select().all();
+        socket.emit('config_list', r.map(serializeConfigRow));
+    });
+    socket.on('add_config', async (data) => {
+        if (!base) return;
+        // description solo aplica a Department — Laura la usa para derivar.
+        // Para Status/Tag NO la persistimos aunque venga en el payload (un
+        // cliente con bundle viejo o un cliente HTTP malicioso podría intentar
+        // colarla; aquí filtramos por tipo).
+        const fields: any = { name: data.name, type: data.type };
+        if (data.type === 'Department' && data.description !== undefined) {
+            fields.description = String(data.description).slice(0, 300);
+        }
+        try {
+            await base('Config').create([{ fields }], { typecast: true });
+        } catch (e: any) {
+            // Tolerancia si el campo 'description' aún no existe en Airtable:
+            // creamos sin él y avisamos por log.
+            if (data.description !== undefined && /description|unknown field/i.test(e.message || '')) {
+                console.warn('[Config] El campo "description" no existe en la tabla Config. Créalo (Long text) para guardar descripciones de departamentos.');
+                delete fields.description;
+                await base('Config').create([{ fields }]);
+            } else throw e;
+        }
+        io.emit('config_list', (await base('Config').select().all()).map(serializeConfigRow));
+    });
+    socket.on('delete_config', async (id) => {
+        if (!base) return;
+        const realId = (typeof id === 'object' && id.id) ? id.id : id;
+        await base('Config').destroy([realId]);
+        io.emit('config_list', (await base('Config').select().all()).map(serializeConfigRow));
+    });
+    socket.on('update_config', async (d) => {
+        if (!base) return;
+        const fields: any = { name: d.name };
+        if (d.description !== undefined) fields.description = String(d.description).slice(0, 300);
+        try {
+            await base('Config').update([{ id: d.id, fields }], { typecast: true });
+        } catch (e: any) {
+            if (d.description !== undefined && /description|unknown field/i.test(e.message || '')) {
+                console.warn('[Config] El campo "description" no existe en la tabla Config. Créalo (Long text) para guardar descripciones de departamentos.');
+                delete fields.description;
+                await base('Config').update([{ id: d.id, fields }]);
+            } else throw e;
+        }
+        io.emit('config_list', (await base('Config').select().all()).map(serializeConfigRow));
+    });
     socket.on('request_quick_replies', async () => { if (base) { const r = await base('QuickReplies').select().all(); socket.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
     socket.on('add_quick_reply', async (d) => { if (base) { await base('QuickReplies').create([{ fields: { "Title": d.title, "Content": d.content, "Shortcut": d.shortcut } }]); const r = await base('QuickReplies').select().all(); io.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
     socket.on('delete_quick_reply', async (id) => { if (base) { await base('QuickReplies').destroy([id]); const r = await base('QuickReplies').select().all(); io.emit('quick_replies_list', r.map(x => ({ id: x.id, title: x.get('Title'), content: x.get('Content'), shortcut: x.get('Shortcut') }))); } });
@@ -8601,17 +8654,38 @@ async function getDepartmentLabels(): Promise<DepartmentLabel[]> {
     const fallback = SECTOR_DEPARTMENT_LABELS.taller;
     if (!base) return fallback;
     try {
-        const r = await base('BotSettings').select({
-            filterByFormula: "{Setting} = 'department_labels'",
-            maxRecords: 1
-        }).firstPage();
-        if (r.length === 0) return fallback;
-        const raw = r[0].get('Value') as string;
-        if (!raw) return fallback;
-        const parsed = JSON.parse(raw);
-        const normalized = normalizeDeptLabels(parsed);
-        return normalized || fallback;
-    } catch {
+        // Fuente única tras unificación: tabla Config con type='Department'.
+        // Antes leíamos BotSettings.department_labels (lista JSON aparte).
+        // Ahora la misma lista que el admin gestiona en Ajustes → CRM →
+        // Departamentos sirve también para Laura (incluye descripción opcional
+        // que se inyecta en el system prompt para que decida derivar).
+        const rows = await base('Config').select({
+            filterByFormula: "{type} = 'Department'"
+        }).all();
+        if (rows.length === 0) return fallback;
+        // Dedupe defensivo por name.toLowerCase(): si por race entre instancias
+        // (scale-out de Render) o por edición manual en Airtable acaban dos
+        // filas con el mismo nombre, las colapsamos en una sola — la primera
+        // con descripción no vacía gana. Esto evita un enum duplicado en el
+        // tool `assign_department` de Gemini.
+        const dedup = new Map<string, DepartmentLabel>();
+        for (const r of rows) {
+            const name = String(r.get('name') || '').trim();
+            if (!name) continue;
+            const key = name.toLowerCase();
+            const description = String(r.get('description') || '').trim();
+            const existing = dedup.get(key);
+            if (!existing) {
+                dedup.set(key, { name, description });
+            } else if (!existing.description && description) {
+                // Preferir la versión que tiene descripción no vacía
+                dedup.set(key, { name: existing.name, description });
+            }
+        }
+        const labels = Array.from(dedup.values());
+        return labels.length > 0 ? labels : fallback;
+    } catch (e: any) {
+        console.warn('[getDepartmentLabels] Error leyendo Config, usando fallback:', e?.message);
         return fallback;
     }
 }
@@ -8661,12 +8735,38 @@ app.post('/api/bot/department-labels', async (req, res) => {
         seen.add(key);
     }
     try {
-        const json = JSON.stringify(cleaned);
-        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'department_labels'", maxRecords: 1 }).firstPage();
-        if (r.length > 0) {
-            await base('BotSettings').update([{ id: r[0].id, fields: { Value: json } }]);
-        } else {
-            await base('BotSettings').create([{ fields: { Setting: 'department_labels', Value: json } }]);
+        // Shim post-unificación: este endpoint sigue siendo válido para
+        // clientes con bundle viejo en caché, pero ahora escribe a la tabla
+        // Config (fuente única). Hacemos UPSERT sin "delete missing" — es
+        // decir, no borramos los que no estén en el payload, para no destruir
+        // departamentos creados desde el editor del CRM por accidente.
+        const existing = await base('Config').select({
+            filterByFormula: "{type} = 'Department'"
+        }).all();
+        const byNameLC = new Map<string, any>();
+        for (const r of existing) {
+            const n = String(r.get('name') || '').trim().toLowerCase();
+            if (n) byNameLC.set(n, r);
+        }
+        for (const dep of cleaned) {
+            const key = dep.name.toLowerCase();
+            const found = byNameLC.get(key);
+            const fields: any = { name: dep.name, type: 'Department', description: dep.description };
+            try {
+                if (found) {
+                    await base('Config').update([{ id: found.id, fields }], { typecast: true });
+                } else {
+                    await base('Config').create([{ fields }], { typecast: true });
+                }
+            } catch (e: any) {
+                // Tolerancia si la tabla Config aún no tiene el campo description
+                if (/description|unknown field/i.test(e.message || '')) {
+                    console.warn('[POST /bot/department-labels] La tabla Config no tiene el campo "description". Créalo (Long text) para guardar descripciones.');
+                    delete fields.description;
+                    if (found) await base('Config').update([{ id: found.id, fields }]);
+                    else await base('Config').create([{ fields }]);
+                } else throw e;
+            }
         }
         res.json({ success: true, departments: cleaned });
     } catch (e: any) {
@@ -8791,15 +8891,36 @@ app.post('/api/bot/setup-wizard', async (req, res) => {
             await base('BotSettings').create([{ fields: { Setting: 'field_labels', Value: labelsJson } }]);
         }
 
-        // 2b. Guardar también los department_labels según el sector elegido
-        // (los 3 departamentos a los que Laura puede derivar con assign_department)
+        // 2b. Sembrar los department_labels del sector en la tabla Config
+        // (fuente única tras unificación). MERGE sin pisar: si el admin ya
+        // tenía deptos creados desde el CRM, los conservamos y solo añadimos
+        // los del sector que no existan aún (comparación case-insensitive).
+        // Antes pisaba BotSettings.department_labels enterando lo previo.
         const deptLabels = SECTOR_DEPARTMENT_LABELS[sector] || SECTOR_DEPARTMENT_LABELS.otro;
-        const deptLabelsJson = JSON.stringify(deptLabels);
-        const r2b = await base('BotSettings').select({ filterByFormula: "{Setting} = 'department_labels'", maxRecords: 1 }).firstPage();
-        if (r2b.length > 0) {
-            await base('BotSettings').update([{ id: r2b[0].id, fields: { Value: deptLabelsJson } }]);
-        } else {
-            await base('BotSettings').create([{ fields: { Setting: 'department_labels', Value: deptLabelsJson } }]);
+        try {
+            const existingDept = await base('Config').select({
+                filterByFormula: "{type} = 'Department'"
+            }).all();
+            const existingNames = new Set(
+                existingDept.map(r => String(r.get('name') || '').trim().toLowerCase()).filter(Boolean)
+            );
+            const toCreate = deptLabels.filter(d => !existingNames.has(d.name.toLowerCase()));
+            for (const dep of toCreate) {
+                const fields: any = { name: dep.name, type: 'Department', description: dep.description };
+                try {
+                    await base('Config').create([{ fields }], { typecast: true });
+                } catch (e: any) {
+                    if (/description|unknown field/i.test(e.message || '')) {
+                        delete fields.description;
+                        await base('Config').create([{ fields }]);
+                    } else throw e;
+                }
+            }
+            if (toCreate.length > 0) {
+                console.log(`📋 [Wizard] Sembrados ${toCreate.length} departamentos nuevos del sector "${sector}" en Config (conservando los preexistentes).`);
+            }
+        } catch (e: any) {
+            console.warn('[Wizard] Error sembrando departamentos del sector en Config:', e?.message);
         }
 
         // 3. Guardar el ESTADO COMPLETO del wizard para poder editarlo después sin empezar de cero
@@ -9520,4 +9641,76 @@ process.on('uncaughtException', (err: any) => {
     // No matamos el proceso — Render reiniciaría el servidor.
 });
 
-httpServer.listen(PORT, () => { console.log(`🚀 Servidor Listo ${PORT}`); });
+// Migración one-shot post-unificación: si el cliente tiene su lista de
+// departamentos vieja en BotSettings.department_labels (formato anterior)
+// pero la tabla Config aún no tiene ningún Department, sembramos los
+// departamentos en Config preservando sus descripciones. Idempotente:
+// si Config ya tiene Departments, no hace nada.
+async function migrateDepartmentsToConfig(): Promise<void> {
+    if (!base) return;
+    try {
+        const existingDept = await base('Config').select({
+            filterByFormula: "{type} = 'Department'"
+        }).all();
+        if (existingDept.length > 0) {
+            // Ya migrado o el cliente ya gestiona desde el CRM — nada que hacer
+            return;
+        }
+        const r = await base('BotSettings').select({
+            filterByFormula: "{Setting} = 'department_labels'",
+            maxRecords: 1
+        }).firstPage();
+        if (r.length === 0) {
+            console.log('[Migration] No hay department_labels antiguos que migrar.');
+            return;
+        }
+        const raw = r[0].get('Value') as string;
+        if (!raw) return;
+        const parsed = JSON.parse(raw);
+        const labels: { name: string; description: string }[] = [];
+        if (Array.isArray(parsed)) {
+            for (const d of parsed) {
+                if (d?.name) labels.push({
+                    name: String(d.name).trim(),
+                    description: String(d.description || '').trim()
+                });
+            }
+        } else if (parsed && typeof parsed === 'object') {
+            // Formato antiguo {dept1, dept2, dept3}
+            for (const k of ['dept1', 'dept2', 'dept3']) {
+                const d = parsed[k];
+                if (d?.name) labels.push({
+                    name: String(d.name).trim(),
+                    description: String(d.description || '').trim()
+                });
+            }
+        }
+        if (labels.length === 0) {
+            console.log('[Migration] department_labels antiguos vacíos, nada que migrar.');
+            return;
+        }
+        for (const dep of labels) {
+            const fields: any = { name: dep.name, type: 'Department', description: dep.description };
+            try {
+                await base('Config').create([{ fields }], { typecast: true });
+            } catch (e: any) {
+                if (/description|unknown field/i.test(e.message || '')) {
+                    console.warn('[Migration] Campo "description" no existe aún en tabla Config. Sembrando sin descripción.');
+                    delete fields.description;
+                    await base('Config').create([{ fields }]);
+                } else throw e;
+            }
+        }
+        console.log(`✅ [Migration] Migrados ${labels.length} departamentos de BotSettings.department_labels → tabla Config.`);
+    } catch (e: any) {
+        console.warn('[Migration] Error migrando departamentos (no bloquea arranque):', e?.message);
+    }
+}
+
+// Ejecutar migración antes de aceptar conexiones para evitar que las primeras
+// peticiones a Laura caigan con departamentos vacíos.
+migrateDepartmentsToConfig()
+    .catch(e => console.warn('[Migration] Fallo no fatal:', e?.message))
+    .finally(() => {
+        httpServer.listen(PORT, () => { console.log(`🚀 Servidor Listo ${PORT}`); });
+    });

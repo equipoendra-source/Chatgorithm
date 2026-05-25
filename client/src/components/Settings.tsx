@@ -38,7 +38,7 @@ interface SettingsProps {
 }
 
 interface Agent { id: string; name: string; role: string; preferences?: any; }
-interface ConfigItem { id: string; name: string; type: string; }
+interface ConfigItem { id: string; name: string; type: string; description?: string; }
 interface QuickReply { id: string; title: string; content: string; shortcut: string; }
 
 export function Settings({ onBack, socket, currentUserRole, quickReplies = [], currentUser, updateMyPreferences, selectedAccountId }: SettingsProps) {
@@ -53,6 +53,10 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     // Estados de Datos
     const [agents, setAgents] = useState<Agent[]>([]);
     const [configList, setConfigList] = useState<ConfigItem[]>([]);
+    // Flag: distingue "estoy cargando la lista del servidor" vs "lista
+    // realmente vacía". Sin esto, abrir la pestaña IA antes de que llegue
+    // config_list mostraba "no hay departamentos" engañosamente.
+    const [configLoaded, setConfigLoaded] = useState<boolean>(false);
     const [phoneLines, setPhoneLines] = useState<{ id: string, name: string }[]>([]);
     const [localQuickReplies, setLocalQuickReplies] = useState<QuickReply[]>(quickReplies);
 
@@ -75,6 +79,10 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [formRole, setFormRole] = useState('Admin');
     const [formPass, setFormPass] = useState('');
     const [formType, setFormType] = useState('Department');
+    // Descripción opcional de un departamento — la lee Laura en su system
+    // prompt para decidir a quién derivar. Solo aplica cuando formType ===
+    // 'Department'. Vacía para Status y Tag (se ignora server-side igualmente).
+    const [formDescription, setFormDescription] = useState('');
 
     // QR Forms
     const [qrTitle, setQrTitle] = useState('');
@@ -126,7 +134,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             fetch(`${API_URL}/accounts`).then(r => r.json()).then(setPhoneLines).catch(() => { });
 
             socket.on('agents_list', (list: Agent[]) => { setAgents(list); });
-            socket.on('config_list', (list: ConfigItem[]) => setConfigList(list));
+            socket.on('config_list', (list: ConfigItem[]) => { setConfigList(list); setConfigLoaded(true); });
             socket.on('quick_replies_list', (list: QuickReply[]) => setLocalQuickReplies(list));
 
             socket.on('action_error', (msg: string) => { setError(msg); setIsSaving(false); });
@@ -152,30 +160,11 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                 .then(d => { if (typeof d.enabled === 'boolean') setBotEnabled(d.enabled); })
                 .catch(() => { /* fallback: asumimos true */ })
                 .finally(() => setBotEnabledLoading(false));
-            // Cargar departamentos configurados (lista dinámica)
-            setDeptLoading(true);
-            fetch(`${API_URL}/bot/department-labels`)
-                .then(r => r.json())
-                .then(d => {
-                    // Nuevo formato: { departments: [...] }
-                    if (Array.isArray(d?.departments)) {
-                        setBotDepartments(d.departments.map((dep: any) => ({
-                            name: String(dep?.name || ''),
-                            description: String(dep?.description || '')
-                        })));
-                        return;
-                    }
-                    // Backward compat: formato antiguo { dept1, dept2, dept3 }
-                    if (d?.dept1?.name) {
-                        const arr: { name: string; description: string }[] = [];
-                        ['dept1', 'dept2', 'dept3'].forEach(k => {
-                            if (d[k]?.name) arr.push({ name: d[k].name, description: d[k].description || '' });
-                        });
-                        setBotDepartments(arr);
-                    }
-                })
-                .catch(() => { /* fallback: lista vacía, el usuario verá un mensaje */ })
-                .finally(() => setDeptLoading(false));
+            // (eliminado) — antes había aquí un fetch a /bot/department-labels
+            // para cargar la lista del editor del bot. Tras la unificación,
+            // la única fuente es la tabla Config (ya cargada vía socket
+            // request_config → config_list en el resto del componente).
+            // Mantener el fetch sería un round-trip HTTP extra sin propósito.
         }
         if (activeTab === 'agenda') {
             fetch(`${API_URL}/schedule`).then(r => r.json()).then(d => {
@@ -386,7 +375,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     };
 
     // Modales Agentes / Config
-    const closeModal = () => { setModalType('none'); setFormName(''); setFormPass(''); setError(''); setSelectedItem(null); setQrTitle(''); setQrContent(''); setQrShortcut(''); setIsSaving(false); };
+    const closeModal = () => { setModalType('none'); setFormName(''); setFormPass(''); setFormDescription(''); setError(''); setSelectedItem(null); setQrTitle(''); setQrContent(''); setQrShortcut(''); setIsSaving(false); };
     const openCreateAgent = () => {
         setModalType('create_agent');
         setFormName('');
@@ -412,8 +401,8 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         const newPrefs = { ...(agent.preferences || {}), toursSeen: {} };
         socket.emit('update_agent', { agentId: agent.id, updates: { name: agent.name, role: agent.role, preferences: newPrefs } });
     };
-    const openAddConfig = (type: string) => { setFormType(type); setFormName(''); setModalType('add_config'); };
-    const openEditConfig = (item: ConfigItem) => { setSelectedItem(item); setFormName(item.name); setModalType('edit_config'); };
+    const openAddConfig = (type: string) => { setFormType(type); setFormName(''); setFormDescription(''); setModalType('add_config'); };
+    const openEditConfig = (item: ConfigItem) => { setSelectedItem(item); setFormName(item.name); setFormType(item.type); setFormDescription(item.description || ''); setModalType('edit_config'); };
     const openDeleteConfig = (item: ConfigItem) => { setSelectedItem(item); setModalType('delete_config'); };
 
     // Modales Quick Replies
@@ -429,8 +418,10 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             case 'create_agent': socket.emit('create_agent', { newAgent: { name: formName, role: formRole, password: formPass } }); break;
             case 'edit_agent': const updates: any = { name: formName, role: formRole }; if (formPass) updates.password = formPass; socket.emit('update_agent', { agentId: selectedItem.id, updates }); break;
             case 'delete_agent': socket.emit('delete_agent', { agentId: selectedItem.id }); break;
-            case 'add_config': socket.emit('add_config', { name: formName, type: formType }); break;
-            case 'edit_config': socket.emit('update_config', { id: selectedItem.id, name: formName }); break;
+            // Solo persistimos description cuando type='Department' — para Status/Tag
+            // no aporta nada. El backend la ignora de todas formas si llega.
+            case 'add_config': socket.emit('add_config', { name: formName, type: formType, ...(formType === 'Department' ? { description: formDescription } : {}) }); break;
+            case 'edit_config': socket.emit('update_config', { id: selectedItem.id, name: formName, ...(selectedItem?.type === 'Department' ? { description: formDescription } : {}) }); break;
             case 'delete_config': socket.emit('delete_config', selectedItem.id); break;
             case 'add_quick_reply': socket.emit('add_quick_reply', { title: qrTitle, content: qrContent, shortcut: qrShortcut }); break;
             case 'edit_quick_reply': socket.emit('update_quick_reply', { id: selectedItem.id, title: qrTitle, content: qrContent, shortcut: qrShortcut }); break;
@@ -616,7 +607,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
                     {/* CONFIG */}
                     {/* CONFIG */}
-                    {activeTab === 'config' && (<div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 pb-20"><div className={`p-5 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-4"><h2 className={`text-base md:text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><Briefcase className="w-5 h-5 text-purple-500" /> Departamentos</h2><button onClick={() => openAddConfig('Department')} className={`p-2 rounded-lg transition ${isDark ? 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}><Plus className="w-4 h-4" /></button></div><div className="space-y-2">{departments.map(d => (<div key={d.id} className={`flex justify-between items-center p-3 rounded-xl border text-sm font-medium group ${isDark ? 'bg-purple-500/10 border-purple-500/20 text-purple-300' : 'bg-purple-50 border-purple-100 text-purple-700'}`}><span className="truncate">{d.name}</span><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"><button onClick={() => openEditConfig(d)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-purple-400' : 'bg-white hover:text-purple-900'}`}><Pencil className="w-3.5 h-3.5" /></button><button onClick={() => openDeleteConfig(d)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-red-400' : 'bg-white hover:text-red-600'}`}><Trash2 className="w-3.5 h-3.5" /></button></div></div>))}</div></div><div className={`p-5 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-4"><h2 className={`text-base md:text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><CheckCircle className="w-5 h-5 text-green-500" /> Estados</h2><button onClick={() => openAddConfig('Status')} className={`p-2 rounded-lg transition ${isDark ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-green-100 text-green-700 hover:bg-green-200'}`}><Plus className="w-4 h-4" /></button></div><div className="space-y-2">{statuses.map(s => (<div key={s.id} className={`flex justify-between items-center p-3 rounded-xl border text-sm font-medium group ${isDark ? 'bg-green-500/10 border-green-500/20 text-green-300' : 'bg-green-50 border-green-100 text-green-700'}`}><span className="truncate">{s.name}</span><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"><button onClick={() => openEditConfig(s)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-green-400' : 'bg-white hover:text-green-900'}`}><Pencil className="w-3.5 h-3.5" /></button><button onClick={() => openDeleteConfig(s)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-red-400' : 'bg-white hover:text-red-600'}`}><Trash2 className="w-3.5 h-3.5" /></button></div></div>))}</div></div><div className={`p-5 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-4"><h2 className={`text-base md:text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><Tag className="w-5 h-5 text-orange-500" /> Etiquetas</h2><button onClick={() => openAddConfig('Tag')} className={`p-2 rounded-lg transition ${isDark ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30' : 'bg-orange-100 text-orange-700 hover:bg-orange-200'}`}><Plus className="w-4 h-4" /></button></div><div className="space-y-2">{tags.map(t => (<div key={t.id} className={`flex justify-between items-center p-3 rounded-xl border text-sm font-medium group ${isDark ? 'bg-orange-500/10 border-orange-500/20 text-orange-300' : 'bg-orange-50 border-orange-100 text-orange-700'}`}><span className="truncate">{t.name}</span><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"><button onClick={() => openEditConfig(t)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-orange-400' : 'bg-white hover:text-orange-900'}`}><Pencil className="w-3.5 h-3.5" /></button><button onClick={() => openDeleteConfig(t)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-red-400' : 'bg-white hover:text-red-600'}`}><Trash2 className="w-3.5 h-3.5" /></button></div></div>))}</div></div></div>)}
+                    {activeTab === 'config' && (<div className="max-w-6xl mx-auto grid grid-cols-1 lg:grid-cols-3 gap-6 pb-20"><div className={`p-5 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-4"><h2 className={`text-base md:text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><Briefcase className="w-5 h-5 text-purple-500" /> Departamentos</h2><button onClick={() => openAddConfig('Department')} className={`p-2 rounded-lg transition ${isDark ? 'bg-purple-500/20 text-purple-400 hover:bg-purple-500/30' : 'bg-purple-100 text-purple-700 hover:bg-purple-200'}`}><Plus className="w-4 h-4" /></button></div><div className="space-y-2">{departments.map(d => (<div key={d.id} className={`flex justify-between items-start gap-2 p-3 rounded-xl border text-sm font-medium group ${isDark ? 'bg-purple-500/10 border-purple-500/20 text-purple-300' : 'bg-purple-50 border-purple-100 text-purple-700'}`}><div className="flex-1 min-w-0"><div className="truncate">{d.name}</div>{d.description && <div className={`text-[11px] mt-0.5 line-clamp-2 leading-snug font-normal ${isDark ? 'text-purple-300/70' : 'text-purple-700/70'}`} title={d.description}>{d.description}</div>}</div><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"><button onClick={() => openEditConfig(d)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-purple-400' : 'bg-white hover:text-purple-900'}`}><Pencil className="w-3.5 h-3.5" /></button><button onClick={() => openDeleteConfig(d)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-red-400' : 'bg-white hover:text-red-600'}`}><Trash2 className="w-3.5 h-3.5" /></button></div></div>))}{departments.length === 0 && (<div className={`text-center py-6 text-xs italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>No hay departamentos. Pulsa + para crear uno.</div>)}</div></div><div className={`p-5 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-4"><h2 className={`text-base md:text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><CheckCircle className="w-5 h-5 text-green-500" /> Estados</h2><button onClick={() => openAddConfig('Status')} className={`p-2 rounded-lg transition ${isDark ? 'bg-green-500/20 text-green-400 hover:bg-green-500/30' : 'bg-green-100 text-green-700 hover:bg-green-200'}`}><Plus className="w-4 h-4" /></button></div><div className="space-y-2">{statuses.map(s => (<div key={s.id} className={`flex justify-between items-center p-3 rounded-xl border text-sm font-medium group ${isDark ? 'bg-green-500/10 border-green-500/20 text-green-300' : 'bg-green-50 border-green-100 text-green-700'}`}><span className="truncate">{s.name}</span><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"><button onClick={() => openEditConfig(s)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-green-400' : 'bg-white hover:text-green-900'}`}><Pencil className="w-3.5 h-3.5" /></button><button onClick={() => openDeleteConfig(s)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-red-400' : 'bg-white hover:text-red-600'}`}><Trash2 className="w-3.5 h-3.5" /></button></div></div>))}</div></div><div className={`p-5 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}><div className="flex justify-between items-center mb-4"><h2 className={`text-base md:text-lg font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}><Tag className="w-5 h-5 text-orange-500" /> Etiquetas</h2><button onClick={() => openAddConfig('Tag')} className={`p-2 rounded-lg transition ${isDark ? 'bg-orange-500/20 text-orange-400 hover:bg-orange-500/30' : 'bg-orange-100 text-orange-700 hover:bg-orange-200'}`}><Plus className="w-4 h-4" /></button></div><div className="space-y-2">{tags.map(t => (<div key={t.id} className={`flex justify-between items-center p-3 rounded-xl border text-sm font-medium group ${isDark ? 'bg-orange-500/10 border-orange-500/20 text-orange-300' : 'bg-orange-50 border-orange-100 text-orange-700'}`}><span className="truncate">{t.name}</span><div className="flex gap-1 md:opacity-0 md:group-hover:opacity-100 transition-opacity flex-shrink-0"><button onClick={() => openEditConfig(t)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-orange-400' : 'bg-white hover:text-orange-900'}`}><Pencil className="w-3.5 h-3.5" /></button><button onClick={() => openDeleteConfig(t)} className={`p-1.5 rounded-md shadow-sm ${isDark ? 'bg-slate-700 hover:text-red-400' : 'bg-white hover:text-red-600'}`}><Trash2 className="w-3.5 h-3.5" /></button></div></div>))}</div></div></div>)}
 
                     {/* OTROS COMPONENTES */}
                     {activeTab === 'whatsapp' && <WhatsAppTemplatesManager />}
@@ -696,110 +687,59 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                             </div>
 
                             {/* ============================================================ */}
-                            {/* EDITOR DE DEPARTAMENTOS — donde Laura deriva chats (N dinámico) */}
+                            {/* DEPARTAMENTOS — ahora unificados con el CRM                 */}
                             {/* ============================================================ */}
-                            <div>
-                                <button
-                                    onClick={() => setShowDepartmentEditor(!showDepartmentEditor)}
-                                    className={`w-full flex items-center justify-between gap-2 px-4 py-3 rounded-xl border text-sm font-semibold transition-all ${isDark ? 'bg-slate-800/40 border-slate-700 text-slate-300 hover:bg-slate-800' : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
-                                    <div className="flex items-center gap-2">
-                                        <Briefcase size={16} className={isDark ? 'text-slate-500' : 'text-slate-400'} />
-                                        <span>Departamentos a los que Laura puede derivar</span>
-                                        <span className={`text-[10px] px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-700 text-slate-400' : 'bg-slate-200 text-slate-500'}`}>{botDepartments.length} dpto{botDepartments.length === 1 ? '' : 's'}</span>
+                            {/* Antes había aquí un editor independiente que guardaba en
+                                BotSettings.department_labels. Ahora Laura lee directamente
+                                los departamentos del CRM (tabla Config) para que sea UNA
+                                SOLA fuente de verdad. Mostramos un panel informativo con
+                                un atajo a la pestaña CRM y una vista previa de los
+                                departamentos actuales para que el admin sepa qué ve Laura. */}
+                            <div className={`p-5 rounded-2xl border ${isDark ? 'bg-blue-500/5 border-blue-500/20' : 'bg-blue-50/60 border-blue-200/60'}`}>
+                                <div className="flex items-start gap-3">
+                                    <div className={`p-2 rounded-lg ${isDark ? 'bg-blue-500/15 text-blue-300' : 'bg-blue-100 text-blue-700'}`}>
+                                        <Briefcase size={18} />
                                     </div>
-                                    {showDepartmentEditor ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-                                </button>
-                                {showDepartmentEditor && (
-                                    <div className={`mt-3 p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
-                                        <div className={`mb-4 px-3 py-2 rounded-lg text-xs ${isDark ? 'bg-blue-500/10 text-blue-300' : 'bg-blue-50 text-blue-800'}`}>
-                                            💡 Cuando un cliente pide hablar con un humano, Laura deriva el chat a UNO de estos departamentos según el tema. Cuanto más clara sea la descripción, mejor decidirá Laura. Puedes añadir hasta {MAX_DEPARTMENTS}.
-                                        </div>
-                                        {deptLoading ? (
-                                            <div className="p-6 text-center text-slate-400"><RefreshCw className="animate-spin inline mr-2" /> Cargando...</div>
+                                    <div className="flex-1 min-w-0">
+                                        <div className={`font-bold text-sm ${isDark ? 'text-blue-200' : 'text-blue-800'}`}>Departamentos a los que Laura puede derivar</div>
+                                        <p className={`text-xs mt-1 ${isDark ? 'text-blue-300/80' : 'text-blue-700/80'}`}>
+                                            Laura usa la <strong>misma lista</strong> que el CRM. Edita los nombres y descripciones en la pestaña <strong>CRM → Departamentos</strong>. Una buena descripción ayuda a Laura a elegir el departamento correcto al derivar.
+                                        </p>
+                                        <button
+                                            onClick={() => setActiveTab('config')}
+                                            className={`mt-3 inline-flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-bold transition ${isDark ? 'bg-blue-500/20 hover:bg-blue-500/30 text-blue-200' : 'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+                                            Ir a CRM <ChevronRight size={14} />
+                                        </button>
+                                        {!configLoaded ? (
+                                            <div className={`mt-4 text-[11px] italic ${isDark ? 'text-blue-300/60' : 'text-blue-700/60'}`}>
+                                                Cargando departamentos del CRM...
+                                            </div>
+                                        ) : departments.length === 0 ? (
+                                            <div className={`mt-4 text-[11px] ${isDark ? 'text-amber-300/80' : 'text-amber-700'}`}>
+                                                ⚠️ No hay departamentos creados todavía. Ve a CRM y añade al menos uno.
+                                            </div>
                                         ) : (
-                                            <div className="space-y-5">
-                                                {botDepartments.length === 0 && (
-                                                    <div className={`p-4 rounded-xl border-2 border-dashed text-center text-sm ${isDark ? 'border-slate-700 text-slate-400' : 'border-slate-300 text-slate-500'}`}>
-                                                        No hay departamentos configurados. Añade el primero abajo.
-                                                    </div>
-                                                )}
-                                                {botDepartments.map((dep, index) => {
-                                                    const gradients = [
-                                                        'from-emerald-500 to-teal-600',
-                                                        'from-orange-500 to-amber-600',
-                                                        'from-purple-500 to-pink-600',
-                                                        'from-blue-500 to-cyan-600',
-                                                        'from-rose-500 to-red-600',
-                                                        'from-yellow-500 to-orange-600',
-                                                    ];
-                                                    const grad = gradients[index % gradients.length];
-                                                    return (
-                                                        <div key={index} className={`p-4 rounded-xl border ${isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                                                            <div className="flex items-start justify-between mb-2">
-                                                                <div className={`text-xs font-bold uppercase bg-gradient-to-r ${grad} bg-clip-text text-transparent`}>
-                                                                    Departamento {index + 1}
-                                                                </div>
-                                                                <button
-                                                                    onClick={() => removeDepartment(index)}
-                                                                    disabled={botDepartments.length <= 1}
-                                                                    title={botDepartments.length <= 1 ? 'Necesitas al menos 1 departamento' : 'Eliminar este departamento'}
-                                                                    className={`p-1.5 rounded-lg border transition ${botDepartments.length <= 1
-                                                                        ? 'opacity-30 cursor-not-allowed border-slate-300'
-                                                                        : (isDark ? 'bg-slate-800 border-slate-700 text-slate-400 hover:text-red-400 hover:border-red-500/40' : 'bg-white border-slate-200 text-slate-400 hover:text-red-500 hover:border-red-300')}`}>
-                                                                    <Trash2 className="w-3.5 h-3.5" />
-                                                                </button>
-                                                            </div>
-                                                            <div className="space-y-3">
-                                                                <div>
-                                                                    <label className={`text-xs font-bold uppercase block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Nombre del departamento</label>
-                                                                    <input
-                                                                        type="text"
-                                                                        value={dep.name}
-                                                                        onChange={(e) => updateDepartment(index, 'name', e.target.value)}
-                                                                        placeholder="Ej: Ventas, Recepción, Urgencias, Postventa..."
-                                                                        maxLength={50}
-                                                                        className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 outline-none ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}
-                                                                    />
-                                                                </div>
-                                                                <div>
-                                                                    <label className={`text-xs font-bold uppercase block mb-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Cuándo derivar aquí (descripción para Laura)</label>
-                                                                    <textarea
-                                                                        value={dep.description}
-                                                                        onChange={(e) => updateDepartment(index, 'description', e.target.value)}
-                                                                        placeholder="Ej: para temas comerciales, presupuestos, compra de productos..."
-                                                                        rows={2}
-                                                                        maxLength={300}
-                                                                        className={`w-full px-3 py-2 rounded-lg border text-sm focus:ring-2 focus:ring-teal-500 outline-none resize-none ${isDark ? 'bg-slate-900/50 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}
-                                                                    />
-                                                                </div>
-                                                            </div>
-                                                        </div>
-                                                    );
-                                                })}
-                                                {/* Botón añadir departamento */}
-                                                <button
-                                                    onClick={addDepartment}
-                                                    disabled={botDepartments.length >= MAX_DEPARTMENTS}
-                                                    className={`w-full p-3 rounded-xl border-2 border-dashed font-semibold text-sm flex items-center justify-center gap-2 transition ${botDepartments.length >= MAX_DEPARTMENTS
-                                                        ? 'opacity-40 cursor-not-allowed border-slate-300 text-slate-400'
-                                                        : (isDark ? 'border-slate-600 text-slate-400 hover:border-teal-500 hover:text-teal-400 hover:bg-teal-500/5' : 'border-slate-300 text-slate-500 hover:border-teal-500 hover:text-teal-600 hover:bg-teal-50')}`}>
-                                                    <Plus className="w-4 h-4" />
-                                                    {botDepartments.length >= MAX_DEPARTMENTS
-                                                        ? `Máximo ${MAX_DEPARTMENTS} departamentos alcanzado`
-                                                        : 'Añadir departamento'}
-                                                </button>
-                                                <div className="flex justify-end pt-2">
-                                                    <button
-                                                        onClick={handleSaveDepartments}
-                                                        disabled={deptSaving}
-                                                        className="bg-teal-600 hover:bg-teal-700 text-white font-bold py-3 px-8 rounded-xl shadow-lg active:scale-95 transition-all flex items-center gap-2 disabled:opacity-50">
-                                                        <Save size={18} /> {deptSaving ? 'Guardando...' : 'Guardar departamentos'}
-                                                    </button>
+                                            <div className="mt-4">
+                                                <div className={`text-[10px] font-bold uppercase tracking-wider mb-2 ${isDark ? 'text-blue-300/60' : 'text-blue-700/60'}`}>
+                                                    Departamentos actuales ({departments.length})
                                                 </div>
+                                                <div className="flex flex-wrap gap-1.5">
+                                                    {departments.map(d => (
+                                                        <span key={d.id} title={d.description || 'Sin descripción — añade una para que Laura derive mejor'} className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-semibold ${d.description ? (isDark ? 'bg-blue-500/15 text-blue-200 border border-blue-500/30' : 'bg-white text-blue-700 border border-blue-200') : (isDark ? 'bg-amber-500/15 text-amber-200 border border-amber-500/30' : 'bg-amber-50 text-amber-700 border border-amber-200')}`}>
+                                                            {d.name}
+                                                            {!d.description && <span title="Sin descripción">⚠️</span>}
+                                                        </span>
+                                                    ))}
+                                                </div>
+                                                {departments.some(d => !d.description) && (
+                                                    <p className={`text-[10px] mt-2 ${isDark ? 'text-amber-300/80' : 'text-amber-700'}`}>
+                                                        ⚠️ Hay departamentos sin descripción. Laura puede equivocarse al derivar. Edítalos en CRM y añade una descripción clara.
+                                                    </p>
+                                                )}
                                             </div>
                                         )}
                                     </div>
-                                )}
+                                </div>
                             </div>
 
                             {/* Manager de documentos */}
@@ -1058,10 +998,27 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                     </>
                                 )}
                                 {(modalType.includes('config') && !modalType.includes('delete')) && (
-                                    <div>
-                                        <label className="text-xs font-bold text-slate-400 uppercase ml-1 mb-1 block">Nombre {formType === 'Department' ? 'Departamento' : formType === 'Status' ? 'Estado' : 'Etiqueta'}</label>
-                                        <input value={formName} onChange={e => setFormName(e.target.value)} placeholder={formType === 'Department' ? "Ej: Ventas" : formType === 'Status' ? "Ej: Abierto" : "Ej: VIP"} className={`w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500/50 ${isDark ? 'bg-slate-900/50 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`} required />
-                                    </div>
+                                    <>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-400 uppercase ml-1 mb-1 block">Nombre {formType === 'Department' ? 'Departamento' : formType === 'Status' ? 'Estado' : 'Etiqueta'}</label>
+                                            <input value={formName} onChange={e => setFormName(e.target.value)} placeholder={formType === 'Department' ? "Ej: Ventas" : formType === 'Status' ? "Ej: Abierto" : "Ej: VIP"} className={`w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500/50 ${isDark ? 'bg-slate-900/50 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`} required />
+                                        </div>
+                                        {formType === 'Department' && (
+                                            <div>
+                                                <label className="text-xs font-bold text-slate-400 uppercase ml-1 mb-1 block">Descripción (para Laura)</label>
+                                                <textarea
+                                                    value={formDescription}
+                                                    onChange={e => setFormDescription(e.target.value.slice(0, 300))}
+                                                    placeholder="Ej: averías, reparaciones y mantenimiento de vehículos"
+                                                    rows={3}
+                                                    className={`w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500/50 resize-none ${isDark ? 'bg-slate-900/50 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
+                                                />
+                                                <p className={`text-[11px] mt-1 ml-1 ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>
+                                                    Laura lee esta descripción para saber cuándo derivar un cliente a este departamento. Si la dejas vacía, Laura solo se guiará por el nombre. <strong>{formDescription.length}/300</strong>
+                                                </p>
+                                            </div>
+                                        )}
+                                    </>
                                 )}
                                 {(modalType === 'add_quick_reply' || modalType === 'edit_quick_reply') && (
                                     <>
