@@ -1025,6 +1025,8 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                             <select value={formRole} onChange={e => setFormRole(e.target.value)} className={`w-full p-4 border rounded-xl outline-none focus:ring-2 focus:ring-blue-500/50 ${isDark ? 'bg-slate-900/50 border-slate-700 text-white' : 'bg-slate-50 border-slate-200 text-slate-900'}`}>
                                                 <option value="Ventas">Ventas</option>
                                                 <option value="Taller">Taller</option>
+                                                <option value="Recambios">Recambios</option>
+                                                <option value="Administración">Administración</option>
                                                 <option value="Admin">Admin</option>
                                             </select>
                                         </div>
