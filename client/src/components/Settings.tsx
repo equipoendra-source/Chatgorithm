@@ -101,6 +101,12 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [botEnabled, setBotEnabled] = useState<boolean>(true);
     const [botEnabledLoading, setBotEnabledLoading] = useState<boolean>(false);
     const [botToggleSaving, setBotToggleSaving] = useState<boolean>(false);
+    // Días de la semana en los que Laura no responde (sábados, domingos, festivos).
+    // Array de números 0-6, donde 0=Domingo, 1=Lunes, ..., 6=Sábado (Date.getDay()).
+    // Los mensajes siguen llegando al panel; solo se silencia la respuesta automática.
+    const [blockedWeekdays, setBlockedWeekdays] = useState<number[]>([]);
+    const [blockedWeekdaysLoading, setBlockedWeekdaysLoading] = useState<boolean>(false);
+    const [blockedWeekdaysSaving, setBlockedWeekdaysSaving] = useState<boolean>(false);
     // Departamentos a los que Laura puede derivar (lista dinámica, N elementos)
     const [showDepartmentEditor, setShowDepartmentEditor] = useState<boolean>(false);
     const [botDepartments, setBotDepartments] = useState<{ name: string; description: string }[]>([]);
@@ -160,6 +166,13 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                 .then(d => { if (typeof d.enabled === 'boolean') setBotEnabled(d.enabled); })
                 .catch(() => { /* fallback: asumimos true */ })
                 .finally(() => setBotEnabledLoading(false));
+            // Cargar días de la semana bloqueados (Laura calla)
+            setBlockedWeekdaysLoading(true);
+            fetch(`${API_URL}/bot/blocked-weekdays`)
+                .then(r => r.json())
+                .then(d => { if (Array.isArray(d.blockedWeekdays)) setBlockedWeekdays(d.blockedWeekdays); })
+                .catch(() => { /* fallback: vacío (Laura siempre activa) */ })
+                .finally(() => setBlockedWeekdaysLoading(false));
             // (eliminado) — antes había aquí un fetch a /bot/department-labels
             // para cargar la lista del editor del bot. Tras la unificación,
             // la única fuente es la tabla Config (ya cargada vía socket
@@ -280,6 +293,37 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             alert('Error de conexión: ' + e.message);
         } finally {
             setBotToggleSaving(false);
+        }
+    };
+
+    // Alterna un día de la semana en la lista de "días sin IA" y persiste
+    // al servidor inmediatamente. Si falla la red, hacemos rollback visual.
+    const toggleBlockedWeekday = async (day: number) => {
+        if (blockedWeekdaysSaving) return;
+        const wasBlocked = blockedWeekdays.includes(day);
+        const nextList = wasBlocked
+            ? blockedWeekdays.filter(d => d !== day)
+            : [...blockedWeekdays, day].sort((a, b) => a - b);
+        // Optimistic update
+        const previous = blockedWeekdays;
+        setBlockedWeekdays(nextList);
+        setBlockedWeekdaysSaving(true);
+        try {
+            const r = await fetch(`${API_URL}/bot/blocked-weekdays`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ blockedWeekdays: nextList, actorUsername: currentUser?.username || 'system' })
+            });
+            const data = await r.json();
+            if (!data.success) {
+                setBlockedWeekdays(previous);
+                alert('Error: ' + (data.error || 'desconocido'));
+            }
+        } catch (e: any) {
+            setBlockedWeekdays(previous);
+            alert('Error de conexión: ' + e.message);
+        } finally {
+            setBlockedWeekdaysSaving(false);
         }
     };
 
@@ -656,6 +700,77 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                     </button>
                                 </div>
                             </div>
+
+                            {/* ============================================================ */}
+                            {/* DÍAS SIN IA — Laura calla los días marcados (sáb/dom/festivos) */}
+                            {/* ============================================================ */}
+                            {(() => {
+                                // 0=Domingo, 1=Lunes, ..., 6=Sábado. Mostramos en orden L-D
+                                // para que sea más intuitivo (lectura europea).
+                                const WEEKDAYS: { value: number; label: string; full: string }[] = [
+                                    { value: 1, label: 'L', full: 'Lunes' },
+                                    { value: 2, label: 'M', full: 'Martes' },
+                                    { value: 3, label: 'X', full: 'Miércoles' },
+                                    { value: 4, label: 'J', full: 'Jueves' },
+                                    { value: 5, label: 'V', full: 'Viernes' },
+                                    { value: 6, label: 'S', full: 'Sábado' },
+                                    { value: 0, label: 'D', full: 'Domingo' },
+                                ];
+                                const anyBlocked = blockedWeekdays.length > 0;
+                                return (
+                                    <div className={`p-6 rounded-2xl border-2 shadow-sm ${anyBlocked
+                                        ? (isDark ? 'bg-amber-900/20 border-amber-700/50' : 'bg-amber-50 border-amber-200')
+                                        : (isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200')
+                                        }`}>
+                                        <div className="flex items-start gap-3 mb-4">
+                                            <div className={`p-2.5 rounded-xl shadow-lg flex-shrink-0 ${anyBlocked ? 'bg-gradient-to-br from-amber-500 to-orange-600' : 'bg-gradient-to-br from-slate-400 to-slate-500'}`}>
+                                                <Calendar className="w-5 h-5 text-white" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Días sin IA</h3>
+                                                    {blockedWeekdaysLoading && <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />}
+                                                </div>
+                                                <p className={`text-sm mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                    Marca los días en los que Laura NO debe responder automáticamente.
+                                                    Los mensajes seguirán llegando al panel — tu equipo responderá a mano.
+                                                </p>
+                                            </div>
+                                        </div>
+                                        <div className="flex flex-wrap gap-2 mt-2">
+                                            {WEEKDAYS.map(d => {
+                                                const isBlocked = blockedWeekdays.includes(d.value);
+                                                return (
+                                                    <button
+                                                        key={d.value}
+                                                        type="button"
+                                                        onClick={() => toggleBlockedWeekday(d.value)}
+                                                        disabled={blockedWeekdaysSaving || blockedWeekdaysLoading}
+                                                        title={isBlocked
+                                                            ? `Quitar bloqueo de ${d.full} (Laura volverá a responder)`
+                                                            : `Bloquear ${d.full} (Laura no responderá ese día)`}
+                                                        className={`w-12 h-12 rounded-xl font-bold text-base transition shadow-sm border-2 ${isBlocked
+                                                            ? (isDark ? 'bg-amber-500 border-amber-400 text-white' : 'bg-amber-500 border-amber-600 text-white')
+                                                            : (isDark ? 'bg-slate-700/60 border-slate-600 text-slate-300 hover:border-amber-500' : 'bg-white border-slate-200 text-slate-600 hover:border-amber-400')
+                                                            } ${blockedWeekdaysSaving ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+                                                    >
+                                                        {d.label}
+                                                    </button>
+                                                );
+                                            })}
+                                        </div>
+                                        {anyBlocked && (
+                                            <p className={`text-xs mt-3 ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+                                                🔇 Días bloqueados: {blockedWeekdays
+                                                    .map(v => WEEKDAYS.find(d => d.value === v)?.full)
+                                                    .filter(Boolean)
+                                                    .join(', ')}.
+                                                Cuando el cliente vuelva a escribir un día NO bloqueado, Laura responderá teniendo en cuenta los mensajes que se acumularon.
+                                            </p>
+                                        )}
+                                    </div>
+                                );
+                            })()}
 
                             {/* Cabecera */}
                             <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>

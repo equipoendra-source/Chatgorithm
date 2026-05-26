@@ -2529,8 +2529,65 @@ async function loadBotGloballyEnabled(): Promise<void> {
         console.error('[Bot] Error cargando estado global, usando default true:', e.message);
     }
 }
+
+// DÍAS DE LA SEMANA BLOQUEADOS — Laura no responde los días marcados aquí
+// (ej. sábados, domingos, festivos puntuales). Los mensajes siguen entrando
+// al panel para que los trabajadores los atiendan a mano. Se persiste en
+// BotSettings (Setting='bot_blocked_weekdays') como CSV de números 0-6
+// donde 0=Domingo, 1=Lunes, ..., 6=Sábado (estándar Date.getDay()).
+let botBlockedWeekdays: Set<number> = new Set();
+
+async function loadBotBlockedWeekdays(): Promise<void> {
+    if (!base) return;
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'bot_blocked_weekdays'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            const v = (r[0].get('Value') as string || '').trim();
+            botBlockedWeekdays = parseBlockedWeekdaysCsv(v);
+            console.log(`🤖 [Bot] Días bloqueados cargados: [${[...botBlockedWeekdays].sort().join(',')}]`);
+        } else {
+            // Crear con default vacío (Laura activa todos los días)
+            await base('BotSettings').create([{ fields: { Setting: 'bot_blocked_weekdays', Value: '' } }]);
+            console.log('🤖 [Bot] Setting bot_blocked_weekdays creado con default vacío');
+        }
+    } catch (e: any) {
+        console.error('[Bot] Error cargando días bloqueados, usando default vacío:', e.message);
+    }
+}
+
+// Parsea "0,6" → Set{0,6}. Ignora valores fuera de rango o malformados.
+function parseBlockedWeekdaysCsv(csv: string): Set<number> {
+    const out = new Set<number>();
+    if (!csv) return out;
+    for (const part of csv.split(',')) {
+        const n = Number(part.trim());
+        if (Number.isInteger(n) && n >= 0 && n <= 6) out.add(n);
+    }
+    return out;
+}
+
+// Devuelve el día de la semana ACTUAL en zona horaria Europe/Madrid:
+//   0=Domingo, 1=Lunes, ..., 6=Sábado.
+// Importante: no usar new Date().getDay() porque eso da el día en la zona
+// del servidor (UTC en Render), no en España.
+function getMadridWeekday(): number {
+    const dayName = new Intl.DateTimeFormat('en-US', {
+        timeZone: 'Europe/Madrid', weekday: 'short'
+    }).format(new Date());
+    const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    return map[dayName] ?? new Date().getDay();
+}
+
+// Devuelve true si HOY (en Madrid) está en la lista de días bloqueados.
+// Cuando es true, Laura no responde a ningún mensaje (silencio total).
+// Los mensajes del cliente se guardan y emiten al panel como siempre.
+function isTodayBotBlocked(): boolean {
+    return botBlockedWeekdays.has(getMadridWeekday());
+}
+
 // Cargar al arranque (después de que base esté inicializado)
 setTimeout(() => { loadBotGloballyEnabled().catch(() => {}); }, 1000);
+setTimeout(() => { loadBotBlockedWeekdays().catch(() => {}); }, 1000);
 
 // ==========================================================================
 // HUMAN_IDLE_MINUTES — tiempo (en min) que esperamos al humano asignado
@@ -6580,6 +6637,58 @@ app.post('/api/bot/status', async (req, res) => {
     }
 });
 
+// ============================================================
+// DÍAS DE LA SEMANA SIN IA — Laura calla los días marcados
+// (típicamente sábados/domingos). Los mensajes siguen entrando
+// al panel; solo se silencia la respuesta automática.
+// ============================================================
+// GET /api/bot/blocked-weekdays → { blockedWeekdays: number[] }
+//   Devuelve array ordenado de 0-6 (0=Dom, 1=Lun, ..., 6=Sáb).
+app.get('/api/bot/blocked-weekdays', (_req, res) => {
+    res.json({ blockedWeekdays: [...botBlockedWeekdays].sort((a, b) => a - b) });
+});
+// POST /api/bot/blocked-weekdays { blockedWeekdays: number[] }
+//   Valida que cada valor esté en [0..6], deduplica y persiste como CSV.
+app.post('/api/bot/blocked-weekdays', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const incoming = req.body?.blockedWeekdays;
+    if (!Array.isArray(incoming)) {
+        return res.status(400).json({ error: 'blockedWeekdays debe ser un array de números 0-6' });
+    }
+    const validated: number[] = [];
+    for (const v of incoming) {
+        const n = Number(v);
+        if (Number.isInteger(n) && n >= 0 && n <= 6 && !validated.includes(n)) validated.push(n);
+    }
+    validated.sort((a, b) => a - b);
+    const csv = validated.join(',');
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'bot_blocked_weekdays'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            await base('BotSettings').update([{ id: r[0].id, fields: { Value: csv } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'bot_blocked_weekdays', Value: csv } }]);
+        }
+        const oldList = [...botBlockedWeekdays].sort((a, b) => a - b);
+        botBlockedWeekdays = new Set(validated);
+        console.log(`🤖 [Bot] Días bloqueados actualizados: [${csv || 'ninguno'}]`);
+        try { io.emit('bot_blocked_weekdays_changed', { blockedWeekdays: validated }); } catch (_) {}
+        // Audit log
+        try {
+            const actor = String(req.body.actorUsername || 'system');
+            logAudit({
+                action: 'bot.config_update', user: actor, targetType: 'bot',
+                summary: `Días sin IA: ${csv || 'ninguno'}`,
+                changes: { blockedWeekdays: { from: oldList, to: validated } }, origin: 'web'
+            }).catch(() => {});
+        } catch (_) { }
+        res.json({ success: true, blockedWeekdays: validated });
+    } catch (e: any) {
+        console.error('[Bot blocked-weekdays] Error guardando:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ==========================================
 //  WEBHOOKS (CORREGIDO: RECIPIENT EXPLÍCITO)
 // ==========================================
@@ -6775,6 +6884,14 @@ app.post('/webhook', async (req, res) => {
 
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
+            } else if (isTodayBotBlocked()) {
+                // Día de la semana marcado como "sin IA" (ej. sábados). Los
+                // mensajes siguen entrando al panel para que el equipo los
+                // atienda a mano; Laura NO responde nada. Al cambiar el día,
+                // si el cliente vuelve a escribir, Laura responderá con todo
+                // el contexto (incluidos los mensajes acumulados del día
+                // bloqueado, que están en el historial de los últimos 25).
+                console.log(`🔇 [Bot] Hoy (weekday=${getMadridWeekday()}) está en la lista de días bloqueados. Mensaje de ${from} guardado pero Laura no responde.`);
             } else if (assignedTo) {
                 const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
                 if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
