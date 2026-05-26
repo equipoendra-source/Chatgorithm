@@ -5322,7 +5322,14 @@ app.get('/api/appointments', async (req, res) => {
                 field4: r.get('Extra'),
                 field5: r.get('Notas'),
                 // origen del cliente, propagado desde Contacts.origin_phone_id
-                originPhoneId: oid
+                originPhoneId: oid,
+                // Duración del slot. Solo el "líder" de un bloque de cita
+                // tiene DurationMin > 0; los slots secundarios (cuando una
+                // cita ocupa varios huecos) lo dejan en 0. El frontend lo usa
+                // para calcular las horas libres/ocupadas por día en el
+                // calendario. Si el campo no existe en Airtable (instalación
+                // antigua), Number(undefined) || 0 devuelve 0 → tolerante.
+                durationMin: Number(r.get('DurationMin')) || 0
             };
         }));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }

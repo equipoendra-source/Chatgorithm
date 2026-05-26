@@ -29,6 +29,11 @@ interface Appointment {
     // Contacts.origin_phone_id en el backend). Se usa para filtrar el
     // calendario por cuenta en el Sidebar multi-cuenta.
     originPhoneId?: string;
+    // Duración del slot en minutos. Solo el "líder" de un bloque de cita
+    // tiene durationMin > 0; los slots secundarios (cuando una cita ocupa
+    // varios huecos) lo dejan en 0. Lo usa el indicador "Xh libres / Yh"
+    // del calendario.
+    durationMin?: number;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -707,6 +712,75 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         return d;
     };
 
+    // HORAS LIBRES / TOTALES DEL DÍA — para el indicador del calendario.
+    //
+    // Lógica:
+    //   - Suma los minutos OCUPADOS contando solo los slots Booked con
+    //     durationMin > 0 (los líderes). Los slots secundarios (cuando una
+    //     cita ocupa varios huecos) tienen durationMin=0 y se ignoran
+    //     porque sumarían dos veces. Si un Booked líder tiene durationMin=0
+    //     (cita pre-feature o registro corrupto), se usa la granularidad
+    //     estimada del día como fallback.
+    //   - Suma los minutos LIBRES como `availableCount × granularidad`.
+    //     Los Available no guardan durationMin en Airtable, hay que estimar.
+    //   - Granularidad: diferencia entre los dos primeros slots del día. Si
+    //     solo hay 1 slot, se usa `slotDuration` (state local, default 60).
+    //
+    // Devuelve null si el día no tiene slots — el render no pinta nada.
+    const computeDayHours = (daySlots: Appointment[]): { freeHours: number, totalHours: number } | null => {
+        if (!daySlots || daySlots.length === 0) return null;
+        const sorted = [...daySlots].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        let granularityMin = slotDuration;
+        if (sorted.length >= 2) {
+            const diff = Math.round((new Date(sorted[1].date).getTime() - new Date(sorted[0].date).getTime()) / 60000);
+            if (diff > 0) granularityMin = diff;
+        }
+        let bookedMin = 0;
+        let availableCount = 0;
+        let suspiciousLeaderCount = 0; // líderes corruptos sin durationMin
+        for (let i = 0; i < sorted.length; i++) {
+            const s = sorted[i];
+            if (s.status === 'Booked') {
+                if (s.durationMin && s.durationMin > 0) {
+                    bookedMin += s.durationMin;
+                } else {
+                    // durationMin=0 puede ser:
+                    //   (a) un slot secundario de un bloque cuya cita líder ya
+                    //       sumamos (caso normal con citas multi-slot) → NO sumar.
+                    //   (b) un líder corrupto/pre-feature en Airtable → SÍ sumar
+                    //       como granularidad para no ocultar horas ocupadas.
+                    // Heurística: si el slot ANTERIOR no es Booked, es líder huérfano.
+                    const prev = i > 0 ? sorted[i - 1] : null;
+                    const isLikelySecondary = prev && prev.status === 'Booked';
+                    if (!isLikelySecondary) {
+                        bookedMin += granularityMin;
+                        suspiciousLeaderCount++;
+                    }
+                }
+            } else if (s.status === 'Available') {
+                availableCount++;
+            }
+        }
+        if (suspiciousLeaderCount > 0) {
+            console.warn(`[CalendarHours] ${suspiciousLeaderCount} slot(s) Booked sin durationMin en este día. Contados como granularidad (${granularityMin}min). Revisa el campo DurationMin en Airtable.`);
+        }
+        const freeMin = availableCount * granularityMin;
+        const totalMin = bookedMin + freeMin;
+        if (totalMin === 0) return null;
+        return {
+            freeHours: Math.round((freeMin / 60) * 10) / 10,
+            totalHours: Math.round((totalMin / 60) * 10) / 10
+        };
+    };
+
+    // Formatea las horas como "4h libres / 8h" (compacto). Evita decimales
+    // innecesarios: "8h" en lugar de "8.0h".
+    const formatHoursLabel = (h: { freeHours: number, totalHours: number }): string => {
+        const f = Number.isInteger(h.freeHours) ? `${h.freeHours}` : h.freeHours.toFixed(1);
+        const t = Number.isInteger(h.totalHours) ? `${h.totalHours}` : h.totalHours.toFixed(1);
+        return `${f}h libres / ${t}h`;
+    };
+
     // Citas de una fecha concreta (objeto Date), aplicando el filtro de agenda
     const getSlotsForDate = (dateObj: Date) =>
         appointments
@@ -920,6 +994,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             const booked = slots.filter(s => s.status === 'Booked').length;
                             const total = slots.length;
                             const dayName = getDayOfWeekName(day); // Para móvil
+                            const hoursInfo = computeDayHours(slots);
 
                             return (
                                 <div key={day} className={`rounded-2xl md:rounded-none shadow-sm md:shadow-none border md:border-0 md:border-b md:border-r p-4 md:p-2 min-h-auto md:min-h-[140px] transition-colors group relative ${isDark
@@ -941,12 +1016,19 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </div>
 
                                         {total > 0 && (
-                                            <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${booked === total
-                                                ? (isDark ? 'bg-red-900/30 text-red-400 border border-red-800/50' : 'bg-red-100 text-red-600')
-                                                : (isDark ? 'bg-green-900/30 text-green-400 border border-green-800/50' : 'bg-green-100 text-green-600')
-                                                }`}>
-                                                {booked}/{total} <span className="hidden md:inline">Ocupados</span>
-                                            </span>
+                                            <div className="flex flex-col items-end gap-0.5">
+                                                <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${booked === total
+                                                    ? (isDark ? 'bg-red-900/30 text-red-400 border border-red-800/50' : 'bg-red-100 text-red-600')
+                                                    : (isDark ? 'bg-green-900/30 text-green-400 border border-green-800/50' : 'bg-green-100 text-green-600')
+                                                    }`}>
+                                                    {booked}/{total} <span className="hidden md:inline">Ocupados</span>
+                                                </span>
+                                                {hoursInfo && (
+                                                    <span className={`text-[9px] font-medium ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                        {formatHoursLabel(hoursInfo)}
+                                                    </span>
+                                                )}
+                                            </div>
                                         )}
                                     </div>
 
@@ -1040,6 +1122,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             const booked = slots.filter(s => s.status === 'Booked').length;
                             const isToday = isSameDay(d, today);
                             const dowIdx = d.getDay() === 0 ? 6 : d.getDay() - 1;
+                            const hoursInfo = computeDayHours(slots);
                             return (
                                 <div key={d.toISOString()} className={`rounded-2xl border p-3 flex flex-col min-h-[120px] ${isToday
                                     ? (isDark ? 'bg-purple-900/20 border-purple-700' : 'bg-purple-50 border-purple-300')
@@ -1055,10 +1138,17 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <span className={`text-sm font-bold capitalize ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{weekDays[dowIdx]}</span>
                                         </div>
                                         {slots.length > 0 && (
-                                            <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${booked === slots.length
-                                                ? (isDark ? 'bg-red-900/30 text-red-400' : 'bg-red-100 text-red-600')
-                                                : (isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600')
-                                                }`}>{booked}/{slots.length}</span>
+                                            <div className="flex flex-col items-end gap-0.5">
+                                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${booked === slots.length
+                                                    ? (isDark ? 'bg-red-900/30 text-red-400' : 'bg-red-100 text-red-600')
+                                                    : (isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600')
+                                                    }`}>{booked}/{slots.length}</span>
+                                                {hoursInfo && (
+                                                    <span className={`text-[9px] font-medium ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                        {formatHoursLabel(hoursInfo)}
+                                                    </span>
+                                                )}
+                                            </div>
                                         )}
                                     </button>
                                     {/* Citas del día */}
