@@ -3679,8 +3679,11 @@ async function getClientVehicles(clientPhone: string): Promise<string> {
     if (!base) return "Error DB";
     const clean = cleanNumber(clientPhone);
     try {
+        // Active=TRUE() OR BLANK → tolerante a registros antiguos donde la
+        // columna Active aún no se rellenaba (datos previos a la migración).
+        // Sin esto, vehículos legacy quedarían invisibles para Laura.
         const records = await base(TABLE_VEHICLES).select({
-            filterByFormula: `AND({ClientPhone}='${clean}', {Active}=TRUE())`
+            filterByFormula: `AND({ClientPhone}='${clean}', OR({Active}=TRUE(), {Active}=BLANK()))`
         }).all();
         if (records.length === 0) {
             return "El cliente NO tiene vehículos registrados. Pídele los datos para registrar el vehículo de esta cita.";
@@ -3718,7 +3721,10 @@ async function unregisterVehicle(clientPhone: string, plate: string): Promise<st
     if (!matricula) return "Error: el cliente no ha indicado matrícula. Pídesela antes de volver a llamar a esta función.";
     try {
         const records = await base(TABLE_VEHICLES).select({
-            filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(matricula)}', {Active}=TRUE())`,
+            // Active=TRUE() OR BLANK → coherente con getClientVehicles. Sin esto,
+            // un vehículo legacy que el cliente sí ve listado no se podría dar
+            // de baja, lo que confundiría al cliente ("lo veo pero no se borra").
+            filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(matricula)}', OR({Active}=TRUE(), {Active}=BLANK()))`,
             maxRecords: 1
         }).firstPage();
         if (records.length === 0) {
@@ -8625,8 +8631,11 @@ app.get('/api/contacts/:phone/vehicles', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     const clean = cleanNumber(req.params.phone);
     try {
+        // Active=TRUE() OR BLANK → tolerante a registros antiguos sin Active
+        // (coherente con las búsquedas del bot, evita que el panel muestre
+        // menos vehículos de los que Laura ve).
         const records = await base(TABLE_VEHICLES).select({
-            filterByFormula: `AND({ClientPhone}='${clean}', {Active}=TRUE())`
+            filterByFormula: `AND({ClientPhone}='${clean}', OR({Active}=TRUE(), {Active}=BLANK()))`
         }).all();
         const vehicles = records.map(r => ({
             id: r.id,

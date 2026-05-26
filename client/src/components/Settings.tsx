@@ -201,6 +201,17 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         return () => { socket.off('bot_status_changed', handler); };
     }, [socket]);
 
+    // Escuchar cambios en tiempo real de los días sin IA (sincroniza entre
+    // admins que tengan Settings abierto a la vez).
+    useEffect(() => {
+        if (!socket) return;
+        const handler = (data: { blockedWeekdays: number[] }) => {
+            if (Array.isArray(data?.blockedWeekdays)) setBlockedWeekdays(data.blockedWeekdays);
+        };
+        socket.on('bot_blocked_weekdays_changed', handler);
+        return () => { socket.off('bot_blocked_weekdays_changed', handler); };
+    }, [socket]);
+
     // Guardar departamentos editados (lista dinámica)
     const handleSaveDepartments = async () => {
         // Limpiar antes de validar
@@ -317,11 +328,11 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             const data = await r.json();
             if (!data.success) {
                 setBlockedWeekdays(previous);
-                alert('Error: ' + (data.error || 'desconocido'));
+                setError('No se pudo guardar los días sin IA: ' + (data.error || 'error desconocido'));
             }
         } catch (e: any) {
             setBlockedWeekdays(previous);
-            alert('Error de conexión: ' + e.message);
+            setError('Error de conexión al guardar los días sin IA: ' + (e?.message || 'sin detalles'));
         } finally {
             setBlockedWeekdaysSaving(false);
         }
