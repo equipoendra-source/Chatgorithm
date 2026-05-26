@@ -375,7 +375,31 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         }
     }, [socket, contact.phone]);
 
-    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => { setInput(e.target.value); const now = Date.now(); if (socket && (now - lastTypingTimeRef.current > 2000)) { socket.emit('typing', { user: user.username, phone: contact.phone }); lastTypingTimeRef.current = now; } };
+    // Límite duro de texto de WhatsApp Cloud API: 4096 code points (no bytes,
+    // no UTF-16 units). Array.from cuenta code points correctamente —
+    // String.length contaría emojis fuera del BMP como 2.
+    const WHATSAPP_TEXT_LIMIT = 4096;
+    const COUNTER_VISIBLE_AT = 3500;
+    const countMessageChars = (s: string) => Array.from(s || '').length;
+
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const next = e.target.value;
+        // Bloqueamos en el handler para que pegar 50k caracteres no llene el
+        // input. Si el usuario ya estaba en el límite y teclea, la longitud no
+        // crece → silenciosamente se ignora el teclado adicional.
+        if (countMessageChars(next) > WHATSAPP_TEXT_LIMIT) {
+            // Truncar al límite preservando code points (no cortar emojis).
+            const truncated = Array.from(next).slice(0, WHATSAPP_TEXT_LIMIT).join('');
+            setInput(truncated);
+        } else {
+            setInput(next);
+        }
+        const now = Date.now();
+        if (socket && (now - lastTypingTimeRef.current > 2000)) {
+            socket.emit('typing', { user: user.username, phone: contact.phone });
+            lastTypingTimeRef.current = now;
+        }
+    };
 
     // --- FUNCIÓN DE ENVÍO UNIFICADA (ARCHIVO Y TEXTO) ---
     const sendMessage = async (e: React.FormEvent) => {
@@ -389,6 +413,14 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
 
         // 2. Si hay texto, lo enviamos
         const finalInput = matchingQR ? matchingQR.content : input;
+        // Defensa en profundidad contra mensajes >4096 chars (quick replies
+        // largas, contenido pegado que evade el input handler, etc.).
+        // Si supera el límite, no enviamos y avisamos al agente — antes
+        // Meta rechazaba en silencio y el cliente nunca lo recibía.
+        if (finalInput && countMessageChars(finalInput) > WHATSAPP_TEXT_LIMIT) {
+            alert(`El mensaje supera el límite de ${WHATSAPP_TEXT_LIMIT} caracteres de WhatsApp. Recórtalo antes de enviarlo (lleva ${countMessageChars(finalInput)}).`);
+            return;
+        }
         if (finalInput.trim()) {
             const msg = {
                 text: finalInput,
@@ -1031,21 +1063,40 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                             </div>
                         )}
 
-                        <input
-                            id="chat-input"
-                            type="text"
-                            value={input}
-                            onChange={handleInputChange}
-                            placeholder={isUploading ? "Enviando..." : isRecording ? "Grabando..." : (isInternalMode ? "Nota interna..." : (pendingFile ? "Comentario..." : "Mensaje"))}
-                            disabled={isUploading || isRecording}
-                            className={`flex-1 min-w-0 py-2.5 md:py-3 px-3 md:px-4 rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm transition-all ${isInternalMode
-                                ? 'bg-yellow-100 border-yellow-300 placeholder-yellow-600/50 text-yellow-900'
-                                : (isDark
-                                    ? 'glass-input'
-                                    : 'bg-slate-50 border-slate-200'
-                                )
-                                }`}
-                        />
+                        <div className="flex-1 min-w-0 relative">
+                            <input
+                                id="chat-input"
+                                type="text"
+                                value={input}
+                                onChange={handleInputChange}
+                                placeholder={isUploading ? "Enviando..." : isRecording ? "Grabando..." : (isInternalMode ? "Nota interna..." : (pendingFile ? "Comentario..." : "Mensaje"))}
+                                disabled={isUploading || isRecording}
+                                className={`w-full py-2.5 md:py-3 px-3 md:px-4 rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm transition-all ${isInternalMode
+                                    ? 'bg-yellow-100 border-yellow-300 placeholder-yellow-600/50 text-yellow-900'
+                                    : (isDark
+                                        ? 'glass-input'
+                                        : 'bg-slate-50 border-slate-200'
+                                    )
+                                    }`}
+                            />
+                            {/* Contador visible solo cuando el mensaje se acerca al límite de Meta (4096).
+                                Pasa a rojo intenso al tocar el techo para avisar al agente. No mostramos
+                                en notas internas — son texto interno sin envío a Meta. */}
+                            {(() => {
+                                const len = countMessageChars(input);
+                                if (isInternalMode) return null;
+                                if (len < COUNTER_VISIBLE_AT) return null;
+                                const atLimit = len >= WHATSAPP_TEXT_LIMIT;
+                                return (
+                                    <span
+                                        className={`absolute -top-5 right-2 text-[10px] font-bold pointer-events-none ${atLimit ? 'text-red-500' : 'text-amber-600'}`}
+                                        title={atLimit ? 'Has alcanzado el límite de WhatsApp. No puedes añadir más caracteres.' : 'Te acercas al límite de 4096 caracteres de WhatsApp.'}
+                                    >
+                                        {len}/{WHATSAPP_TEXT_LIMIT}
+                                    </span>
+                                );
+                            })()}
+                        </div>
 
                         <button type="button" className={`p-2 rounded-full transition hidden md:flex flex-shrink-0 ${showEmojiPicker ? 'text-blue-500 bg-blue-50' : 'text-slate-500 hover:bg-slate-200'}`} onClick={() => setShowEmojiPicker(!showEmojiPicker)}><Smile className="w-5 h-5" /></button>
 

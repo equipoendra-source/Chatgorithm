@@ -61,6 +61,25 @@ const getSavedUser = () => {
     return null;
 };
 
+// Stub mínimo del contacto seleccionado para sobrevivir al F5. Guardamos
+// solo {id, phone} en sessionStorage (no localStorage — no queremos abrir
+// el navegador al día siguiente y aparecer en un chat aleatorio). Al
+// rehidratar, ChatWindow arranca con el stub y dispara request_conversation
+// por phone; cuando llega contacts_update, App enriquece el stub con los
+// datos completos del contacto (ver useEffect más abajo).
+const SELECTED_CONTACT_KEY = 'chatgorithm_selected_contact';
+const getSavedSelectedContactStub = (): { id: string; phone: string } | null => {
+    try {
+        const saved = sessionStorage.getItem(SELECTED_CONTACT_KEY);
+        if (!saved) return null;
+        const parsed = JSON.parse(saved);
+        if (parsed && typeof parsed.phone === 'string' && parsed.phone.length > 0) {
+            return { id: String(parsed.id || parsed.phone), phone: parsed.phone };
+        }
+    } catch (_) { /* ignore */ }
+    return null;
+};
+
 function App() {
     // THEME
     const { theme } = useTheme();
@@ -73,7 +92,12 @@ function App() {
 
     // USER AUTH - Second level of auth
     const [user, setUser] = useState<{ id?: string, username: string, role: string, preferences?: any, sessionToken?: string } | null>(getSavedUser);
-    const [selectedContact, setSelectedContact] = useState<Contact | null>(null);
+    const [selectedContact, setSelectedContact] = useState<Contact | null>(() => {
+        // Stub al montar para sobrevivir a F5. Cuando llegue contacts_update
+        // se enriquece con los datos reales del contacto (ver useEffect abajo).
+        const stub = getSavedSelectedContactStub();
+        return stub ? ({ id: stub.id, phone: stub.phone } as Contact) : null;
+    });
 
     // VIEW STATE
     const [view, setView] = useState<'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns'>('chat');
@@ -201,6 +225,52 @@ function App() {
     // plano). Cada reconexión es un socket nuevo que pierde la autenticación.
     // En cada evento 'connect' re-enviamos el token de sesión para que el
     // socket vuelva a estar autenticado y no se bloqueen chatMessage, etc.
+    // B3: Persistir el contacto seleccionado en sessionStorage para sobrevivir
+    // a F5. Cuando cambia (o se anula), reflejarlo. Si el usuario hace logout
+    // o cambio de empresa, los handlers correspondientes limpian la clave.
+    useEffect(() => {
+        try {
+            if (selectedContact?.phone) {
+                sessionStorage.setItem(SELECTED_CONTACT_KEY, JSON.stringify({
+                    id: selectedContact.id || selectedContact.phone,
+                    phone: selectedContact.phone
+                }));
+            } else {
+                sessionStorage.removeItem(SELECTED_CONTACT_KEY);
+            }
+        } catch (_) { /* navegador en modo privado puede bloquear sessionStorage */ }
+    }, [selectedContact?.id, selectedContact?.phone]);
+
+    // B3: Tras F5, arrancamos con un stub {id, phone}. Cuando llegue la lista
+    // de contactos (socket contacts_update), enriquecemos el stub con los
+    // datos reales (name, status, assigned_to, etc.) para que el panel CRM
+    // del ChatWindow y el chip del Sidebar se rellenen correctamente. Si el
+    // contacto no está en la lista (borrado entre sesiones), lo limpiamos.
+    useEffect(() => {
+        if (!socket) return;
+        const handleContactsForHydration = (list: any[]) => {
+            // Solo actuamos si tenemos un selectedContact que parece stub
+            // (sin name como propiedad). Usamos `'name' in prev` en lugar de
+            // `if (prev.name)` porque hay clientes legítimos con name = ''
+            // (cliente sin nombre); con la versión laxa se entraba aquí cada
+            // update y se re-renderizaba todo el árbol cada 60s sin necesidad.
+            setSelectedContact(prev => {
+                if (!prev) return prev;
+                if (typeof prev.name === 'string') return prev; // ya enriquecido (aunque name sea '')
+                const found = Array.isArray(list)
+                    ? list.find((c: any) => c && (c.phone === prev.phone || c.id === prev.id))
+                    : null;
+                if (found) return found as Contact;
+                // El contacto del stub ya no existe en la lista → limpiar
+                // sessionStorage y dejar la app en estado "sin chat".
+                try { sessionStorage.removeItem(SELECTED_CONTACT_KEY); } catch (_) {}
+                return null;
+            });
+        };
+        socket.on('contacts_update', handleContactsForHydration);
+        return () => { socket.off('contacts_update', handleContactsForHydration); };
+    }, [socket]);
+
     useEffect(() => {
         if (!socket) return;
         const reAuth = () => {
@@ -493,6 +563,10 @@ function App() {
         const currentUser = user?.username;
         pushNotificationService.unregister(currentUser).catch(() => { /* no bloquear logout */ });
         localStorage.removeItem('chatgorithm_user');
+        // B3: limpiar también el chat seleccionado persistido — sin esto, si
+        // el siguiente login es de otro usuario en el mismo navegador, se
+        // intentaría rehidratar el chat del usuario anterior.
+        try { sessionStorage.removeItem(SELECTED_CONTACT_KEY); } catch (_) {}
         setUser(null);
         setSelectedContact(null);
     };
@@ -503,6 +577,7 @@ function App() {
         pushNotificationService.unregister(currentUser).catch(() => { /* no bloquear logout */ });
         localStorage.removeItem('company_config');
         localStorage.removeItem('chatgorithm_user');
+        try { sessionStorage.removeItem(SELECTED_CONTACT_KEY); } catch (_) {}
         if (socketRef.current) {
             socketRef.current.disconnect();
             socketRef.current = null;

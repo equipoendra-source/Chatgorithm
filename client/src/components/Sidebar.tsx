@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import {
     Users, Search, RefreshCw, UserCheck, Briefcase, Filter as FilterIcon,
     Smartphone, UserPlus, Upload, FileSpreadsheet, Phone, MessageSquare,
@@ -8,6 +8,7 @@ import { PhoneDialer } from './PhoneDialer';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
 import { colorForAccount, nameForAccount } from '../utils/accountColors';
+import { normalizeForSearch } from '../utils/searchNormalize';
 
 export interface Contact {
     id: string;
@@ -134,10 +135,34 @@ export function Sidebar({
     const [availableTags, setAvailableTags] = useState<string[]>([]);
     const [unreadCounts, setUnreadCounts] = useState<{ [phone: string]: number }>({});
     const audioRef = useRef<HTMLAudioElement | null>(null);
+    // B1: Refs para preservar el scroll del Sidebar cuando llega un
+    // contacts_update (polling 60s o cambios). listScrollRef apunta al
+    // contenedor scroll; lastScrollTopRef guarda la posición previa al
+    // re-render. Sin esto, cada update saltaba al inicio de la lista.
+    const listScrollRef = useRef<HTMLDivElement | null>(null);
+    const lastScrollTopRef = useRef<number>(0);
 
     useEffect(() => {
         audioRef.current = new Audio('/notification.mp3');
     }, []);
+
+    // B1: Restaurar el scrollTop tras cada cambio en contacts. Sin esto,
+    // el polling cada 60s reemplaza la lista entera y el navegador resetea
+    // la posición al inicio. Usamos useLayoutEffect (síncrono, antes del
+    // paint) para que el usuario no vea ni un flash de "saltó arriba".
+    useLayoutEffect(() => {
+        const el = listScrollRef.current;
+        if (!el) return;
+        const target = lastScrollTopRef.current;
+        // Capear a scrollHeight - clientHeight por si la lista se acortó
+        // (filtro nuevo, contacto eliminado). Sin esto, el navegador caparía
+        // automáticamente pero queda más claro hacerlo explícito.
+        const max = Math.max(0, el.scrollHeight - el.clientHeight);
+        const next = Math.min(target, max);
+        if (Math.abs(el.scrollTop - next) > 1) {
+            el.scrollTop = next;
+        }
+    }, [contacts]);
 
     // Actualizar unreadCounts cuando llegan contactos con info persistida
     useEffect(() => {
@@ -348,7 +373,11 @@ export function Sidebar({
         if (selectedAccountId) {
             if (c.origin_phone_id && c.origin_phone_id !== selectedAccountId) return false;
         }
-        const matchesSearch = (c.name || "").toLowerCase().includes(searchQuery.toLowerCase()) || (c.phone || "").includes(searchQuery);
+        // Búsqueda tolerante a tildes / mayúsculas en el nombre (ej. "andres"
+        // encuentra "Andrés"). Para el teléfono mantenemos comparación literal
+        // porque los phones son solo dígitos tras cleanNumber server-side.
+        const qNorm = normalizeForSearch(searchQuery);
+        const matchesSearch = (qNorm === '' || normalizeForSearch(c.name).includes(qNorm)) || (c.phone || "").includes(searchQuery);
         if (!matchesSearch) return false;
         if (viewScope === 'mine' && c.assigned_to !== user.username) return false;
         if (viewScope === 'unassigned' && c.assigned_to) return false;
@@ -552,7 +581,12 @@ export function Sidebar({
             </div>
 
             {/* LISTA (CONTENIDO VARIABLE) */}
-            <div className="flex-1 overflow-y-auto min-h-0" id="tour-chat-list">
+            <div
+                className="flex-1 overflow-y-auto min-h-0"
+                id="tour-chat-list"
+                ref={listScrollRef}
+                onScroll={(e) => { lastScrollTopRef.current = (e.target as HTMLDivElement).scrollTop; }}
+            >
 
                 {/* LISTA MODO TEAM CHAT */}
                 {currentView === 'team_chat' ? (
@@ -621,7 +655,7 @@ export function Sidebar({
                             </div>
                         ) : (
                             <ul className={`divide-y px-2 ${isDark ? 'divide-slate-700/0' : 'divide-gray-100'}`}>
-                                {filteredContacts.map((contact) => {
+                                {filteredContacts.map((contact, idx) => {
                                     const isTyping = typingStatus[contact.phone];
                                     const unread = unreadCounts[normalizePhone(contact.phone)] || 0;
                                     const isSelected = selectedContactId === contact.id;
@@ -633,7 +667,7 @@ export function Sidebar({
                                     const accountFriendlyName = multiAccount && contact.origin_phone_id ? nameForAccount(contact.origin_phone_id, accounts) : '';
 
                                     return (
-                                        <li key={contact.id || Math.random()} className="mb-2">
+                                        <li key={contact.id || contact.phone || `idx-${idx}`} className="mb-2">
                                             <button
                                                 onClick={() => onSelectContact(contact)}
                                                 // Border-left coloreado por cuenta cuando NO está seleccionado.
