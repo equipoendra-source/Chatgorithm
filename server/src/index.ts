@@ -3648,6 +3648,39 @@ async function getClientVehicles(clientPhone: string): Promise<string> {
     }
 }
 
+// Da de baja un vehículo del cliente (soft delete: Active=false).
+// Usado por Laura cuando el cliente pide "dame de baja el coche X" / "ya no tengo
+// el coche con matrícula Y". La búsqueda es por teléfono + matrícula normalizada
+// (mayúsculas, sin espacios) para que "1140 csj" empareje con "1140CSJ".
+// Devuelve un mensaje legible para que el bot lo confirme al cliente.
+async function unregisterVehicle(clientPhone: string, plate: string): Promise<string> {
+    if (!base) return "Error técnico al dar de baja el vehículo.";
+    const clean = cleanNumber(clientPhone);
+    const matricula = (plate || '').trim().replace(/\s+/g, '').toUpperCase();
+    if (!clean) return "Error: falta el teléfono del cliente.";
+    if (!matricula) return "Error: el cliente no ha indicado matrícula. Pídesela antes de volver a llamar a esta función.";
+    try {
+        const records = await base(TABLE_VEHICLES).select({
+            filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(matricula)}', {Active}=TRUE())`,
+            maxRecords: 1
+        }).firstPage();
+        if (records.length === 0) {
+            console.log(`🚗 [Vehicles] Baja solicitada pero sin coincidencia: ${matricula} (${clean})`);
+            return `No encontré ningún vehículo activo con matrícula ${matricula} para este cliente. Si la matrícula es correcta puede que ya estuviera dado de baja. Llama a get_client_vehicles para ver la lista actualizada y confirma con el cliente cuál quiere dar de baja.`;
+        }
+        const rec = records[0]!;
+        const marca = (rec.get('Marca') as string) || '';
+        const modelo = (rec.get('Modelo') as string) || '';
+        await base(TABLE_VEHICLES).update([{ id: rec.id, fields: { Active: false } }]);
+        console.log(`🚗 [Vehicles] Vehículo dado de baja: ${matricula} (${clean})`);
+        const desc = [marca, modelo].filter(Boolean).join(' ').trim() || 'vehículo';
+        return `✅ Vehículo dado de baja: ${desc} (matrícula ${matricula}). Confirma al cliente que ya no aparece en su lista y, si quiere, ofrécele consultar los vehículos que le quedan o registrar uno nuevo. NO llames a stop_conversation — sigue la conversación normalmente.`;
+    } catch (e: any) {
+        console.error('[Vehicles] Error en unregisterVehicle:', e.message);
+        return "Error técnico al dar de baja el vehículo. Pide disculpas al cliente y dile que lo intente de nuevo en unos minutos.";
+    }
+}
+
 // Helper: hace UPDATE en Appointments resiliente a errores "Unknown field name".
 // Si Airtable rechaza el update porque un campo no existe, intenta de nuevo
 // quitando ese campo. Reintenta hasta 5 veces (por si faltan varios campos).
@@ -4312,7 +4345,16 @@ Cuando el cliente envíe una FOTO de un vehículo (con o sin caption), o cuando 
 3. register_vehicle AÑADE el vehículo a la lista (no sustituye los anteriores). Si la misma matrícula ya estaba registrada, simplemente actualiza sus datos.
 4. Si la matrícula NO es legible o no estás seguro, NO la inventes: pide al cliente que te la escriba por texto, mencionándole la marca/modelo/color que sí hayas reconocido en la foto. Cuando te la dé, entonces llama a register_vehicle.
 5. Tras registrar, confirma al cliente el alta y dile cuántos vehículos tiene ya guardados en total (esa información te la devuelve la propia tool).
-6. NO llames a stop_conversation después de register_vehicle — continúa la conversación normalmente (puede que el cliente quiera pedir cita justo después).`;
+6. NO llames a stop_conversation después de register_vehicle — continúa la conversación normalmente (puede que el cliente quiera pedir cita justo después).
+
+## 🗑️ BAJA DE UN VEHÍCULO DEL CLIENTE
+Cuando el cliente diga que ya no tiene un coche (lo vendió, lo dio de baja, lo cambió...) — frases como "dame de baja el mercedes", "ya no tengo el ford", "borra el coche con matrícula X" — usa la tool **unregister_vehicle**:
+1. Si el cliente da la matrícula directamente, llama a unregister_vehicle con esa matrícula en field1 (MAYÚSCULAS, sin espacios).
+2. Si el cliente dice solo la marca/modelo ("dame de baja el mercedes") y tiene VARIOS vehículos, llama PRIMERO a get_client_vehicles para ver la lista y, si solo hay UNO de esa marca/modelo, da por hecho que se refiere a ese y úsalo. Si hay varios ambiguos, pregúntale al cliente cuál (por matrícula).
+3. Si el cliente solo tiene 1 vehículo registrado y pide "dame de baja mi coche", úsalo directamente.
+4. NUNCA inventes una matrícula — si no estás 100% seguro, pregunta antes de llamar a la tool.
+5. Tras dar de baja, confirma al cliente que el vehículo ya no aparece en su lista. NO llames a stop_conversation — continúa la conversación.
+6. unregister_vehicle es una desactivación reversible (el dato no se borra del histórico, solo se oculta). Si el cliente se equivoca y quiere recuperar el coche, puede volver a registrarlo con register_vehicle.`;
 
             // Instrucciones de derivación a departamentos — dinámicas según config del cliente
             // Laura llamará a assign_department con uno de estos nombres exactos (N dinámico).
@@ -4448,6 +4490,17 @@ Cuando el cliente indique qué tipo de servicio necesita:
                                 required: ["field1"]
                             }
                         },
+                        {
+                            name: "unregister_vehicle",
+                            description: "Remove (deactivate) a vehicle from the client's list. Call this when the client says they no longer own a vehicle, sold it, gave it away, etc. — e.g. \"dame de baja el mercedes\", \"ya no tengo el coche con matrícula 1234ABC\", \"borra el ford de mi cuenta\". The vehicle is identified ONLY by its license plate (field1). If the client doesn't specify which plate and has multiple vehicles, FIRST call get_client_vehicles, then ask the client to clarify which one. Never guess the plate.",
+                            parameters: {
+                                type: SchemaType.OBJECT,
+                                properties: {
+                                    field1: { type: SchemaType.STRING, description: `License plate of the vehicle to remove (uppercase, no spaces). REQUIRED. If the client only said "the mercedes" without a plate, ask first or look it up via get_client_vehicles.` }
+                                },
+                                required: ["field1"]
+                            }
+                        },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs to talk to a human about the specific topics listed in the system prompt for each department.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: departmentLabels.map(d => d.name), format: "enum" } }, required: ["department"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking, cancelling an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
@@ -4496,6 +4549,10 @@ Cuando el cliente indique qué tipo de servicio necesita:
                             toolResult = `Error técnico al registrar vehículo: ${e.message}. Pide disculpas al cliente y dile que lo intente de nuevo o que escriba los datos por texto.`;
                         }
                     }
+                }
+                else if (call.name === "unregister_vehicle") {
+                    const plate = String(args.field1 || args.licensePlate || '').trim();
+                    toolResult = await unregisterVehicle(clean, plate);
                 }
                 else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
                 else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
