@@ -247,6 +247,23 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         if (socket && contact.phone) socket.emit('request_conversation', contact.phone);
     }, [contact.id, socket]);
 
+    // VIEWING CHAT — avisamos al servidor de que estamos mirando este chat.
+    // Mientras esta pestaña tenga el chat abierto, el server NO incrementará
+    // el contador "unread" en Airtable para mensajes que lleguen del cliente
+    // — porque ya los estamos leyendo en tiempo real. Sin esto, si llegaba un
+    // mensaje mientras estábamos dentro y luego refrescábamos la página,
+    // volvía a salir el badge morado "no leído" aunque ya lo hubiéramos
+    // visto. El cleanup emite 'stop_viewing_chat' cuando cambiamos de chat
+    // o desmontamos. React garantiza que ante un cambio de contact.phone,
+    // cleanup del valor viejo corre ANTES del efecto con el valor nuevo.
+    useEffect(() => {
+        if (!socket || !contact.phone) return;
+        socket.emit('viewing_chat', { phone: contact.phone });
+        return () => {
+            try { socket.emit('stop_viewing_chat', { phone: contact.phone }); } catch (_) { /* socket cerrado */ }
+        };
+    }, [socket, contact.phone]);
+
     // --- AUTO-LAUNCH CHAT TOUR ON FIRST CHAT OPENED ---
     useEffect(() => {
         if (shouldShowTour('chat', user?.preferences) && contact.id) {

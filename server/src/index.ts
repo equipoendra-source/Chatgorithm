@@ -546,6 +546,52 @@ const DESTRUCTIVE_SOCKET_EVENTS = new Set<string>([
 const onlineUsers = new Map<string, string>();
 const activeAiChats = new Set<string>();
 
+// VIEWER TRACKING — quién tiene cada chat abierto ahora mismo.
+// Sirve para no marcar mensajes como "no leídos" en Airtable cuando un
+// agente los está viendo en tiempo real (antes el bug era: refrescas tras
+// leer un chat y vuelve el badge morado porque el server incrementó el
+// contador sin saber que tú estabas dentro).
+//
+// Indexamos por socket.id (no por username) para soportar el mismo usuario
+// abierto en dos pestañas distintas. Si cualquiera de las dos pestañas
+// tiene el chat abierto, no se incrementa.
+//
+// Mantenemos dos Maps en paralelo:
+//   viewersByPhone:  phone (clean) → Set<socket.id> que lo están viendo
+//   phonesBySocket:  socket.id → Set<phone> que ese socket está viendo
+// El segundo permite limpieza O(1) en disconnect sin recorrer todo.
+const viewersByPhone = new Map<string, Set<string>>();
+const phonesBySocket = new Map<string, Set<string>>();
+
+function addViewer(phone: string, socketId: string): void {
+    if (!phone || !socketId) return;
+    let setForPhone = viewersByPhone.get(phone);
+    if (!setForPhone) { setForPhone = new Set(); viewersByPhone.set(phone, setForPhone); }
+    setForPhone.add(socketId);
+    let setForSocket = phonesBySocket.get(socketId);
+    if (!setForSocket) { setForSocket = new Set(); phonesBySocket.set(socketId, setForSocket); }
+    setForSocket.add(phone);
+}
+
+function removeViewer(phone: string, socketId: string): void {
+    if (!phone || !socketId) return;
+    const setForPhone = viewersByPhone.get(phone);
+    if (setForPhone) {
+        setForPhone.delete(socketId);
+        if (setForPhone.size === 0) viewersByPhone.delete(phone);
+    }
+    const setForSocket = phonesBySocket.get(socketId);
+    if (setForSocket) {
+        setForSocket.delete(phone);
+        if (setForSocket.size === 0) phonesBySocket.delete(socketId);
+    }
+}
+
+function isAnyoneViewing(phone: string): boolean {
+    const s = viewersByPhone.get(phone);
+    return !!(s && s.size > 0);
+}
+
 // --- HELPER CRÍTICO: LIMPIEZA DE NÚMEROS ---
 // Asegura que siempre trabajamos con '34666777888' sin '+' ni espacios
 const cleanNumber = (phone: any) => {
@@ -2664,10 +2710,22 @@ async function saveAndEmitMessage(msg: any) {
             }], { typecast: true });
 
             // Solo incrementamos unread si es mensaje entrante del usuario (no bot)
+            // y si NO hay ningún agente con ese chat abierto en este momento.
+            // Sin este chequeo, un mensaje que llega mientras el agente lo está
+            // leyendo se marcaba como "no leído" en Airtable, y al refrescar
+            // volvía el badge morado en el Sidebar.
             if (isSenderPhone) {
-                // Recuperar nombre si no está en scope (simplificado)
                 const sName = payload.sender || "Cliente";
-                await handleContactUpdate(finalSender, payload.text, sName, payload.origin_phone_id, true);
+                const someoneIsViewing = isAnyoneViewing(finalSender);
+                await handleContactUpdate(finalSender, payload.text, sName, payload.origin_phone_id, !someoneIsViewing);
+                if (someoneIsViewing) {
+                    // Defensa en profundidad: avisamos a los demás Sidebars
+                    // abiertos para que reseteen su contador local también.
+                    // Sin esto, otro agente que tenga el Sidebar abierto pero
+                    // no ese chat concreto podría ver un badge "fantasma"
+                    // hasta su próximo refresh.
+                    io.emit('contact_marked_read', { phone: finalSender });
+                }
             }
 
         } catch (e) { console.error("Error guardando en Airtable (socket ya enviado):", e); }
@@ -6905,7 +6963,48 @@ io.on('connection', (socket) => {
         socket.emit('ai_active_change', { phone: clean, active: activeAiChats.has(clean) });
     });
     socket.on('register_presence', (u: string) => { if (u) { onlineUsers.set(socket.id, u); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); } });
-    socket.on('disconnect', () => { if (onlineUsers.has(socket.id)) { onlineUsers.delete(socket.id); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); } });
+    // Viewer tracking — el ChatWindow emite estos eventos al abrir y cerrar
+    // un chat para que saveAndEmitMessage sepa NO incrementar unread_count
+    // mientras un agente humano está mirando ese chat.
+    socket.on('viewing_chat', (data: any) => {
+        // Guarda de autenticación: si el socket no está autenticado y SOCKET_AUTH_REQUIRED
+        // está activo, ignoramos (consistente con cómo se protegen otros sockets).
+        // Logueamos cuando se descarte para detectar regresiones (ej. si en el
+        // futuro authenticate_socket se hiciera async y el orden de los emits
+        // se rompiera, los viewers se perderían sin pista visible).
+        if (socketAuthRequired && !socket.data?.authenticated) {
+            console.warn(`[viewers] viewing_chat ignorado: socket ${socket.id} sin autenticar (phone=${data?.phone})`);
+            return;
+        }
+        const phone = cleanNumber(data?.phone);
+        if (!phone) return;
+        addViewer(phone, socket.id);
+    });
+    socket.on('stop_viewing_chat', (data: any) => {
+        if (socketAuthRequired && !socket.data?.authenticated) {
+            console.warn(`[viewers] stop_viewing_chat ignorado: socket ${socket.id} sin autenticar (phone=${data?.phone})`);
+            return;
+        }
+        const phone = cleanNumber(data?.phone);
+        if (!phone) return;
+        removeViewer(phone, socket.id);
+    });
+
+    socket.on('disconnect', () => {
+        if (onlineUsers.has(socket.id)) { onlineUsers.delete(socket.id); io.emit('online_users_update', Array.from(new Set(onlineUsers.values()))); }
+        // Limpieza de viewer tracking en O(1) sin recorrer todo el Map principal.
+        const phones = phonesBySocket.get(socket.id);
+        if (phones && phones.size > 0) {
+            phones.forEach(p => {
+                const setForPhone = viewersByPhone.get(p);
+                if (setForPhone) {
+                    setForPhone.delete(socket.id);
+                    if (setForPhone.size === 0) viewersByPhone.delete(p);
+                }
+            });
+            phonesBySocket.delete(socket.id);
+        }
+    });
     socket.on('typing', (d) => { socket.broadcast.emit('remote_typing', d); });
 
     // --- SOCKETS TEAM CHAT ---

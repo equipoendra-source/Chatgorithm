@@ -258,6 +258,22 @@ export function Sidebar({
 
         socket.on('message', handleSidebarMessage);
 
+        // contact_marked_read: el server emite esto cuando un mensaje llega
+        // pero hay un agente con ese chat abierto (no se incrementa unread).
+        // Aquí limpiamos también el contador LOCAL para que otros agentes
+        // que tengan el Sidebar abierto (pero no ese chat) no vean un badge
+        // fantasma — su contador local se incrementaría en línea 254 si no
+        // hiciéramos esto.
+        const handleContactMarkedRead = (data: { phone: string }) => {
+            const p = normalizePhone(data?.phone || '');
+            if (!p) return;
+            setUnreadCounts(prev => {
+                if (!(p in prev)) return prev;
+                const n = { ...prev }; delete n[p]; return n;
+            });
+        };
+        socket.on('contact_marked_read', handleContactMarkedRead);
+
         // Polling de seguridad cada 60s (antes 10s). El socket ya emite
         // 'contact_updated_notification' en cualquier cambio relevante, así
         // que el polling solo cubre desconexiones momentáneas. 10s generaba
@@ -271,6 +287,7 @@ export function Sidebar({
             socket.off('config_list', handleConfig);
             socket.off('contact_updated_notification');
             socket.off('message', handleSidebarMessage); // FIX: Only remove THIS listener
+            socket.off('contact_marked_read', handleContactMarkedRead);
             clearInterval(interval);
         };
     }, [socket, user.username, isConnected, selectedContactId, contacts, user.preferences]);

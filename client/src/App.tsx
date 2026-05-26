@@ -212,12 +212,20 @@ function App() {
                     console.log('🔑 [Socket] Re-autenticando con token de sesión');
                 }
             } catch (_) { /* sin token, el login normal autenticará */ }
+            // Tras reconectar, re-anunciamos el chat que tenemos abierto al
+            // server. El socket nuevo tiene otro socket.id, y el Map de
+            // viewers se limpió cuando el anterior se desconectó. Sin esto,
+            // tras una reconexión transparente el server perdería track del
+            // chat abierto y volvería a incrementar unread_count.
+            if (selectedContact?.phone) {
+                socket.emit('viewing_chat', { phone: selectedContact.phone });
+            }
         };
         socket.on('connect', reAuth);
         // Si el socket ya está conectado al montar este efecto, autenticar ya
         if (socket.connected) reAuth();
         return () => { socket.off('connect', reAuth); };
-    }, [socket]);
+    }, [socket, selectedContact?.phone]);
 
     useEffect(() => {
         // El tour ahora se decide por las preferencias del usuario (servidor),
