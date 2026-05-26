@@ -168,6 +168,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Etiquetas dinámicas según sector configurado en el wizard de Laura
     const [fieldLabels, setFieldLabels] = useState<FieldLabels>(DEFAULT_FIELD_LABELS);
 
+    // Tipo de servicio elegido al crear cita manualmente. Si la agenda del
+    // slot tiene servicios configurados (ej. Avería 240min, Revisión 120min),
+    // el agente puede elegir uno y la reserva ocupará automáticamente todos
+    // los slots consecutivos necesarios — igual que hace Laura por WhatsApp.
+    // '' = sin servicio = solo 1 slot (comportamiento clásico).
+    const [editService, setEditService] = useState<string>('');
+
     // AUTOCOMPLETADO POR TELÉFONO al crear cita. Cuando el agente teclea el
     // teléfono del cliente en el modal, debounce 300ms y consulta:
     //   GET /api/contacts/:phone   → datos del cliente (name, status, etc.)
@@ -476,6 +483,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setContactLookup(null);
         setVehicles([]);
         setSelectedVehicleId('');
+        setEditService('');
         setLookingUpContact(false);
     }, []);
 
@@ -501,6 +509,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setContactLookup(null);
         setVehicles([]);
         setSelectedVehicleId('');
+        setEditService(''); // siempre sin servicio al abrir el modal
         setSelectedAppt(appt);
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
@@ -543,6 +552,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
     const handleUpdateAppt = async () => {
         if (!selectedAppt) return;
+        // service solo se envía cuando se está CREANDO una cita (slot
+        // Available → Booked). En edición de una cita ya reservada se omite
+        // — cambiar el tamaño del bloque a posteriori requeriría liberar/
+        // reocupar secundarios, fuera de scope.
+        const isCreating = selectedAppt.status === 'Available' && editStatus === 'Booked';
         try {
             const res = await fetch(`${API_URL}/appointments/${selectedAppt.id}`, {
                 method: 'PUT',
@@ -558,10 +572,18 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     extra: editExtra,
                     notas: editNotas,
                     incident: editIncident,
+                    service: (isCreating && editService) ? editService : undefined,
                     actorUsername: getCurrentUsername()
                 })
             });
-            if (!res.ok) { alert("Error guardando"); return; }
+            if (!res.ok) {
+                // Mostrar el mensaje específico que devuelve el backend
+                // (ej. "No hay slots consecutivos suficientes para Avería...")
+                // en lugar de un genérico "Error guardando".
+                const err = await res.json().catch(() => ({}));
+                alert(err.error || 'Error guardando');
+                return;
+            }
 
             // Si cambió el estado del cliente, guardarlo (dispara la lógica de postventa)
             if (selectedAppt.clientPhone && editContactStatus && editContactStatus !== originalContactStatus) {
@@ -1501,6 +1523,51 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             )}
                                         </>
                                     )}
+
+                                    {/* Selector de TIPO DE SERVICIO — solo al CREAR cita (Available→Booked)
+                                        y si la agenda del slot tiene servicios configurados (Avería, Revisión...).
+                                        Al elegir uno, al guardar el backend ocupará automáticamente los slots
+                                        consecutivos necesarios (ej. Avería 240min con grid 60min = 4 slots).
+                                        Sin servicio = solo 1 hueco (comportamiento clásico). */}
+                                    {!readOnly && selectedAppt.status === 'Available' && editStatus === 'Booked' && (() => {
+                                        const slotAgenda = agendas.find(a => a.name === (selectedAppt?.agenda || ''));
+                                        const availableServices = (slotAgenda?.services || []).filter(s => s.name && s.name.trim() && s.durationMin > 0);
+                                        if (availableServices.length === 0) return null;
+                                        const granularity = slotAgenda?.duration || 60;
+                                        const chosen = availableServices.find(s => s.name === editService);
+                                        const slotsNeeded = chosen ? Math.max(1, Math.ceil(chosen.durationMin / granularity)) : 1;
+                                        return (
+                                            <div>
+                                                <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Tipo de servicio (opcional)</label>
+                                                <select
+                                                    value={editService}
+                                                    onChange={(e) => setEditService(e.target.value)}
+                                                    className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                >
+                                                    <option value="">— Sin servicio (1 hueco) —</option>
+                                                    {availableServices.map(s => (
+                                                        <option key={s.name} value={s.name}>
+                                                            {s.name} · {s.durationMin}min
+                                                        </option>
+                                                    ))}
+                                                </select>
+                                                {chosen && (
+                                                    <p className={`text-[11px] mt-1 ${isDark ? 'text-purple-300' : 'text-purple-600'}`}>
+                                                        {/* El backend bloquea slotsNeeded huecos enteros aunque el servicio
+                                                            sea más corto. Mostramos la duración REAL bloqueada (slotsNeeded
+                                                            × granularidad) para que el agente sepa exactamente cuánto se
+                                                            reserva del calendario. */}
+                                                        Esta cita ocupará <strong>{slotsNeeded * granularity} min</strong> ({slotsNeeded} {slotsNeeded === 1 ? 'hueco' : 'huecos consecutivos'}).
+                                                        {chosen.durationMin !== slotsNeeded * granularity && (
+                                                            <span className={`block opacity-80 ${isDark ? 'text-purple-300/80' : 'text-purple-600/80'}`}>
+                                                                (Servicio dura {chosen.durationMin}min, redondeado a huecos de {granularity}min)
+                                                            </span>
+                                                        )}
+                                                    </p>
+                                                )}
+                                            </div>
+                                        );
+                                    })()}
 
                                     {/* Estado del CLIENTE — permite marcar "Vehículo Entregado" y demás */}
                                     {selectedAppt.clientPhone && (

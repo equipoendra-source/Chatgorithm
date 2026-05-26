@@ -5424,17 +5424,161 @@ app.put('/api/appointments/:id', async (req, res) => {
             preUpdateAgenda = (before.get('Agenda') as string) || '';
         } catch (_) { /* no bloqueamos si no se puede leer */ }
 
-        try {
-            // updateAppointmentFields ya tolera el campo DurationMin si no existe.
-            // Aquí añadimos también tolerancia al campo Incident (más nuevo).
-            await updateAppointmentFields(req.params.id, f);
-        } catch (e: any) {
-            // Tolerancia: si el campo "Incident" aún no existe en Airtable, guardar sin él.
-            if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
-                console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
-                const { Incident: _omitIncident, ...rest } = f;
-                await updateAppointmentFields(req.params.id, rest);
-            } else throw e;
+        // RESERVA CON BLOQUE DE SLOTS (tipo de servicio).
+        // Si el body lleva `service` Y es una creación real (Available→Booked),
+        // calculamos cuántos slots consecutivos consume el servicio y los
+        // reservamos en bloque — igual que hace Laura desde WhatsApp con
+        // bookAppointment. Sin esto, el agente humano solo podía reservar 1
+        // hueco a la vez y tenía que duplicar el trabajo para una avería de 4h.
+        //
+        // Lógica duplicada conscientemente desde bookAppointment (líneas 3500+)
+        // para no acoplar refactorizando código del bot bajo presión.
+        //
+        // IMPORTANTE: el update del líder Y los secundarios va DENTRO del lock.
+        // En la primera versión los updates iban fuera y abrían una ventana de
+        // race con bookAppointment (Laura) que podía reservar uno de los
+        // secundarios entre nuestra validación y nuestro update. Mover todo
+        // dentro del lock cierra la ventana.
+        const isCreatingBooking = req.body.status === 'Booked' && preUpdateStatus === 'Available';
+        const wantsServiceBlock = isCreatingBooking && req.body.service && typeof req.body.service === 'string' && req.body.service.trim().length > 0;
+        let blockWasApplied = false;
+        if (wantsServiceBlock) {
+            const serviceName = String(req.body.service).trim();
+            // Usamos preUpdateAgenda (la agenda real del slot) en lugar de
+            // f['Agenda'] (que el agente podría haber cambiado en el body).
+            // Los secundarios deben buscarse por la agenda actual del slot,
+            // que es donde están guardados los huecos consecutivos.
+            const agendaName = preUpdateAgenda || (f['Agenda'] as string) || '';
+            try {
+                const allAgendas = await getAgendas();
+                if (!allAgendas || allAgendas.length === 0) {
+                    return res.status(503).json({ error: 'No se pudo leer la configuración de agendas. Intenta de nuevo.' });
+                }
+                const matchedAgenda = agendaName ? allAgendas.find(a => a.name === agendaName) : allAgendas[0];
+                if (!matchedAgenda) {
+                    return res.status(400).json({ error: `Agenda "${agendaName}" no encontrada — no se puede calcular el bloque del servicio.` });
+                }
+                const svc = matchedAgenda.services?.find(s => s.name === serviceName);
+                if (!svc) {
+                    return res.status(400).json({ error: `Servicio "${serviceName}" no existe en la agenda "${matchedAgenda.name}".` });
+                }
+                const granularity = matchedAgenda.duration || 60;
+                const slotsNeeded = Math.max(1, Math.ceil(svc.durationMin / granularity));
+                const blockDuration = slotsNeeded * granularity;
+
+                // Todo el flujo (validación + escritura del líder + escritura
+                // de secundarios) ocurre bajo el mismo lock para que ningún
+                // otro proceso pueda colarse y reservar un slot intermedio.
+                await withAppointmentLock(req.params.id, async () => {
+                    const currentLead = await base!('Appointments').find(req.params.id);
+                    const currentStatus = currentLead.get('Status') as string;
+                    const currentDuration = Number(currentLead.get('DurationMin')) || 0;
+
+                    // Idempotencia parcial: si el bloque YA está reservado con
+                    // la duración correcta, no re-buscamos secundarios ni los
+                    // re-escribimos — pero SÍ aplicamos los campos no-status
+                    // (name, matrícula, etc.) para que el agente pueda corregir
+                    // datos del cliente reintentando el guardado.
+                    const alreadyBlocked = currentStatus === 'Booked' && currentDuration >= blockDuration;
+
+                    if (!alreadyBlocked) {
+                        if (currentStatus !== 'Available') {
+                            throw { httpStatus: 409, message: `El hueco ya no está disponible (estado actual: ${currentStatus}).` };
+                        }
+                        const leadDate = new Date(currentLead.get('Date') as string);
+                        if (isNaN(leadDate.getTime())) {
+                            throw { httpStatus: 400, message: 'Fecha del slot líder inválida.' };
+                        }
+                        const blockEndMs = leadDate.getTime() + blockDuration * 60000;
+                        const endISO = new Date(blockEndMs).toISOString();
+                        const leadISO = leadDate.toISOString();
+                        // Buscar los N-1 secundarios bajo el lock: misma
+                        // agenda, Available, entre leadDate (exclusivo) y
+                        // leadDate + bloque (exclusivo).
+                        const candidates = await base!('Appointments').select({
+                            filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Available', {Date}>'${escAt(leadISO)}', {Date}<'${escAt(endISO)}')`,
+                            sort: [{ field: 'Date', direction: 'asc' }]
+                        }).all();
+                        const expected = slotsNeeded - 1;
+                        if (candidates.length < expected) {
+                            throw { httpStatus: 409, message: `No hay slots consecutivos suficientes para "${serviceName}" (${svc.durationMin}min). Faltan ${expected - candidates.length} hueco(s) libre(s) a continuación del seleccionado.` };
+                        }
+                        // Validar consecutividad estricta
+                        let prevMs = leadDate.getTime();
+                        const secondaries: string[] = [];
+                        for (let i = 0; i < expected; i++) {
+                            const c = candidates[i];
+                            const cMs = new Date(c.get('Date') as string).getTime();
+                            const diffMin = Math.round((cMs - prevMs) / 60000);
+                            if (diffMin !== granularity) {
+                                throw { httpStatus: 409, message: `Los huecos no son consecutivos (gap de ${diffMin}min cuando se esperan ${granularity}min). Probablemente falta algún slot creado en medio.` };
+                            }
+                            secondaries.push(c.id);
+                            prevMs = cMs;
+                        }
+                        // Ahora sí: actualizar líder + secundarios DENTRO del lock.
+                        f['DurationMin'] = blockDuration;
+                        try {
+                            await updateAppointmentFields(req.params.id, f);
+                        } catch (e: any) {
+                            if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                                console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                                const { Incident: _omitIncident, ...rest } = f;
+                                await updateAppointmentFields(req.params.id, rest);
+                            } else throw e;
+                        }
+                        const cleanedClientPhone = (f['ClientPhone'] as string) || '';
+                        for (const sid of secondaries) {
+                            try {
+                                await updateAppointmentFields(sid, { 'Status': 'Booked', 'ClientPhone': cleanedClientPhone });
+                            } catch (secErr: any) {
+                                console.warn(`[API] Error bloqueando slot secundario ${sid}:`, secErr?.message);
+                            }
+                        }
+                        console.log(`📅 [PUT-Service] Bloque manual aplicado: ${secondaries.length} secundario(s) tras líder ${req.params.id} (servicio "${serviceName}", ${blockDuration}min).`);
+                        blockWasApplied = true;
+                    } else {
+                        // Reintento: el bloque ya estaba. Aplicamos solo los
+                        // campos de datos del cliente — NO tocamos Status ni
+                        // DurationMin para no destruir el bloque existente.
+                        const { Status: _s, DurationMin: _d, ...dataOnly } = f;
+                        try {
+                            await updateAppointmentFields(req.params.id, dataOnly);
+                        } catch (e: any) {
+                            if (dataOnly.Incident !== undefined && /incident/i.test(e.message || '')) {
+                                const { Incident: _omit, ...rest } = dataOnly;
+                                await updateAppointmentFields(req.params.id, rest);
+                            } else throw e;
+                        }
+                        console.log(`📅 [PUT-Service] Bloque ya existía, aplicados solo datos del cliente al líder ${req.params.id}.`);
+                        blockWasApplied = true;
+                    }
+                });
+            } catch (svcErr: any) {
+                if (svcErr && typeof svcErr.httpStatus === 'number') {
+                    return res.status(svcErr.httpStatus).json({ error: svcErr.message });
+                }
+                console.error('[API] Error procesando bloque de servicio:', svcErr?.message || svcErr);
+                return res.status(500).json({ error: 'Error procesando el tipo de servicio.' });
+            }
+        }
+
+        // Flujo "clásico" (sin servicio o servicio que cabe en 1 slot): un solo
+        // update sobre el slot pasado por :id. Si arriba ya aplicamos el
+        // bloque, saltamos esta sección.
+        if (!blockWasApplied) {
+            try {
+                // updateAppointmentFields ya tolera el campo DurationMin si no existe.
+                // Aquí añadimos también tolerancia al campo Incident (más nuevo).
+                await updateAppointmentFields(req.params.id, f);
+            } catch (e: any) {
+                // Tolerancia: si el campo "Incident" aún no existe en Airtable, guardar sin él.
+                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                    console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                    const { Incident: _omitIncident, ...rest } = f;
+                    await updateAppointmentFields(req.params.id, rest);
+                } else throw e;
+            }
         }
 
         // Notificar nueva cita SOLO si esta llamada la pasó a Booked (no en cambios menores)
