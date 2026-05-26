@@ -356,7 +356,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
             <div className={`p-3 rounded-xl ${isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-50 text-amber-600'}`}><Zap size={24} /></div>
             <div className="min-w-0">
               <p className={`text-xs font-bold uppercase tracking-wider truncate ${isDark ? 'text-slate-400' : 'text-slate-400'}`} title={incidents.monthLabel}>
-                Incidentes{incidents.monthLabel ? ` · ${incidents.monthLabel}` : ''}
+                Sin Cita{incidents.monthLabel ? ` · ${incidents.monthLabel}` : ''}
               </p>
               <h3 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
                 {incidents.count}

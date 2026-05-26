@@ -1135,7 +1135,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             {/* Etiqueta de estado + incidente */}
                                             <div className="flex flex-col items-end justify-center gap-1 flex-shrink-0">
                                                 {s.incident && (
-                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}><Zap size={11} />Incidente</span>
+                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}><Zap size={11} />Sin Cita</span>
                                                 )}
                                                 {isBooked
                                                     ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-purple-800/50 text-purple-200' : 'bg-purple-100 text-purple-700'}`}><User size={11} />Reservada</span>
@@ -1205,15 +1205,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 <div className="flex items-center gap-2">
                                     <Zap size={16} className={editIncident ? 'text-amber-500' : 'text-slate-400'} />
                                     <div>
-                                        <span className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Incidente</span>
-                                        <p className="text-[11px] text-slate-400">Cita inesperada / urgente del día</p>
+                                        <span className={`text-sm font-bold ${isDark ? 'text-white' : 'text-slate-700'}`}>Sin Cita</span>
+                                        <p className="text-[11px] text-slate-400">Cliente atendido sin reserva previa</p>
                                     </div>
                                 </div>
                                 <button
                                     type="button"
                                     onClick={() => { if (!readOnly) setEditIncident(v => !v); }}
                                     disabled={readOnly}
-                                    title={editIncident ? 'Quitar marca de incidente' : 'Marcar como incidente'}
+                                    title={editIncident ? 'Quitar marca de Sin Cita' : 'Marcar como Sin Cita'}
                                     className={`relative w-11 h-6 rounded-full transition-colors flex-shrink-0 ${editIncident ? 'bg-amber-500' : (isDark ? 'bg-slate-600' : 'bg-slate-300')} ${readOnly ? 'opacity-60 cursor-not-allowed' : ''}`}
                                 >
                                     <span className={`absolute top-0.5 left-0.5 w-5 h-5 rounded-full bg-white shadow transition-transform ${editIncident ? 'translate-x-5' : ''}`} />
