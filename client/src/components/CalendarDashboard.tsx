@@ -730,10 +730,21 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const computeDayHours = (daySlots: Appointment[]): { freeHours: number, totalHours: number } | null => {
         if (!daySlots || daySlots.length === 0) return null;
         const sorted = [...daySlots].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        // Granularidad = duración estándar de cada slot. Tomamos la MÍNIMA
+        // diferencia entre slots consecutivos (no la primera) y la capamos a
+        // 120min como máximo razonable. Antes usábamos sorted[1]-sorted[0]
+        // que fallaba si el día tenía huecos: ej. slots a 10:00 y 16:00 →
+        // diff=6h, absurda para citas de 1h. La mínima entre todos los pares
+        // refleja mejor la "unidad" del día; el cap evita valores extremos
+        // cuando hay solo 2 slots muy separados.
         let granularityMin = slotDuration;
         if (sorted.length >= 2) {
-            const diff = Math.round((new Date(sorted[1].date).getTime() - new Date(sorted[0].date).getTime()) / 60000);
-            if (diff > 0) granularityMin = diff;
+            let minDiff = Infinity;
+            for (let i = 1; i < sorted.length; i++) {
+                const d = Math.round((new Date(sorted[i].date).getTime() - new Date(sorted[i - 1].date).getTime()) / 60000);
+                if (d > 0 && d < minDiff) minDiff = d;
+            }
+            if (minDiff !== Infinity) granularityMin = Math.min(minDiff, 120);
         }
         let bookedMin = 0;
         let availableCount = 0;
@@ -773,12 +784,12 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         };
     };
 
-    // Formatea las horas como "4h libres / 8h" (compacto). Evita decimales
-    // innecesarios: "8h" en lugar de "8.0h".
-    const formatHoursLabel = (h: { freeHours: number, totalHours: number }): string => {
+    // Formatea solo las horas libres como "5h libres" (compacto, sin decimales
+    // innecesarios). El total ya está implícito en el badge "X/Y Ocupados" de
+    // al lado, así que no lo repetimos en el indicador.
+    const formatFreeHours = (h: { freeHours: number }): string => {
         const f = Number.isInteger(h.freeHours) ? `${h.freeHours}` : h.freeHours.toFixed(1);
-        const t = Number.isInteger(h.totalHours) ? `${h.totalHours}` : h.totalHours.toFixed(1);
-        return `${f}h libres / ${t}h`;
+        return `${f}h libres`;
     };
 
     // Citas de una fecha concreta (objeto Date), aplicando el filtro de agenda
@@ -1016,16 +1027,24 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </div>
 
                                         {total > 0 && (
-                                            <div className="flex flex-col items-end gap-0.5">
+                                            <div className="flex flex-col items-end gap-1">
                                                 <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${booked === total
                                                     ? (isDark ? 'bg-red-900/30 text-red-400 border border-red-800/50' : 'bg-red-100 text-red-600')
                                                     : (isDark ? 'bg-green-900/30 text-green-400 border border-green-800/50' : 'bg-green-100 text-green-600')
                                                     }`}>
                                                     {booked}/{total} <span className="hidden md:inline">Ocupados</span>
                                                 </span>
-                                                {hoursInfo && (
-                                                    <span className={`text-[9px] font-medium ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                                        {formatHoursLabel(hoursInfo)}
+                                                {/* Pill de horas libres: solo se muestra si quedan huecos disponibles.
+                                                    Si el día está completo, el badge rojo de arriba ya dice todo y
+                                                    repetirlo con "0h libres" sería ruido. Color sky/teal suave para
+                                                    diferenciar visualmente del badge de ocupados. */}
+                                                {hoursInfo && hoursInfo.freeHours > 0 && (
+                                                    <span
+                                                        title={`${formatFreeHours(hoursInfo)} de un total de ${Number.isInteger(hoursInfo.totalHours) ? hoursInfo.totalHours : hoursInfo.totalHours.toFixed(1)}h`}
+                                                        className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${isDark ? 'bg-sky-500/10 text-sky-300 border-sky-500/30' : 'bg-sky-50 text-sky-700 border-sky-200'}`}
+                                                    >
+                                                        <Clock className="w-2.5 h-2.5" />
+                                                        {formatFreeHours(hoursInfo)}
                                                     </span>
                                                 )}
                                             </div>
@@ -1138,14 +1157,18 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <span className={`text-sm font-bold capitalize ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{weekDays[dowIdx]}</span>
                                         </div>
                                         {slots.length > 0 && (
-                                            <div className="flex flex-col items-end gap-0.5">
+                                            <div className="flex flex-col items-end gap-1">
                                                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${booked === slots.length
                                                     ? (isDark ? 'bg-red-900/30 text-red-400' : 'bg-red-100 text-red-600')
                                                     : (isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600')
                                                     }`}>{booked}/{slots.length}</span>
-                                                {hoursInfo && (
-                                                    <span className={`text-[9px] font-medium ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                                        {formatHoursLabel(hoursInfo)}
+                                                {hoursInfo && hoursInfo.freeHours > 0 && (
+                                                    <span
+                                                        title={`${formatFreeHours(hoursInfo)} de un total de ${Number.isInteger(hoursInfo.totalHours) ? hoursInfo.totalHours : hoursInfo.totalHours.toFixed(1)}h`}
+                                                        className={`inline-flex items-center gap-1 text-[10px] font-semibold px-2 py-0.5 rounded-full border ${isDark ? 'bg-sky-500/10 text-sky-300 border-sky-500/30' : 'bg-sky-50 text-sky-700 border-sky-200'}`}
+                                                    >
+                                                        <Clock className="w-2.5 h-2.5" />
+                                                        {formatFreeHours(hoursInfo)}
                                                     </span>
                                                 )}
                                             </div>
