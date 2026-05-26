@@ -389,12 +389,21 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 // el nombre que el último autocompletado había aplicado (es
                 // decir, el agente NO ha tocado el campo), lo sobrescribimos
                 // con el nuevo. Si el agente lo editó a mano (no coincide con
-                // lastAppliedNameRef), respetamos su input. Functional updater
-                // para evitar stale closure si el agente teclea mid-fetch.
+                // lastAppliedNameRef), respetamos su input.
+                //
+                // OJO: capturamos `previousAppliedName` ANTES de mutar el ref.
+                // El functional updater de setEditName es lazy (React lo evalúa
+                // después de que el código siga corriendo), y si leyéramos
+                // lastAppliedNameRef.current DENTRO del updater, ya tendría el
+                // valor NUEVO porque la asignación lastAppliedNameRef.current = newName
+                // de abajo es síncrona. Sin esta captura, al cambiar de Diego
+                // a Pedro la comparación "Diego === Pedro" fallaba y el nombre
+                // se quedaba con "Diego" para siempre.
                 const newName = contact.name || '';
+                const previousAppliedName = lastAppliedNameRef.current;
                 setEditName(prev => {
                     if (!prev) return newName;
-                    if (lastAppliedNameRef.current !== null && prev === lastAppliedNameRef.current) return newName;
+                    if (previousAppliedName !== null && prev === previousAppliedName) return newName;
                     return prev; // agente lo editó a mano, no pisar
                 });
                 lastAppliedNameRef.current = newName;
