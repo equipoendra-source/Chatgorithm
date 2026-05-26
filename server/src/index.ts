@@ -5385,7 +5385,15 @@ app.put('/api/appointments/:id', async (req, res) => {
         // de país. Ahora siempre se almacena con prefijo (34 por defecto, o el que
         // envíe el frontend en phonePrefix).
         if (req.body.clientPhone !== undefined) f["ClientPhone"] = normalizePhone(req.body.clientPhone, req.body.phonePrefix);
-        if (req.body.clientName !== undefined) f["ClientName"] = req.body.clientName;
+        if (req.body.clientName !== undefined) {
+            // Normalizar nombre vacío a "Cliente" cuando se está RESERVANDO un slot.
+            // El frontend usa `clientName === ''` como criterio para distinguir
+            // líderes de secundarios al renderizar bloques multi-slot; un líder
+            // con nombre vacío se confunde con secundario y queda invisible.
+            // bookAppointment (Laura) ya hace este fallback. Aquí lo replicamos.
+            const incomingName = String(req.body.clientName || '').trim();
+            f["ClientName"] = (req.body.status === 'Booked' && !incomingName) ? 'Cliente' : incomingName;
+        }
         // Aceptar tanto los nombres antiguos (matricula/marca/modelo) como los genéricos (field1..field5)
         if (req.body.matricula !== undefined) f["Matricula"] = req.body.matricula;
         if (req.body.marca !== undefined) f["Marca"] = req.body.marca;

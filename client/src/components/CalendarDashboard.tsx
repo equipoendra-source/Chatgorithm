@@ -657,10 +657,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         if (selectedAppt?.id === id) setSelectedAppt(null);
     };
 
-    const formatTimeRange = (isoString: string) => {
+    // Formatea "HH:MM - HH:MM" para un slot. Si el slot es líder de un bloque
+    // multi-slot (durationMin > slotDuration), usa esa duración para calcular
+    // el fin del bloque. Si no, usa slotDuration (1 hueco). Sin esto, una
+    // avería de 4h se veía como "13:00 - 14:00" en lugar de "13:00 - 17:00".
+    const formatTimeRange = (isoString: string, durationMin?: number) => {
         try {
             const start = new Date(isoString);
-            const end = new Date(start.getTime() + slotDuration * 60000);
+            const dur = (durationMin && durationMin > 0) ? durationMin : slotDuration;
+            const end = new Date(start.getTime() + dur * 60000);
             const startStr = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const endStr = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             return `${startStr} - ${endStr}`;
@@ -814,6 +819,58 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         return `${f}h libres`;
     };
 
+    // Agrupa visualmente bloques multi-slot. Una cita de "Avería" (240min con
+    // grid 60min) ocupa 4 slots en Airtable: el LÍDER con ClientName + datos
+    // + DurationMin=240, y 3 SECUNDARIOS solo con Status=Booked + ClientPhone
+    // (sin ClientName) para bloquear los huecos. Si renderizamos todos los
+    // slots tal cual, salen 4 entradas separadas con "Cliente" en 3 de ellas.
+    // Este helper oculta los secundarios: solo deja Available y líderes.
+    // El líder se renderiza con su rango horario real (formatTimeRange usa
+    // durationMin) → una sola entrada "13:00 - 17:00 · Alex".
+    //
+    // Criterio: un slot Booked es secundario si su clientName está vacío.
+    // (En el backend solo el líder lleva ClientName; los secundarios no.)
+    // Líder corrupto pre-feature con durationMin=0 pero clientName presente
+    // se conserva — se renderiza como cita de 1 slot, comportamiento idéntico
+    // al anterior. Huérfano (Booked sin clientName y sin líder) se oculta.
+    const collapseBookedBlocks = (slots: Appointment[]): Appointment[] => {
+        // Ordenamos defensivamente por fecha (los callers ya lo hacen, pero
+        // así el helper es seguro si alguien lo invoca con array sin ordenar).
+        const sorted = [...slots].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        // Trackeamos el último líder Booked visto. Si un secundario (Booked
+        // sin clientName) aparece DESPUÉS de un líder con mismo clientPhone
+        // y agenda, es parte de ese bloque → ocultar. Si aparece sin líder
+        // antecesor (HUÉRFANO por datos corruptos / sync roto / edición
+        // manual en Airtable), lo conservamos para que el agente pueda
+        // hacer click y liberarlo. Sin esto un huérfano se hace invisible
+        // pero seguiría contando en el badge "X/Y Ocupados".
+        const result: Appointment[] = [];
+        let lastLeader: Appointment | null = null;
+        for (const s of sorted) {
+            if (s.status !== 'Booked') {
+                result.push(s);
+                continue;
+            }
+            const name = (s.clientName ?? '').trim();
+            if (name !== '') {
+                // Líder: conservar y recordar
+                result.push(s);
+                lastLeader = s;
+                continue;
+            }
+            // Booked sin clientName → secundario o huérfano
+            const isLikelySecondary = lastLeader
+                && (lastLeader.agenda || '') === (s.agenda || '')
+                && (lastLeader.clientPhone || '') === (s.clientPhone || '');
+            if (!isLikelySecondary) {
+                // Huérfano → conservar para que el admin pueda actuar
+                result.push(s);
+            }
+            // Si es secundario, no se añade al result (se oculta).
+        }
+        return result;
+    };
+
     // Citas de una fecha concreta (objeto Date), aplicando el filtro de agenda
     const getSlotsForDate = (dateObj: Date) =>
         appointments
@@ -866,25 +923,32 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     })();
 
     // Chip compacto de cita — usado en la vista de Semana
-    const renderChip = (s: Appointment) => (
-        <div
-            key={s.id}
-            onClick={() => handleOpenEdit(s)}
-            className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${s.status === 'Booked'
-                ? (isDark ? 'bg-purple-900/40 border-purple-800 text-purple-200 hover:bg-purple-900/60' : 'bg-purple-50 border-purple-100 text-purple-700 hover:bg-purple-100')
-                : (isDark ? 'bg-green-900/30 border-green-800/60 text-green-300 hover:bg-green-900/50' : 'bg-green-50 border-green-100 text-green-700 hover:bg-green-100')
-                }`}
-        >
-            {agendas.length > 1 && s.agenda && (
-                <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agendaColor(s.agenda) }} title={s.agenda} />
-            )}
-            {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
-            <span className="font-bold font-mono flex-shrink-0">{fmtTime(s.date)}</span>
-            {s.status === 'Booked'
-                ? <span className="truncate font-medium">{s.clientName || 'Cliente'}</span>
-                : <span className="opacity-60">Libre</span>}
-        </div>
-    );
+    const renderChip = (s: Appointment) => {
+        // Para bloques multi-slot el líder muestra hora inicio-fin (ej. "13:00-17:00").
+        // Para citas de 1 hueco o Available, solo la hora de inicio.
+        const isMultiSlotLeader = s.status === 'Booked' && (s.durationMin || 0) > slotDuration;
+        return (
+            <div
+                key={s.id}
+                onClick={() => handleOpenEdit(s)}
+                className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${s.status === 'Booked'
+                    ? (isDark ? 'bg-purple-900/40 border-purple-800 text-purple-200 hover:bg-purple-900/60' : 'bg-purple-50 border-purple-100 text-purple-700 hover:bg-purple-100')
+                    : (isDark ? 'bg-green-900/30 border-green-800/60 text-green-300 hover:bg-green-900/50' : 'bg-green-50 border-green-100 text-green-700 hover:bg-green-100')
+                    }`}
+            >
+                {agendas.length > 1 && s.agenda && (
+                    <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agendaColor(s.agenda) }} title={s.agenda} />
+                )}
+                {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
+                <span className="font-bold font-mono flex-shrink-0">
+                    {isMultiSlotLeader ? formatTimeRange(s.date, s.durationMin) : fmtTime(s.date)}
+                </span>
+                {s.status === 'Booked'
+                    ? <span className="truncate font-medium">{s.clientName || 'Cliente'}</span>
+                    : <span className="opacity-60">Libre</span>}
+            </div>
+        );
+    };
 
     return (
         <div className={`p-4 md:p-8 h-full overflow-y-auto relative safe-pb-20 md:safe-pb-8 ${isDark ? 'bg-transparent' : 'bg-slate-50'}`}>
@@ -1077,7 +1141,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     <div className="space-y-2 md:space-y-1 max-h-none md:max-h-[100px] overflow-y-visible md:overflow-y-auto pr-1 custom-scrollbar">
                                         {slots.length === 0 && <p className={`md:hidden text-xs italic ml-2 ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas programadas</p>}
 
-                                        {slots.map(s => (
+                                        {collapseBookedBlocks(slots).map(s => (
                                             <div
                                                 key={s.id}
                                                 onClick={() => handleOpenEdit(s)}
@@ -1100,7 +1164,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                             />
                                                         )}
                                                         {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
-                                                        {formatTimeRange(s.date)}
+                                                        {formatTimeRange(s.date, s.durationMin)}
                                                     </span>
                                                     {/* Nombre de la agenda (visible si hay varias) */}
                                                     {agendas.length > 1 && s.agenda && (
@@ -1201,7 +1265,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         {slots.length === 0 && (
                                             <p className={`text-xs italic ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas</p>
                                         )}
-                                        {slots.map(renderChip)}
+                                        {collapseBookedBlocks(slots).map(renderChip)}
                                     </div>
                                     {!readOnly && (
                                         <button
@@ -1250,11 +1314,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 </div>
                             )}
 
-                            {/* Lista de citas del día */}
+                            {/* Lista de citas del día — secundarios ocultos para que un bloque multi-slot
+                                aparezca como UNA sola entrada con su rango horario completo. */}
                             <div className="space-y-2">
-                                {slots.map(s => {
+                                {collapseBookedBlocks(slots).map(s => {
                                     const start = new Date(s.date);
-                                    const end = new Date(start.getTime() + slotDuration * 60000);
+                                    // Si el slot es líder de un bloque multi-slot (durationMin > slotDuration),
+                                    // usamos esa duración real para calcular el fin. Si no, slotDuration normal.
+                                    const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
+                                    const end = new Date(start.getTime() + dur * 60000);
                                     const isBooked = s.status === 'Booked';
                                     return (
                                         <div
