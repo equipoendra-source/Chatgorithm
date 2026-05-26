@@ -500,6 +500,15 @@ const PUBLIC_SOCKET_EVENTS = new Set<string>([
     'request_team_history',    // lectura
     'request_ai_status',       // lectura del estado de IA de un chat
     'mark_read',               // marcar leído (no destructivo)
+    // viewer tracking: registran en Maps en memoria por socket.id. NO son
+    // destructivos. Antes los protegíamos con auth, pero en el flujo F5
+    // (recarga completa con chat ya abierto vía URL/estado restaurado) el
+    // ChatWindow emitía `viewing_chat` ANTES de que reAuth del App.tsx
+    // hubiera completado `authenticate_socket`, y el handler los descartaba
+    // silenciosamente. Resultado: tras refresh seguía saliendo el badge
+    // morado. Marcarlos como públicos elimina el race definitivamente.
+    'viewing_chat',
+    'stop_viewing_chat',
 ]);
 
 // =========================================================================
@@ -2732,28 +2741,89 @@ async function saveAndEmitMessage(msg: any) {
     }
 }
 
+// Cola por-phone para serializar handleContactUpdate y evitar race condition:
+// si dos mensajes del mismo cliente llegan casi simultáneos (dos webhooks de
+// distintas WABAs, o cliente que escribe dos veces en <1s), sin esta cola
+// ambos hacían `select → 0 → create` en paralelo y acababan creando dos
+// contactos. Con la cola, el segundo espera al primero, vuelve a hacer select
+// y encuentra el contacto recién creado.
+const contactUpdateQueue = new Map<string, Promise<any>>();
+
 async function handleContactUpdate(phone: string, text: string, name: string = "Cliente", originId: string = "unknown", incrementUnread: boolean = false) {
     if (!base) return null;
     const clean = cleanNumber(phone);
+    if (!clean) return null;
+    // Encolar tras la promesa anterior del mismo phone. La cadena se sigue
+    // limpiando sola porque cada llamada actualiza la entry con su propia
+    // promesa antes de empezar.
+    const prev = contactUpdateQueue.get(clean) || Promise.resolve();
+    const current = prev.then(() => _handleContactUpdateInner(clean, text, name, originId, incrementUnread))
+        .catch(e => { console.error("Error Contactos:", e); return null; });
+    contactUpdateQueue.set(clean, current);
+    // Cuando esta promesa termine, si la entry actual sigue siendo esta,
+    // limpiarla para no leakear memoria (chats antiguos quedarían referenciados).
+    current.finally(() => {
+        if (contactUpdateQueue.get(clean) === current) contactUpdateQueue.delete(clean);
+    });
+    return current;
+}
+
+async function _handleContactUpdateInner(clean: string, text: string, name: string, originId: string, incrementUnread: boolean) {
+    if (!base) return null;
     try {
-        let r = await base('Contacts').select({ filterByFormula: `AND({phone}='${clean}', {origin_phone_id}='${originId}')`, maxRecords: 1 }).firstPage();
-        if (r.length === 0) {
-            const orphan = await base('Contacts').select({ filterByFormula: `AND({phone}='${clean}', {origin_phone_id}='')`, maxRecords: 1 }).firstPage();
-            if (orphan.length > 0) {
-                await base('Contacts').update([{ id: orphan[0].id, fields: { "origin_phone_id": originId } }]);
-                r = [orphan[0]];
-            }
-        }
+        // Antes el filtro era AND(phone, origin_phone_id). Si el cliente
+        // cambiaba de WABA (escribía al 607 y luego al 722), no encontraba
+        // el contacto existente y CREABA UN DUPLICADO con el nuevo
+        // origin_phone_id. Resultado: dos contactos con mismo phone, last_message
+        // viejo en uno y nuevo en otro, notificaciones perdidas, vista
+        // Sidebar inconsistente.
+        //
+        // Ahora un contacto = un phone (regla: una instancia de Chatgorithm
+        // pertenece a UN negocio con varias WABAs). Si el cliente cambia de
+        // WABA, actualizamos el origin_phone_id del contacto existente al
+        // más reciente — refleja que ahora "pertenece" a esa línea.
+        const r = await base('Contacts').select({
+            filterByFormula: `{phone}='${escAt(clean)}'`,
+            maxRecords: 1
+        }).firstPage();
+
         if (r.length > 0) {
             const fieldsToUpdate: any = { "last_message": text, "last_message_time": new Date().toISOString() };
             if (incrementUnread) {
                 const currentUnread = (r[0].get('unread_count') as number) || 0;
                 fieldsToUpdate["unread_count"] = currentUnread + 1;
             }
+            // Migración de WABA en caliente: si el originId nuevo es válido
+            // (existe en BUSINESS_ACCOUNTS) y distinto al actual, actualizamos.
+            // El guard contra phoneIds desconocidos evita que un webhook
+            // espurio o un originId mal-formado envenene contactos buenos.
+            const currentOrigin = (r[0].get('origin_phone_id') as string) || '';
+            if (originId && originId !== 'unknown' && originId !== currentOrigin && BUSINESS_ACCOUNTS[originId]) {
+                fieldsToUpdate["origin_phone_id"] = originId;
+                if (currentOrigin) {
+                    console.log(`📞 [ContactMigrate] ${clean} cambió de WABA: ${currentOrigin} → ${originId}`);
+                    // Audit + notify del cambio para trazabilidad
+                    try { logAudit({ action: 'contact.update', user: 'system', targetType: 'contact', targetId: r[0].id, targetName: (r[0].get('name') as string) || clean, summary: `WABA migrada: ${currentOrigin} → ${originId}`, changes: { origin_phone_id: { from: currentOrigin, to: originId } }, origin: 'whatsapp' }).catch(() => {}); } catch (_) { /* nunca bloquear por audit */ }
+                }
+            }
             await base('Contacts').update([{ id: r[0].id, fields: fieldsToUpdate }]);
+            if (fieldsToUpdate.origin_phone_id) {
+                // Avisar al frontend para que refresque la lista (la línea cambió)
+                io.emit('contact_updated_notification');
+            }
             return r[0];
         } else {
-            const fieldsToCreate: any = { "phone": clean, "name": name, "status": "Nuevo", "last_message": text, "last_message_time": new Date().toISOString(), "origin_phone_id": originId };
+            const fieldsToCreate: any = {
+                "phone": clean,
+                "name": name,
+                "status": "Nuevo",
+                "last_message": text,
+                "last_message_time": new Date().toISOString(),
+                // Solo persistimos origin_phone_id si la WABA es conocida; si
+                // no, dejamos vacío y se actualizará en el siguiente mensaje
+                // (mejor "huérfano momentáneo" que origin envenenado).
+                "origin_phone_id": (originId && originId !== 'unknown' && BUSINESS_ACCOUNTS[originId]) ? originId : ''
+            };
             if (incrementUnread) fieldsToCreate["unread_count"] = 1;
 
             const n = await base('Contacts').create([{ fields: fieldsToCreate }]);
@@ -4045,12 +4115,18 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
     try {
         const clean = cleanNumber(phone);
         // Filtro: mensajes donde el cliente es sender o recipient.
-        // Multi-tenant: si nos pasan origin_phone_id, filtramos también por él para evitar
-        // que conversaciones de empresas distintas se solapen.
-        let filterFormula = `OR({sender} = '${clean}', {recipient} = '${clean}')`;
-        if (originPhoneId) {
-            filterFormula = `AND(${filterFormula}, {origin_phone_id} = '${escAt(originPhoneId)}')`;
-        }
+        // NOTA: antes había un filtro adicional por origin_phone_id para no
+        // mezclar conversaciones "entre empresas". Lo hemos QUITADO porque
+        // en Chatgorithm una instancia = un negocio con varias WABAs, y si
+        // el cliente escribe a una línea y luego a la otra (típico: empezó
+        // por ventas y luego se le ocurre escribir a recambios) queremos
+        // que Laura recuerde el contexto completo (su nombre, matrícula,
+        // cita pendiente, etc.). Si en el futuro se quiere multi-empresa
+        // real, el aislamiento debe hacerse por companyId, no por phoneId.
+        // El parámetro originPhoneId queda en la firma por compatibilidad
+        // pero ya no filtra.
+        void originPhoneId;
+        const filterFormula = `OR({sender} = '${clean}', {recipient} = '${clean}')`;
         const records = await base('Messages').select({
             filterByFormula: filterFormula,
             sort: [{ field: "timestamp", direction: "desc" }],
@@ -4938,6 +5014,153 @@ app.post('/api/admin/reload-accounts', async (req, res) => {
         success: true,
         accounts: Object.keys(BUSINESS_ACCOUNTS).map(id => ({ id, name: ACCOUNT_META[id]?.name }))
     });
+});
+
+// GET /api/admin/duplicate-contacts
+// Devuelve el inventario de contactos con el mismo phone (clean) pero
+// distintos records en Airtable. Aparecen cuando un cliente escribía a una
+// WABA y empieza a escribir a otra (bug histórico previo al fix de
+// handleContactUpdate). Pasa antes de mergear.
+app.get('/api/admin/duplicate-contacts', async (req, res) => {
+    if (!checkAdminToken(req, res)) return;
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const all = await base('Contacts').select().all();
+        const byPhone = new Map<string, any[]>();
+        for (const r of all) {
+            const ph = cleanNumber((r.get('phone') as string) || '');
+            if (!ph) continue;
+            let arr = byPhone.get(ph);
+            if (!arr) { arr = []; byPhone.set(ph, arr); }
+            arr.push({
+                id: r.id,
+                phone: ph,
+                name: (r.get('name') as string) || '',
+                origin_phone_id: (r.get('origin_phone_id') as string) || '',
+                last_message: (r.get('last_message') as string) || '',
+                last_message_time: (r.get('last_message_time') as string) || '',
+                unread_count: (r.get('unread_count') as number) || 0,
+                assigned_to: (r.get('assigned_to') as string) || '',
+                department: (r.get('department') as string) || '',
+                status: (r.get('status') as string) || ''
+            });
+        }
+        const duplicates: any[] = [];
+        byPhone.forEach((records, phone) => {
+            if (records.length > 1) duplicates.push({ phone, count: records.length, records });
+        });
+        // Más recientes primero (por last_message_time del más reciente del grupo)
+        duplicates.sort((a, b) => {
+            const ta = Math.max(...a.records.map((r: any) => new Date(r.last_message_time || 0).getTime()));
+            const tb = Math.max(...b.records.map((r: any) => new Date(r.last_message_time || 0).getTime()));
+            return tb - ta;
+        });
+        res.json({ totalPhonesAffected: duplicates.length, duplicates });
+    } catch (e: any) {
+        console.error('[admin/duplicate-contacts] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// POST /api/admin/merge-contact-duplicates
+// Body: { phone?: string, all?: boolean, keepOriginPhoneId?: string }
+//   - phone: mergea solo los duplicados de ese teléfono
+//   - all: true → mergea todos los duplicados de la base
+//   - keepOriginPhoneId: si se pasa, ese record gana (origin_phone_id especificado);
+//     si no, gana el de last_message_time más reciente.
+// Algoritmo: el ganador conserva todos sus campos. Del perdedor copia los
+// campos NO vacíos que el ganador no tenga (merge soft). unread_count = max
+// de ambos. Borra al perdedor. NO toca Messages/Appointments (sus
+// origin_phone_id originales se preservan).
+app.post('/api/admin/merge-contact-duplicates', async (req, res) => {
+    if (!checkAdminToken(req, res)) return;
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { phone, all, keepOriginPhoneId, confirmAll, dryRun } = req.body || {};
+    if (!phone && !all) return res.status(400).json({ error: 'Pasa `phone` o `all: true`' });
+    // Safety crítica: merge masivo (all=true) requiere confirmación literal
+    // explícita para evitar destruir toda la base por una llamada accidental.
+    // Solo bypass: phone concreto (limitado en alcance) o dryRun (no destruye).
+    if (all && !dryRun && confirmAll !== 'YES_MERGE_ALL') {
+        return res.status(400).json({
+            error: 'Para mergear TODOS los duplicados de la base, pasa también `confirmAll: "YES_MERGE_ALL"`. Alternativamente usa `dryRun: true` para ver el reporte sin destruir nada.'
+        });
+    }
+    const isDryRun = !!dryRun;
+    try {
+        const allContacts = await base('Contacts').select().all();
+        const byPhone = new Map<string, any[]>();
+        for (const r of allContacts) {
+            const ph = cleanNumber((r.get('phone') as string) || '');
+            if (!ph) continue;
+            if (phone && ph !== cleanNumber(phone)) continue;
+            let arr = byPhone.get(ph);
+            if (!arr) { arr = []; byPhone.set(ph, arr); }
+            arr.push(r);
+        }
+        const report: any[] = [];
+        for (const [ph, records] of byPhone) {
+            if (records.length < 2) continue;
+            // Elegir ganador
+            let winner: any;
+            if (keepOriginPhoneId) {
+                winner = records.find((r: any) => (r.get('origin_phone_id') as string) === keepOriginPhoneId);
+            }
+            if (!winner) {
+                winner = records.reduce((best: any, r: any) => {
+                    const t = new Date((r.get('last_message_time') as string) || 0).getTime();
+                    const bt = new Date((best.get('last_message_time') as string) || 0).getTime();
+                    return t > bt ? r : best;
+                });
+            }
+            // Mergear campos del perdedor al ganador
+            const losers = records.filter((r: any) => r.id !== winner.id);
+            const winnerFields: any = {};
+            const fieldsToMerge = ['name', 'notes', 'email', 'address', 'avatar', 'assigned_to', 'department', 'status'];
+            for (const f of fieldsToMerge) {
+                const cur = (winner.get(f) as string) || '';
+                if (!cur) {
+                    for (const l of losers) {
+                        const lv = (l.get(f) as string) || '';
+                        if (lv) { winnerFields[f] = lv; break; }
+                    }
+                }
+            }
+            // Tags: unión
+            const winTags = (winner.get('tags') as string[]) || [];
+            const allTags = new Set(winTags);
+            for (const l of losers) ((l.get('tags') as string[]) || []).forEach(t => allTags.add(t));
+            if (allTags.size > winTags.length) winnerFields.tags = Array.from(allTags);
+            // unread_count: max
+            const maxUnread = Math.max(
+                (winner.get('unread_count') as number) || 0,
+                ...losers.map((l: any) => (l.get('unread_count') as number) || 0)
+            );
+            if (maxUnread > ((winner.get('unread_count') as number) || 0)) winnerFields.unread_count = maxUnread;
+            // last_message_time: el más reciente
+            const allTimes = records.map((r: any) => ({ t: new Date((r.get('last_message_time') as string) || 0).getTime(), msg: (r.get('last_message') as string) || '' }));
+            const newest = allTimes.reduce((a, b) => a.t > b.t ? a : b);
+            const winnerTime = new Date((winner.get('last_message_time') as string) || 0).getTime();
+            if (newest.t > winnerTime) {
+                winnerFields.last_message = newest.msg;
+                winnerFields.last_message_time = new Date(newest.t).toISOString();
+            }
+            if (!isDryRun) {
+                // Aplicar update al ganador
+                if (Object.keys(winnerFields).length > 0) {
+                    await base('Contacts').update([{ id: winner.id, fields: winnerFields }]);
+                }
+                // Borrar perdedores
+                await base('Contacts').destroy(losers.map((l: any) => l.id));
+                try { logAudit({ action: 'contact.update', user: 'admin', targetType: 'contact', targetId: winner.id, targetName: (winner.get('name') as string) || ph, summary: `Merge de ${records.length} contactos duplicados de phone ${ph}. Conservado el ganador, eliminados ${losers.length}.`, changes: { merged: { to: losers.length }, mergedFields: { to: Object.keys(winnerFields).join(', ') } }, origin: 'api' }).catch(() => {}); } catch (_) { /* no bloquear */ }
+            }
+            report.push({ phone: ph, winner: winner.id, removed: losers.map((l: any) => l.id), mergedFields: Object.keys(winnerFields), dryRun: isDryRun });
+        }
+        if (!isDryRun) io.emit('contact_updated_notification');
+        res.json({ success: true, dryRun: isDryRun, phonesMerged: report.length, report });
+    } catch (e: any) {
+        console.error('[admin/merge-contact-duplicates] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
 });
 
 // Agenda
@@ -6966,25 +7189,20 @@ io.on('connection', (socket) => {
     // Viewer tracking — el ChatWindow emite estos eventos al abrir y cerrar
     // un chat para que saveAndEmitMessage sepa NO incrementar unread_count
     // mientras un agente humano está mirando ese chat.
+    // Estos dos eventos son PÚBLICOS (no requieren auth, ver PUBLIC_SOCKET_EVENTS).
+    // Razón: tras un F5 con un chat ya abierto, ChatWindow se monta y emite
+    // viewing_chat antes de que App.tsx haya tenido oportunidad de reemitir
+    // authenticate_socket — el emit llegaba "huérfano" al server y el handler
+    // lo descartaba por falta de auth. Resultado: el viewer nunca se registraba
+    // y el unread_count volvía tras refresh. Estos eventos solo escriben en un
+    // Map en memoria por socket.id; un atacante anónimo solo podría enviar
+    // emits sobre SU propio socket — no afecta a contadores de otros sockets.
     socket.on('viewing_chat', (data: any) => {
-        // Guarda de autenticación: si el socket no está autenticado y SOCKET_AUTH_REQUIRED
-        // está activo, ignoramos (consistente con cómo se protegen otros sockets).
-        // Logueamos cuando se descarte para detectar regresiones (ej. si en el
-        // futuro authenticate_socket se hiciera async y el orden de los emits
-        // se rompiera, los viewers se perderían sin pista visible).
-        if (socketAuthRequired && !socket.data?.authenticated) {
-            console.warn(`[viewers] viewing_chat ignorado: socket ${socket.id} sin autenticar (phone=${data?.phone})`);
-            return;
-        }
         const phone = cleanNumber(data?.phone);
         if (!phone) return;
         addViewer(phone, socket.id);
     });
     socket.on('stop_viewing_chat', (data: any) => {
-        if (socketAuthRequired && !socket.data?.authenticated) {
-            console.warn(`[viewers] stop_viewing_chat ignorado: socket ${socket.id} sin autenticar (phone=${data?.phone})`);
-            return;
-        }
         const phone = cleanNumber(data?.phone);
         if (!phone) return;
         removeViewer(phone, socket.id);
@@ -9808,8 +10026,35 @@ async function migrateDepartmentsToConfig(): Promise<void> {
 
 // Ejecutar migración antes de aceptar conexiones para evitar que las primeras
 // peticiones a Laura caigan con departamentos vacíos.
-migrateDepartmentsToConfig()
-    .catch(e => console.warn('[Migration] Fallo no fatal:', e?.message))
-    .finally(() => {
-        httpServer.listen(PORT, () => { console.log(`🚀 Servidor Listo ${PORT}`); });
-    });
+// Escaneo de contactos duplicados al arrancar. NO mergea nada (sería
+// destructivo si dos negocios distintos comparten phone por casualidad).
+// Solo loggea para que el admin sepa que existen y los pueda mergear con
+// el endpoint /api/admin/merge-contact-duplicates cuando quiera.
+async function scanContactDuplicates(): Promise<void> {
+    if (!base) return;
+    try {
+        const all = await base('Contacts').select().all();
+        const byPhone = new Map<string, number>();
+        for (const r of all) {
+            const ph = cleanNumber((r.get('phone') as string) || '');
+            if (!ph) continue;
+            byPhone.set(ph, (byPhone.get(ph) || 0) + 1);
+        }
+        let dupCount = 0;
+        byPhone.forEach((count) => { if (count > 1) dupCount++; });
+        if (dupCount > 0) {
+            console.warn(`⚠️ [ContactDup] Detectados ${dupCount} teléfonos con contactos duplicados en Airtable (probablemente del bug previo a la unificación). Lista: GET /api/admin/duplicate-contacts. Merge: POST /api/admin/merge-contact-duplicates con header x-admin-token.`);
+        } else {
+            console.log('✅ [ContactDup] Sin contactos duplicados en Airtable.');
+        }
+    } catch (e: any) {
+        console.warn('[ContactDup] Error escaneando duplicados (no bloquea arranque):', e?.message);
+    }
+}
+
+Promise.all([
+    migrateDepartmentsToConfig().catch(e => console.warn('[Migration] Departments fallo no fatal:', e?.message)),
+    scanContactDuplicates().catch(e => console.warn('[ContactDup] Scan fallo no fatal:', e?.message))
+]).finally(() => {
+    httpServer.listen(PORT, () => { console.log(`🚀 Servidor Listo ${PORT}`); });
+});
