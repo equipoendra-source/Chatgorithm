@@ -6703,10 +6703,16 @@ app.post('/webhook', async (req, res) => {
             // LÓGICA: Laura responde por defecto si está globalmente activa.
             // Si el chat tiene assigned_to (un humano asignado), Laura comprueba
             // cuándo fue su último mensaje al cliente:
-            //   - Si respondió hace < HUMAN_IDLE_MINUTES → Laura calla (humano activo)
+            //   - Si respondió hace < HUMAN_IDLE_MINUTES → Laura calla (humano activo,
+            //     no interrumpir conversación humana en curso)
             //   - Si respondió hace >= HUMAN_IDLE_MINUTES → Laura toma el chat
             //     (assigned_to NO se modifica — el chat sigue asignado al humano)
-            //   - Si nunca ha respondido → Laura calla (le da tiempo a coger el chat)
+            //   - Si NUNCA ha respondido → Laura responde igualmente. Antes el
+            //     comportamiento era "calla y le da tiempo a coger el chat",
+            //     pero eso dejaba al cliente colgado si el agente estaba ausente
+            //     (fin de semana, fuera de horario, vacaciones, etc.). El criterio
+            //     del usuario es: si el humano no ha demostrado actividad reciente,
+            //     Laura entra al rescate sin importar si está conectado.
             const assignedTo = (contactRecord?.get('assigned_to') as string) || '';
             const name = contactRecord?.get('name') as string || "Cliente";
 
@@ -6714,12 +6720,15 @@ app.post('/webhook', async (req, res) => {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
             } else if (assignedTo) {
                 const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
-                if (idleMin === null) {
-                    console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}" sin mensajes previos del agente. Laura no responde (le da tiempo a contestar).`);
-                } else if (idleMin < HUMAN_IDLE_MINUTES) {
+                if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
+                    // Único caso en que Laura calla: el agente humano respondió
+                    // hace poco — está conversando ahora mismo, no interrumpir.
                     console.log(`🔕 [Bot] Chat ${from} asignado a "${assignedTo}" (último mensaje del agente hace ${idleMin}min). Laura no responde.`);
                 } else {
-                    console.log(`🤖 [Bot] Chat ${from} asignado a "${assignedTo}" pero agente inactivo (${idleMin}min ≥ ${HUMAN_IDLE_MINUTES}min). Laura responde sin tocar la asignación.`);
+                    const reason = idleMin === null
+                        ? 'agente sin mensajes previos'
+                        : `agente inactivo (${idleMin}min ≥ ${HUMAN_IDLE_MINUTES}min)`;
+                    console.log(`🤖 [Bot] Chat ${from} asignado a "${assignedTo}" pero ${reason}. Laura responde sin tocar la asignación.`);
                     if (hasPendingBooking && !activeAiChats.has(from)) activeAiChats.add(from);
                     processAI(text, from, name, originPhoneId, inboundMediaPkg);
                 }
