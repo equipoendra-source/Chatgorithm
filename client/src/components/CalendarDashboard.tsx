@@ -163,6 +163,31 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Etiquetas dinámicas según sector configurado en el wizard de Laura
     const [fieldLabels, setFieldLabels] = useState<FieldLabels>(DEFAULT_FIELD_LABELS);
 
+    // AUTOCOMPLETADO POR TELÉFONO al crear cita. Cuando el agente teclea el
+    // teléfono del cliente en el modal, debounce 300ms y consulta:
+    //   GET /api/contacts/:phone   → datos del cliente (name, status, etc.)
+    //   GET /api/contacts/:phone/vehicles → lista de vehículos activos
+    // Si el cliente existe rellenamos name y, si tiene vehículos, los campos
+    // field1..5 con el primero (o el seleccionado en el <select> si hay >1).
+    // Solo se dispara al CREAR cita (slot Available → Booked), no al editar
+    // una reserva ya existente (para no pisar datos manuales del agente).
+    interface VehicleLite { id: string; matricula: string; marca: string; modelo: string; extra: string; notas: string; }
+    const [vehicles, setVehicles] = useState<VehicleLite[]>([]);
+    const [selectedVehicleId, setSelectedVehicleId] = useState<string>('');
+    const [contactLookup, setContactLookup] = useState<null | {
+        found: boolean; name?: string; status?: string;
+        assigned_to?: string; department?: string; tags?: string[];
+        vehicleCount: number;
+    }>(null);
+    const [lookingUpContact, setLookingUpContact] = useState(false);
+    const lookupAbortRef = React.useRef<AbortController | null>(null);
+    const lookupDebounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+    // Recuerda qué vehículo aplicó el autocompletado por última vez. Sirve
+    // para saber si los campos field1..5 contienen aún los valores del
+    // autocompletado (en ese caso, limpiarlos al cambiar a un cliente nuevo
+    // es seguro) o si el agente los ha editado (entonces NO los pisamos).
+    const lastAppliedVehicleRef = React.useRef<VehicleLite | null>(null);
+
     // Crear Manual
     const [newDate, setNewDate] = useState('');
     const [newTime, setNewTime] = useState('');
@@ -318,7 +343,127 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         finally { setSavingAgendas(false); }
     };
 
+    // Helper: ejecuta la consulta al backend para autocompletar la ficha
+    // del cliente desde el teléfono. Cancela peticiones en curso (race) y
+    // tolera errores de red sin bloquear el formulario.
+    const fetchContactByPhone = React.useCallback(async (phone: string, prefix: string) => {
+        const cleaned = phone.replace(/\D/g, '');
+        // Aún no hay número suficiente para una búsqueda razonable
+        if (cleaned.length < 9) {
+            setContactLookup(null);
+            setVehicles([]);
+            setSelectedVehicleId('');
+            return;
+        }
+        const full = `${prefix}${cleaned}`;
+        // Cancelar fetch previo si existía (race condition: el usuario teclea más rápido que la red)
+        lookupAbortRef.current?.abort();
+        const ac = new AbortController();
+        lookupAbortRef.current = ac;
+        setLookingUpContact(true);
+        try {
+            const [contactRes, vehiclesRes] = await Promise.all([
+                fetch(`${API_URL}/contacts/${encodeURIComponent(full)}`, { signal: ac.signal }),
+                fetch(`${API_URL}/contacts/${encodeURIComponent(full)}/vehicles`, { signal: ac.signal })
+            ]);
+            if (ac.signal.aborted) return;
+            const contact = contactRes.ok ? await contactRes.json() : { found: false };
+            const vehData = vehiclesRes.ok ? await vehiclesRes.json() : { vehicles: [] };
+            const vehList: VehicleLite[] = Array.isArray(vehData?.vehicles) ? vehData.vehicles : [];
+            setVehicles(vehList);
+            if (contact?.found) {
+                setContactLookup({
+                    found: true,
+                    name: contact.name || '',
+                    status: contact.status || '',
+                    assigned_to: contact.assigned_to || '',
+                    department: contact.department || '',
+                    tags: Array.isArray(contact.tags) ? contact.tags : [],
+                    vehicleCount: vehList.length
+                });
+                // Autocompletar nombre SOLO si está vacío. Usamos functional
+                // updater para leer el valor actual del state (no el closure
+                // que pudo quedarse obsoleto durante el await del fetch).
+                // Sin esto, si el agente teclea el nombre mientras el fetch
+                // está en vuelo, el resultado lo pisaba.
+                setEditName(prev => prev || (contact.name || ''));
+                // Si hay vehículos, seleccionar el primero y rellenar los field1-5.
+                if (vehList.length > 0) {
+                    const v = vehList[0];
+                    setSelectedVehicleId(v.id);
+                    setEditMatricula(v.matricula || '');
+                    setEditMarca(v.marca || '');
+                    setEditModelo(v.modelo || '');
+                    setEditExtra(v.extra || '');
+                    setEditNotas(v.notas || '');
+                    lastAppliedVehicleRef.current = v;
+                } else {
+                    setSelectedVehicleId('');
+                    lastAppliedVehicleRef.current = null;
+                }
+            } else {
+                setContactLookup({ found: false, vehicleCount: 0 });
+                setSelectedVehicleId('');
+                // Si los field1..5 contenían valores del último vehículo
+                // autocompletado (es decir, el agente NO ha editado), limpiarlos
+                // al cambiar a un cliente nuevo evita la UX confusa de
+                // "Cliente nuevo" con matrícula del cliente anterior. Usamos
+                // functional updaters para leer el state REAL — no el closure
+                // del fetchContactByPhone, que puede estar desactualizado tras
+                // el await. Si el agente editó un campo concreto, se respeta;
+                // los demás (que coinciden con el último vehículo aplicado)
+                // se limpian. Decisión por-campo, no atómica, pero pragmática.
+                const last = lastAppliedVehicleRef.current;
+                if (last) {
+                    setEditMatricula(prev => prev === (last.matricula || '') ? '' : prev);
+                    setEditMarca(prev => prev === (last.marca || '') ? '' : prev);
+                    setEditModelo(prev => prev === (last.modelo || '') ? '' : prev);
+                    setEditExtra(prev => prev === (last.extra || '') ? '' : prev);
+                    setEditNotas(prev => prev === (last.notas || '') ? '' : prev);
+                }
+                lastAppliedVehicleRef.current = null;
+            }
+        } catch (e: any) {
+            if (e?.name === 'AbortError') return; // silencioso, fue cancelado
+            console.warn('[fetchContactByPhone] Error:', e?.message);
+            // No bloqueamos el form: el agente puede rellenar a mano.
+        } finally {
+            if (!ac.signal.aborted) setLookingUpContact(false);
+        }
+    }, []); // sin deps de fields — usamos functional updaters, no leemos closure
+
+    // Cierre del modal de cita encapsulado: limpia también el autocompletado
+    // para que la próxima apertura no muestre indicadores residuales.
+    const closeBookingModal = React.useCallback(() => {
+        lookupAbortRef.current?.abort();
+        if (lookupDebounceRef.current) clearTimeout(lookupDebounceRef.current);
+        setSelectedAppt(null);
+        setContactLookup(null);
+        setVehicles([]);
+        setSelectedVehicleId('');
+        setLookingUpContact(false);
+    }, []);
+
+    // Debounce 300ms para llamar a fetchContactByPhone. SOLO en modo creación
+    // (slot Available que se pasa a Booked), no en edición de cita ya
+    // reservada — no queremos pisar los datos que el agente puso a mano la
+    // primera vez.
+    useEffect(() => {
+        const isCreatingNew = !!selectedAppt && selectedAppt.status === 'Available' && editStatus === 'Booked' && !readOnly;
+        if (!isCreatingNew) return;
+        if (lookupDebounceRef.current) clearTimeout(lookupDebounceRef.current);
+        lookupDebounceRef.current = setTimeout(() => {
+            fetchContactByPhone(editPhone, editPrefix);
+        }, 300);
+        return () => { if (lookupDebounceRef.current) clearTimeout(lookupDebounceRef.current); };
+    }, [editPhone, editPrefix, editStatus, selectedAppt?.id, selectedAppt?.status, readOnly, fetchContactByPhone]);
+
     const handleOpenEdit = (appt: Appointment) => {
+        // Resetear estado de autocompletado al abrir un slot nuevo
+        lookupAbortRef.current?.abort();
+        setContactLookup(null);
+        setVehicles([]);
+        setSelectedVehicleId('');
         setSelectedAppt(appt);
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
@@ -1027,7 +1172,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 {readOnly ? <Eye size={18} className="text-blue-500" /> : <CalendarIcon size={18} className="text-purple-500" />}
                                 {readOnly ? 'Detalles Cita' : 'Gestionar Cita'}
                             </h3>
-                            <button onClick={() => setSelectedAppt(null)} className={`p-1 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-400 hover:text-slate-600'}`}><X size={20} /></button>
+                            <button onClick={closeBookingModal} className={`p-1 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-400 hover:text-slate-600'}`}><X size={20} /></button>
                         </div>
 
                         <div className="p-6 space-y-4 overflow-y-auto flex-1">
@@ -1127,6 +1272,79 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </datalist>
                                         <p className={`text-[10px] mt-1 ${isDark ? 'text-purple-400/70' : 'text-purple-500/80'}`}>Prefijo del país (sin +) y número. Por defecto España (34). Puedes escribir cualquier otro prefijo.</p>
                                     </div>
+
+                                    {/* INDICADOR DE AUTOCOMPLETADO — solo al CREAR cita (slot Available → Booked).
+                                        Al teclear el teléfono, busca en Airtable y muestra si el cliente existe ya.
+                                        Si existe, los campos de abajo se han rellenado solos (name + field1..5 del vehículo).
+                                        Si tiene varios vehículos, se muestra un <select> entre el indicador y los campos. */}
+                                    {!readOnly && selectedAppt.status === 'Available' && editStatus === 'Booked' && editPhone.replace(/\D/g, '').length >= 9 && (
+                                        <>
+                                            {lookingUpContact ? (
+                                                <div className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs ${isDark ? 'bg-slate-800/60 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>
+                                                    <svg className="animate-spin h-3 w-3" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" fill="none" strokeDasharray="50 50" /></svg>
+                                                    <span>Buscando cliente…</span>
+                                                </div>
+                                            ) : contactLookup?.found ? (
+                                                <div className={`px-3 py-2 rounded-lg text-xs space-y-1 ${isDark ? 'bg-emerald-900/30 border border-emerald-700/40 text-emerald-200' : 'bg-emerald-50 border border-emerald-200 text-emerald-800'}`}>
+                                                    <div className="flex items-center gap-2 font-bold">
+                                                        <span>✅ Cliente encontrado:</span>
+                                                        <span>{contactLookup.name || '(sin nombre)'}</span>
+                                                        <span className={`px-1.5 py-0.5 rounded text-[10px] ${isDark ? 'bg-emerald-800/40' : 'bg-emerald-100'}`}>
+                                                            {contactLookup.vehicleCount} {contactLookup.vehicleCount === 1 ? 'vehículo' : 'vehículos'}
+                                                        </span>
+                                                    </div>
+                                                    <div className="flex flex-wrap gap-x-3 gap-y-0.5 text-[11px] opacity-90">
+                                                        {contactLookup.status && <span>Estado: <b>{contactLookup.status}</b></span>}
+                                                        {contactLookup.assigned_to && <span>Asignado a: <b>{contactLookup.assigned_to}</b></span>}
+                                                        {contactLookup.department && <span>Dpto: <b>{contactLookup.department}</b></span>}
+                                                    </div>
+                                                    {contactLookup.tags && contactLookup.tags.length > 0 && (
+                                                        <div className="flex flex-wrap gap-1 mt-1">
+                                                            {contactLookup.tags.map(t => (
+                                                                <span key={t} className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${isDark ? 'bg-orange-900/40 text-orange-200' : 'bg-orange-100 text-orange-700'}`}>{t}</span>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ) : (
+                                                <div className={`px-3 py-2 rounded-lg text-xs ${isDark ? 'bg-amber-900/20 border border-amber-700/40 text-amber-200' : 'bg-amber-50 border border-amber-200 text-amber-700'}`}>
+                                                    <span className="font-bold">🆕 Cliente nuevo</span>
+                                                    <span className="opacity-80"> — rellena los datos a mano</span>
+                                                </div>
+                                            )}
+
+                                            {/* Selector de vehículo — solo si el cliente tiene >1 vehículo. Al cambiar
+                                                se rellenan automáticamente los field1..5 con los datos del vehículo. */}
+                                            {contactLookup?.found && vehicles.length > 1 && (
+                                                <div>
+                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Vehículo del cliente</label>
+                                                    <select
+                                                        value={selectedVehicleId}
+                                                        onChange={(e) => {
+                                                            const id = e.target.value;
+                                                            setSelectedVehicleId(id);
+                                                            const v = vehicles.find(x => x.id === id);
+                                                            if (v) {
+                                                                setEditMatricula(v.matricula || '');
+                                                                setEditMarca(v.marca || '');
+                                                                setEditModelo(v.modelo || '');
+                                                                setEditExtra(v.extra || '');
+                                                                setEditNotas(v.notas || '');
+                                                            }
+                                                        }}
+                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                    >
+                                                        {vehicles.map(v => (
+                                                            <option key={v.id} value={v.id}>
+                                                                {v.matricula || '(sin matrícula)'} — {v.marca} {v.modelo}
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                </div>
+                                            )}
+                                        </>
+                                    )}
+
                                     {/* Estado del CLIENTE — permite marcar "Vehículo Entregado" y demás */}
                                     {selectedAppt.clientPhone && (
                                         <div>

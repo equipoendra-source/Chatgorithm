@@ -9587,10 +9587,21 @@ app.get('/api/contacts/:phone', async (req, res) => {
     try {
         const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'`, maxRecords: 1 }).firstPage();
         if (r.length === 0) return res.json({ found: false });
+        // Devolvemos los campos que usa el modal de "crear cita" del calendario
+        // para autocompletar la ficha al teclear el teléfono del cliente.
+        // notes recortado a 200 chars para no inflar la respuesta.
         res.json({
             found: true,
             status: (r[0].get('status') as string) || '',
-            name: (r[0].get('name') as string) || ''
+            name: (r[0].get('name') as string) || '',
+            email: (r[0].get('email') as string) || '',
+            address: (r[0].get('address') as string) || '',
+            notes: ((r[0].get('notes') as string) || '').substring(0, 200),
+            assigned_to: (r[0].get('assigned_to') as string) || '',
+            department: (r[0].get('department') as string) || '',
+            tags: (r[0].get('tags') as string[]) || [],
+            origin_phone_id: (r[0].get('origin_phone_id') as string) || '',
+            last_message_time: (r[0].get('last_message_time') as string) || ''
         });
     } catch (e: any) {
         console.error('[Contacts] Error leyendo contacto:', e.message);
