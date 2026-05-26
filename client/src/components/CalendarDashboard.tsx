@@ -187,6 +187,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // autocompletado (en ese caso, limpiarlos al cambiar a un cliente nuevo
     // es seguro) o si el agente los ha editado (entonces NO los pisamos).
     const lastAppliedVehicleRef = React.useRef<VehicleLite | null>(null);
+    // Equivalente para el nombre: si el agente cambia el teléfono a otro
+    // cliente, queremos actualizar el nombre — pero solo si el actual lo
+    // puso el autocompletado (no si el agente lo está editando a mano).
+    const lastAppliedNameRef = React.useRef<string | null>(null);
 
     // Crear Manual
     const [newDate, setNewDate] = useState('');
@@ -381,12 +385,19 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     tags: Array.isArray(contact.tags) ? contact.tags : [],
                     vehicleCount: vehList.length
                 });
-                // Autocompletar nombre SOLO si está vacío. Usamos functional
-                // updater para leer el valor actual del state (no el closure
-                // que pudo quedarse obsoleto durante el await del fetch).
-                // Sin esto, si el agente teclea el nombre mientras el fetch
-                // está en vuelo, el resultado lo pisaba.
-                setEditName(prev => prev || (contact.name || ''));
+                // Autocompletar nombre: si el campo está vacío O si contiene
+                // el nombre que el último autocompletado había aplicado (es
+                // decir, el agente NO ha tocado el campo), lo sobrescribimos
+                // con el nuevo. Si el agente lo editó a mano (no coincide con
+                // lastAppliedNameRef), respetamos su input. Functional updater
+                // para evitar stale closure si el agente teclea mid-fetch.
+                const newName = contact.name || '';
+                setEditName(prev => {
+                    if (!prev) return newName;
+                    if (lastAppliedNameRef.current !== null && prev === lastAppliedNameRef.current) return newName;
+                    return prev; // agente lo editó a mano, no pisar
+                });
+                lastAppliedNameRef.current = newName;
                 // Si hay vehículos, seleccionar el primero y rellenar los field1-5.
                 if (vehList.length > 0) {
                     const v = vehList[0];
@@ -422,6 +433,14 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     setEditNotas(prev => prev === (last.notas || '') ? '' : prev);
                 }
                 lastAppliedVehicleRef.current = null;
+                // Igual con el nombre: si el nombre actual lo puso el autocompletado
+                // anterior, lo limpiamos al ir a un cliente nuevo. Si el agente lo
+                // editó, respetamos su input.
+                const lastName = lastAppliedNameRef.current;
+                if (lastName !== null) {
+                    setEditName(prev => prev === lastName ? '' : prev);
+                }
+                lastAppliedNameRef.current = null;
             }
         } catch (e: any) {
             if (e?.name === 'AbortError') return; // silencioso, fue cancelado
@@ -437,6 +456,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const closeBookingModal = React.useCallback(() => {
         lookupAbortRef.current?.abort();
         if (lookupDebounceRef.current) clearTimeout(lookupDebounceRef.current);
+        lastAppliedVehicleRef.current = null;
+        lastAppliedNameRef.current = null;
         setSelectedAppt(null);
         setContactLookup(null);
         setVehicles([]);
@@ -461,6 +482,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const handleOpenEdit = (appt: Appointment) => {
         // Resetear estado de autocompletado al abrir un slot nuevo
         lookupAbortRef.current?.abort();
+        lastAppliedVehicleRef.current = null;
+        lastAppliedNameRef.current = null;
         setContactLookup(null);
         setVehicles([]);
         setSelectedVehicleId('');
@@ -1222,17 +1245,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
                             {(editStatus === 'Booked' || readOnly) && (
                                 <div className={`p-4 rounded-xl border space-y-3 animate-in slide-in-from-top-2 ${isDark ? 'bg-purple-900/20 border-purple-800' : 'bg-purple-50 border-purple-100'}`}>
-                                    <div>
-                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Nombre Cliente</label>
-                                        <input
-                                            type="text"
-                                            value={editName}
-                                            onChange={(e) => setEditName(e.target.value)}
-                                            className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
-                                            placeholder="Ej: Juan Pérez"
-                                            disabled={readOnly}
-                                        />
-                                    </div>
+                                    {/* Teléfono va PRIMERO: al teclearlo se autocompleta el resto.
+                                        Antes el orden era Nombre → Teléfono, pero como el teléfono
+                                        es el que dispara la búsqueda lo movimos arriba para que el
+                                        flujo natural sea "pones teléfono → ves quién es → ves nombre/vehículo". */}
                                     <div>
                                         <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Teléfono</label>
                                         <div className="flex gap-2">
@@ -1313,6 +1329,25 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 </div>
                                             )}
 
+                                        </>
+                                    )}
+
+                                    {/* Nombre Cliente — debajo del indicador. Se autocompleta al
+                                        encontrar cliente, pero el agente puede editarlo a mano. */}
+                                    <div>
+                                        <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Nombre Cliente</label>
+                                        <input
+                                            type="text"
+                                            value={editName}
+                                            onChange={(e) => setEditName(e.target.value)}
+                                            className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200'}`}
+                                            placeholder="Ej: Juan Pérez"
+                                            disabled={readOnly}
+                                        />
+                                    </div>
+
+                                    {!readOnly && selectedAppt.status === 'Available' && editStatus === 'Booked' && editPhone.replace(/\D/g, '').length >= 9 && (
+                                        <>
                                             {/* Selector de vehículo — solo si el cliente tiene >1 vehículo. Al cambiar
                                                 se rellenan automáticamente los field1..5 con los datos del vehículo. */}
                                             {contactLookup?.found && vehicles.length > 1 && (
