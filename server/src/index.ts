@@ -4339,22 +4339,47 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
 }
 
 async function processJsonResponse(jsonText: string, phone: string, originId: string) {
+    const FALLBACK_MSG = "En este momento no puedo procesar tu solicitud. Por favor, inténtalo de nuevo.";
+
+    // Intento 1: JSON.parse directo
     try {
-        // Intentar extraer JSON si está envuelto en texto
-        const jsonMatch = jsonText.match(/\{[\s\S]*\}/);
-        const textToParse = jsonMatch ? jsonMatch[0] : jsonText;
-
-        const cleanJson = textToParse.replace(/```json/g, '').replace(/```/g, '').trim();
-        const data = JSON.parse(cleanJson);
-
+        const data = JSON.parse(jsonText.trim());
         if (data.customer_message) {
             await sendWhatsAppText(phone, data.customer_message, originId);
+            return;
+        }
+    } catch (_) { /* continuar */ }
+
+    // Intento 2: extraer bloque JSON (puede venir envuelto en ```json...``` o con texto antes/después)
+    try {
+        const stripped = jsonText.replace(/```json/gi, '').replace(/```/g, '');
+        const jsonMatch = stripped.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            const data = JSON.parse(jsonMatch[0].trim());
+            if (data.customer_message) {
+                await sendWhatsAppText(phone, data.customer_message, originId);
+                return;
+            }
         }
     } catch (e) {
-        // Fallback: Si no es JSON, enviamos el texto tal cual (limpiando markdown)
-        const cleanText = jsonText.replace(/```json/g, '').replace(/```/g, '').trim();
-        await sendWhatsAppText(phone, cleanText, originId);
+        console.error('[Laura] Error parseando respuesta JSON (intento 2):', e, '| Texto recibido:', jsonText);
     }
+
+    // Intento 3: buscar customer_message directamente con regex en el string
+    try {
+        const rxMsg = jsonText.match(/"customer_message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+        if (rxMsg && rxMsg[1]) {
+            const msg = rxMsg[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+            await sendWhatsAppText(phone, msg, originId);
+            return;
+        }
+    } catch (e) {
+        console.error('[Laura] Error parseando respuesta JSON (intento 3 regex):', e, '| Texto recibido:', jsonText);
+    }
+
+    // Todos los intentos fallaron: NUNCA enviar el texto crudo
+    console.error('[Laura] Error parseando respuesta JSON: todos los intentos fallaron. Texto recibido:', jsonText);
+    await sendWhatsAppText(phone, FALLBACK_MSG, originId);
 }
 
 // inboundMedia: opcional. Cuando el cliente manda audio/imagen/vídeo, descargamos los bytes
@@ -4697,11 +4722,10 @@ Cuando el cliente indique qué tipo de servicio necesita:
                     toolResult = `Error: tool ${call.name} no implementada.`;
                 }
 
-                // Si book_appointment tuvo éxito, enviar confirmación directamente al cliente
-                // porque Gemini llamará stop_conversation después (no texto), dejando result2.text() vacío
-                if (call.name === "book_appointment" && toolResult.startsWith("✅")) {
-                    await sendWhatsAppText(clean, toolResult, originPhoneId);
-                }
+                // book_appointment: NO enviamos el resultado directamente al cliente.
+                // Laura genera su propio customer_message de confirmación vía processJsonResponse,
+                // lo que evita el doble mensaje (Bug fix: doble confirmación de reserva).
+                // bookingConfirmedDirectly se usa solo para suprimir el fallback de "Gemini mudo".
 
                 // Igual que con book_appointment: cuando Laura llama a
                 // assign_department, suele encadenarlo con stop_conversation y
