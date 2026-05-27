@@ -5757,8 +5757,12 @@ app.put('/api/appointments/:id', async (req, res) => {
             }
         }
 
-        // Notificar nueva cita SOLO si esta llamada la pasó a Booked (no en cambios menores)
-        if (req.body.status === 'Booked') {
+        // Notificar nueva cita SOLO si esta llamada la PASÓ de Available→Booked.
+        // Sin la condición preUpdateStatus, cada save del modal "Gestionar Cita"
+        // (cambiar nombre, kilómetros, marcar Vehículo Entregado…) disparaba un
+        // toast fantasma "Nueva cita" para todo el equipo aunque la cita ya
+        // existiera. Ahora solo se dispara en la reserva real.
+        if (req.body.status === 'Booked' && preUpdateStatus !== 'Booked') {
             try {
                 const rec = await base('Appointments').find(req.params.id);
                 notifyNewAppointment({
@@ -10415,15 +10419,40 @@ app.get('/api/contacts/:phone', async (req, res) => {
 
 // PUT /api/contacts/:phone/status — cambia el estado del contacto desde el calendario.
 // Dispara la MISMA lógica de postventa que el cambio de estado en el chat.
+//
+// Si el contacto no existe (caso típico: el agente reserva una cita manual
+// para un cliente walk-in que llega al taller sin haber escrito antes por
+// WhatsApp), lo CREA con el teléfono, el nombre opcional del body y el
+// estado deseado. Sin esto, marcar "Vehículo Entregado" desde el calendario
+// fallaba con "Contacto no encontrado" para clientes nuevos y la secuencia
+// postventa no se programaba.
 app.put('/api/contacts/:phone/status', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB' });
     const clean = cleanNumber(req.params.phone);
     const newStatus = (req.body?.status ?? '').toString().trim();
+    const incomingName = (req.body?.name ?? '').toString().trim();
     if (!clean) return res.status(400).json({ error: 'Teléfono inválido' });
     if (!newStatus) return res.status(400).json({ error: 'Falta el estado' });
     try {
         const r = await base('Contacts').select({ filterByFormula: `{phone} = '${clean}'`, maxRecords: 1 }).firstPage();
-        if (r.length === 0) return res.status(404).json({ error: 'Contacto no encontrado' });
+        if (r.length === 0) {
+            // Crear contacto mínimo on-the-fly. typecast: true por el campo
+            // status (single select) — si la opción no existe, Airtable la
+            // añade. handleContactStatusChange dispara la postventa igual que
+            // si ya existiera, y el evento 'delivered' va al Historial.
+            const created = await base('Contacts').create([{
+                fields: {
+                    phone: clean,
+                    name: incomingName || `Cliente ${clean.slice(-4)}`,
+                    status: newStatus,
+                    origin_phone_id: waPhoneId || ''
+                }
+            }], { typecast: true });
+            const newRec = created[0];
+            io.emit('contact_updated_notification');
+            await handleContactStatusChange(newRec, '', newStatus, clean);
+            return res.json({ success: true, status: newStatus, created: true });
+        }
         const oldStatus = (r[0].get('status') as string) || '';
         if (oldStatus === newStatus) return res.json({ success: true, status: newStatus, unchanged: true });
         await base('Contacts').update([{ id: r[0].id, fields: { status: newStatus } }], { typecast: true });

@@ -608,12 +608,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             }
 
             // Si cambió el estado del cliente, guardarlo (dispara la lógica de postventa)
+            // Pasamos también el nombre porque si el contacto aún no existe (cliente
+            // walk-in apuntado a mano en la agenda sin haber escrito por WhatsApp),
+            // el backend lo crea sobre la marcha con ese nombre. Sin el name acabaría
+            // como "Cliente 1234" en la ficha.
             if (selectedAppt.clientPhone && editContactStatus && editContactStatus !== originalContactStatus) {
                 try {
                     const resStatus = await fetch(`${API_URL}/contacts/${encodeURIComponent(selectedAppt.clientPhone)}/status`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ status: editContactStatus })
+                        body: JSON.stringify({ status: editContactStatus, name: editName || selectedAppt.clientName || '' })
                     });
                     if (!resStatus.ok) {
                         const err = await resStatus.json().catch(() => ({}));
