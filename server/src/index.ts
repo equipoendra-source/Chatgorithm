@@ -7935,6 +7935,58 @@ app.get('/api/debug/agent-card-preview', async (req, res) => {
     }
 });
 
+// --- DEBUG: estado de suscripciones WebPush cargadas en memoria ---
+app.get('/api/debug/webpush-status', (_req, res) => {
+    const users: { username: string; devices: number; endpoints: string[] }[] = [];
+    pushSubscriptions.forEach((subs, username) => {
+        users.push({
+            username,
+            devices: subs.length,
+            endpoints: subs.map(s => s.endpoint ? s.endpoint.slice(-40) : '?')
+        });
+    });
+    const fcmList: string[] = [];
+    fcmTokens.forEach((data, token) => fcmList.push(`${data.username}:${token.slice(-20)}`));
+    res.json({
+        webPushEnabled,
+        webPushUsers: users.length,
+        totalWebPushDevices: users.reduce((s, u) => s + u.devices, 0),
+        users,
+        fcmEnabled: firebaseInitialized,
+        fcmTokenCount: fcmTokens.size,
+        fcmTokens: fcmList
+    });
+});
+
+// --- DEBUG: enviar push de prueba a un usuario ---
+app.post('/api/debug/test-push', async (req, res) => {
+    const username = (req.query.username as string) || (req.body?.username as string) || '';
+    if (!username) return res.status(400).json({ error: 'Pasa ?username=tuUsuario en la URL' });
+    const subs = pushSubscriptions.get(username);
+    if (!subs || subs.length === 0) {
+        return res.status(404).json({
+            error: `No hay suscripciones WebPush para "${username}"`,
+            availableUsers: Array.from(pushSubscriptions.keys())
+        });
+    }
+    const payload = {
+        title: '🔔 Test de notificación',
+        body: `Prueba enviada desde debug a las ${new Date().toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid' })}`,
+        icon: '/logo.png',
+        tag: 'debug-test'
+    };
+    const results: { endpoint: string; ok: boolean; error?: string }[] = [];
+    for (const sub of subs) {
+        try {
+            await webpush.sendNotification(sub, JSON.stringify(payload));
+            results.push({ endpoint: sub.endpoint?.slice(-40) || '?', ok: true });
+        } catch (e: any) {
+            results.push({ endpoint: sub.endpoint?.slice(-40) || '?', ok: false, error: `${e.statusCode} ${e.message}` });
+        }
+    }
+    res.json({ username, devicesFound: subs.length, payload, results });
+});
+
 // --- DEBUG: probar envío de plantilla directamente ---
 app.post('/api/debug/test-template', async (req, res) => {
     const { phone, templateName, variables, originPhoneId } = req.body;
