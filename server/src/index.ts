@@ -7964,6 +7964,7 @@ app.get('/api/debug/vapid-info', (_req, res) => {
 app.post('/api/debug/clear-push/:username', async (req, res) => {
     const username = req.params.username;
     pushSubscriptions.delete(username);
+    if (!base) return res.json({ success: true, username, message: `Memoria limpia (Airtable no disponible)` });
     try {
         const existing = await base('WebPushSubscriptions').select({
             filterByFormula: `{username} = '${username}'`,
