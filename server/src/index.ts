@@ -3554,7 +3554,8 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 "Modelo": field3,
                 "Extra": field4,
                 "Notas": field5,
-                "DurationMin": durationMin   // duración total de la cita en minutos
+                "DurationMin": durationMin,   // duración total de la cita en minutos
+                "ServiceType": service || ''  // tipo de servicio elegido (ej. "Avería") — visible en el panel humano
             });
 
             // Si la cita ocupa múltiples slots, marcar los secundarios como Booked también.
@@ -5351,7 +5352,11 @@ app.get('/api/appointments', async (req, res) => {
                 // para calcular las horas libres/ocupadas por día en el
                 // calendario. Si el campo no existe en Airtable (instalación
                 // antigua), Number(undefined) || 0 devuelve 0 → tolerante.
-                durationMin: Number(r.get('DurationMin')) || 0
+                durationMin: Number(r.get('DurationMin')) || 0,
+                // Tipo de servicio elegido (ej. "Avería", "Revisión"). Se
+                // guarda en el líder de cada bloque y lo usa el panel humano
+                // de Averías para filtrar citas que requieren llamada.
+                serviceType: (r.get('ServiceType') as string) || ''
             };
         }));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
@@ -5542,6 +5547,7 @@ app.put('/api/appointments/:id', async (req, res) => {
                         }
                         // Ahora sí: actualizar líder + secundarios DENTRO del lock.
                         f['DurationMin'] = blockDuration;
+                        f['ServiceType'] = serviceName;  // guardar el tipo elegido para el panel de Averías
                         try {
                             await updateAppointmentFields(req.params.id, f);
                         } catch (e: any) {

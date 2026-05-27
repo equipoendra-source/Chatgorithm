@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
     Calendar as CalendarIcon, Clock, Plus, Trash2, User, CheckCircle,
-    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History
+    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History, Wrench
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -34,6 +34,10 @@ interface Appointment {
     // varios huecos) lo dejan en 0. Lo usa el indicador "Xh libres / Yh"
     // del calendario.
     durationMin?: number;
+    // Tipo de servicio elegido al reservar (ej. "Avería", "Revisión").
+    // Se guarda en el líder del bloque. El panel "Averías" filtra por aquí
+    // para mostrar al equipo humano las citas que requieren llamar al cliente.
+    serviceType?: string;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -142,6 +146,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [agendas, setAgendas] = useState<Agenda[]>([]);
     const [showAgendaModal, setShowAgendaModal] = useState(false);
     const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+    // Panel de Averías: muestra todas las citas Booked cuyo serviceType
+    // contenga "avería" para que el equipo humano las llame y confirme duración.
+    const [showBreakdownsModal, setShowBreakdownsModal] = useState(false);
     const [draftAgendas, setDraftAgendas] = useState<Agenda[]>([]);
     const [savingAgendas, setSavingAgendas] = useState(false);
     const [agendaFilter, setAgendaFilter] = useState<string>('');  // '' = todas
@@ -731,6 +738,30 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         catch { return '--:--'; }
     };
 
+    // Quita acentos/diacríticos y pasa a minúsculas — para comparar serviceType
+    // de forma tolerante ("Avería", "averia", "AVERIA" se igualan).
+    // ̀-ͯ = Combining Diacritical Marks (acentos tras NFD).
+    const normalizeStr = (s: string) =>
+        (s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const isBreakdownService = (serviceType?: string) =>
+        !!serviceType && normalizeStr(serviceType).includes('aver');
+
+    // Citas de tipo Avería pendientes de llamar: Booked + serviceType
+    // contiene "aver" + desde hace 24h (incluye hoy completo aunque la
+    // hora ya haya pasado por la mañana). Filtra por agenda y línea de
+    // WhatsApp igual que el resto del calendario.
+    const breakdownAppointments = (() => {
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        return appointments.filter(a => {
+            if (a.status !== 'Booked') return false;
+            if (!isBreakdownService(a.serviceType)) return false;
+            if (new Date(a.date).getTime() < cutoff) return false;
+            if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
+            if (selectedAccountId && a.originPhoneId && a.originPhoneId !== selectedAccountId) return false;
+            return true;
+        }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    })();
+
     // Lunes de la semana que contiene `date`
     const getWeekStart = (date: Date) => {
         const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -978,6 +1009,20 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     {agendas.map(a => <option key={a.id} value={a.name}>{a.name}</option>)}
                                 </select>
                             )}
+                            {/* Panel de Averías: lista de citas con tipo "Avería" pendientes de llamar */}
+                            <button
+                                onClick={() => setShowBreakdownsModal(true)}
+                                className={`relative px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-amber-300 bg-amber-900/30 hover:bg-amber-900/50' : 'text-amber-700 bg-amber-50 hover:bg-amber-100'}`}
+                                title="Ver citas de Avería pendientes para llamar al cliente"
+                            >
+                                <Wrench size={18} />
+                                <span className="hidden md:inline">Averías</span>
+                                {breakdownAppointments.length > 0 && (
+                                    <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-amber-500 text-amber-950' : 'bg-amber-600 text-white'}`}>
+                                        {breakdownAppointments.length}
+                                    </span>
+                                )}
+                            </button>
                             {/* Historial de reservas y cancelaciones */}
                             <button
                                 onClick={() => setShowHistoryPanel(true)}
@@ -1905,6 +1950,138 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     }
                 }}
             />
+
+            {/* Panel "Averías": lista de citas pendientes para llamar al cliente.
+                Filtra appointments cuyo serviceType contenga "aver" (tolerante a
+                tildes y mayúsculas) y respeta el filtro de agenda y línea de
+                WhatsApp activos. Al clicar "Ver" abre el modal estándar de cita. */}
+            {showBreakdownsModal && (
+                <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center p-2 md:p-4 bg-black/60 backdrop-blur-sm overflow-y-auto" onClick={() => setShowBreakdownsModal(false)}>
+                    <div
+                        onClick={e => e.stopPropagation()}
+                        className={`w-full max-w-3xl rounded-2xl shadow-2xl my-4 ${isDark ? 'bg-slate-900 border border-slate-700' : 'bg-white border border-slate-200'}`}
+                    >
+                        {/* Cabecera */}
+                        <div className={`flex items-center justify-between p-4 md:p-5 border-b ${isDark ? 'border-slate-700' : 'border-slate-200'}`}>
+                            <div className="flex items-center gap-3 min-w-0">
+                                <div className={`p-2 rounded-xl flex-shrink-0 ${isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}>
+                                    <Wrench size={20} />
+                                </div>
+                                <div className="min-w-0">
+                                    <h3 className={`text-base md:text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Averías pendientes</h3>
+                                    <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                        {breakdownAppointments.length === 0
+                                            ? 'No hay citas de avería para llamar.'
+                                            : `${breakdownAppointments.length} cita${breakdownAppointments.length === 1 ? '' : 's'} de avería · llama al cliente para confirmar duración`}
+                                    </p>
+                                </div>
+                            </div>
+                            <button
+                                onClick={() => setShowBreakdownsModal(false)}
+                                className={`p-2 rounded-lg transition flex-shrink-0 ${isDark ? 'hover:bg-slate-700 text-slate-300' : 'hover:bg-slate-100 text-slate-600'}`}
+                                title="Cerrar"
+                            >
+                                <X size={20} />
+                            </button>
+                        </div>
+
+                        {/* Lista */}
+                        <div className="p-3 md:p-5 max-h-[70vh] overflow-y-auto">
+                            {breakdownAppointments.length === 0 ? (
+                                <div className={`text-center py-12 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                    <Wrench size={40} className="mx-auto mb-3 opacity-30" />
+                                    <p className="text-sm">No hay averías pendientes ahora mismo.</p>
+                                    <p className="text-xs mt-1 opacity-70">Aparecerán aquí las citas reservadas con tipo "Avería".</p>
+                                </div>
+                            ) : (
+                                <div className="space-y-2">
+                                    {breakdownAppointments.map(b => {
+                                        const dt = new Date(b.date);
+                                        const dateStr = dt.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' });
+                                        const timeStr = formatTimeRange(b.date, b.durationMin);
+                                        const isPast = dt.getTime() < Date.now();
+                                        return (
+                                            <div
+                                                key={b.id}
+                                                className={`rounded-xl p-3 md:p-4 border transition ${isDark
+                                                    ? 'bg-slate-800/60 border-slate-700 hover:border-amber-700'
+                                                    : 'bg-amber-50/50 border-amber-100 hover:border-amber-300'
+                                                    }`}
+                                            >
+                                                <div className="flex flex-col md:flex-row md:items-center gap-3">
+                                                    {/* Fecha + hora */}
+                                                    <div className="flex-shrink-0 md:w-32">
+                                                        <div className={`text-xs uppercase font-semibold ${isDark ? 'text-amber-400' : 'text-amber-700'}`}>
+                                                            {dateStr}
+                                                            {isPast && <span className={`ml-1.5 text-[10px] normal-case font-bold px-1.5 py-0.5 rounded ${isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700'}`}>Pasada</span>}
+                                                        </div>
+                                                        <div className={`text-sm font-mono font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                            {timeStr}
+                                                        </div>
+                                                        {b.agenda && (
+                                                            <div className="flex items-center gap-1 mt-1">
+                                                                <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: agendaColor(b.agenda) }} />
+                                                                <span className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{b.agenda}</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Datos del cliente y vehículo */}
+                                                    <div className="flex-1 min-w-0">
+                                                        <div className={`font-semibold truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                            <User size={14} className="inline mr-1 -mt-0.5 opacity-60" />
+                                                            {b.clientName || 'Cliente sin nombre'}
+                                                        </div>
+                                                        {b.clientPhone && (
+                                                            <a
+                                                                href={`tel:${b.clientPhone}`}
+                                                                className={`inline-flex items-center gap-1 text-sm mt-0.5 hover:underline ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}
+                                                                title="Llamar al cliente"
+                                                            >
+                                                                <Phone size={13} />
+                                                                {b.clientPhone}
+                                                            </a>
+                                                        )}
+                                                        {/* Datos del vehículo si los hay (matricula/marca/modelo) */}
+                                                        {(b.matricula || b.marca || b.modelo) && (
+                                                            <div className={`text-xs mt-1 truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                                {[b.matricula, b.marca, b.modelo].filter(Boolean).join(' · ')}
+                                                            </div>
+                                                        )}
+                                                        {b.notas && (
+                                                            <div className={`text-xs mt-1 italic truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`} title={b.notas}>
+                                                                "{b.notas}"
+                                                            </div>
+                                                        )}
+                                                    </div>
+
+                                                    {/* Acciones */}
+                                                    <div className="flex flex-col gap-1.5 flex-shrink-0">
+                                                        <button
+                                                            onClick={() => {
+                                                                setShowBreakdownsModal(false);
+                                                                // Saltar al día de la cita y abrirla en el modal de edición
+                                                                setCurrentDate(new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()));
+                                                                setViewMode('day');
+                                                                handleOpenEdit(b);
+                                                            }}
+                                                            className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${isDark ? 'bg-amber-600 hover:bg-amber-500 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white'}`}
+                                                            title="Abrir cita en el calendario"
+                                                        >
+                                                            <Eye size={13} />
+                                                            Ver cita
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };
