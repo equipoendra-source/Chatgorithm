@@ -134,6 +134,11 @@ export function Sidebar({
     const [availableStatuses, setAvailableStatuses] = useState<string[]>([]);
     const [availableTags, setAvailableTags] = useState<string[]>([]);
     const [unreadCounts, setUnreadCounts] = useState<{ [phone: string]: number }>({});
+    // Contador de mensajes no leídos del chat de equipo, indexado por "clave
+    // de visualización": 'general' para el canal general, o el username del
+    // otro compañero para los DMs. No se persiste — se resetea al recargar la
+    // app (mismo comportamiento que el contador de clientes en memoria).
+    const [teamUnread, setTeamUnread] = useState<{ [channel: string]: number }>({});
     const audioRef = useRef<HTMLAudioElement | null>(null);
     // B1: Refs para preservar el scroll del Sidebar cuando llega un
     // contacts_update (polling 60s o cambios). listScrollRef apunta al
@@ -316,6 +321,52 @@ export function Sidebar({
             clearInterval(interval);
         };
     }, [socket, user.username, isConnected, selectedContactId, contacts, user.preferences]);
+
+    // ─── CHAT DE EQUIPO — contador de no leídos ──────────────────────────────
+    // Escucha los mensajes que emite el server por socket 'team_message' y
+    // mantiene un contador igual al del chat de clientes. La clave de
+    // visualización es 'general' para el canal común, o el username del otro
+    // compañero para los DMs (extraído del channelId "userA_userB" ordenado
+    // alfabéticamente — misma convención que usa TeamChat.tsx al construirlo).
+    //
+    // Reglas:
+    // - Ignora los mensajes enviados por uno mismo.
+    // - Si estás viendo ese canal en ese momento, no incrementa (lo ves al
+    //   instante en TeamChat, sería ruido).
+    useEffect(() => {
+        if (!socket || !user?.username) return;
+        const me = user.username;
+        const getDisplayKey = (channelId: string): string | null => {
+            if (channelId === 'general') return 'general';
+            // Formato: "userA_userB" (sorted). El "peer" es el que NO soy yo.
+            if (channelId.startsWith(me + '_')) return channelId.substring(me.length + 1);
+            if (channelId.endsWith('_' + me)) return channelId.substring(0, channelId.length - me.length - 1);
+            return null; // mensaje que no me concierne
+        };
+        const handleTeamMessage = (msg: { sender?: string; channel?: string }) => {
+            if (!msg?.channel || msg.sender === me) return;
+            const key = getDisplayKey(msg.channel);
+            if (!key) return;
+            // Si justo estoy mirando ese canal, no marco como no leído.
+            if (currentView === 'team_chat' && teamChannel === key) return;
+            setTeamUnread(prev => ({ ...prev, [key]: (prev[key] || 0) + 1 }));
+        };
+        socket.on('team_message', handleTeamMessage);
+        return () => { socket.off('team_message', handleTeamMessage); };
+    }, [socket, user?.username, currentView, teamChannel]);
+
+    // Al entrar a un canal de equipo, limpia su contador. Cubre tanto la
+    // navegación dentro de team_chat como la primera entrada (teamChannel
+    // arranca en 'general' por defecto desde App.tsx).
+    useEffect(() => {
+        if (currentView !== 'team_chat' || !teamChannel) return;
+        setTeamUnread(prev => {
+            if (!prev[teamChannel]) return prev;
+            const n = { ...prev };
+            delete n[teamChannel];
+            return n;
+        });
+    }, [currentView, teamChannel]);
 
     const handleCreateContact = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -599,7 +650,12 @@ export function Sidebar({
                             <div className={`p-2 rounded-full ${teamChannel === 'general' ? (isDark ? 'bg-indigo-800 text-white' : 'bg-indigo-200') : (isDark ? 'bg-slate-700' : 'bg-slate-200')}`}>
                                 <Hash size={18} />
                             </div>
-                            <span className="font-bold text-sm">General</span>
+                            <span className="font-bold text-sm flex-1 text-left">General</span>
+                            {(teamUnread['general'] || 0) > 0 && (
+                                <span className="flex-shrink-0 bg-purple-600 text-white text-[10px] font-bold h-5 min-w-[20px] px-1 rounded-full flex items-center justify-center shadow-sm animate-in zoom-in">
+                                    {teamUnread['general'] > 99 ? '99+' : teamUnread['general']}
+                                </span>
+                            )}
                         </button>
 
                         <div className="h-px bg-slate-100 mx-2"></div>
@@ -611,6 +667,7 @@ export function Sidebar({
                                 {teamAgents.filter(a => a.name !== user.username).map(agent => {
                                     const isSelected = teamChannel === agent.name;
                                     const isUserOnline = onlineUsers.includes(agent.name);
+                                    const unread = teamUnread[agent.name] || 0;
                                     return (
                                         <button
                                             key={agent.id}
@@ -623,7 +680,12 @@ export function Sidebar({
                                                 </div>
                                                 {isUserOnline && <span className="absolute -top-0.5 -right-0.5 w-2.5 h-2.5 bg-green-500 rounded-full border-2 border-white"></span>}
                                             </div>
-                                            <span className="text-sm truncate">{agent.name}</span>
+                                            <span className="text-sm truncate flex-1 text-left">{agent.name}</span>
+                                            {unread > 0 && (
+                                                <span className="flex-shrink-0 bg-purple-600 text-white text-[10px] font-bold h-5 min-w-[20px] px-1 rounded-full flex items-center justify-center shadow-sm animate-in zoom-in">
+                                                    {unread > 99 ? '99+' : unread}
+                                                </span>
+                                            )}
                                         </button>
                                     );
                                 })}
