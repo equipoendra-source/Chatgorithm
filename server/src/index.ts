@@ -1854,6 +1854,23 @@ async function getAgendas(): Promise<Agenda[]> {
     }
 }
 
+// Busca un servicio en la lista por nombre tolerando diferencias menores
+// (tildes y mayúsculas). Necesario porque Gemini a veces escribe "Averia"
+// sin tilde aunque en la config esté "Avería" — con === silencioso fallaba
+// y se reservaba 1 solo slot en vez del bloque entero.
+// Devuelve el servicio CON su nombre canónico (el que está en la agenda),
+// para que ServiceType en Airtable quede consistente sin importar cómo lo
+// haya escrito el bot.
+function findServiceLoose(services: AgendaService[] | undefined, name: string): AgendaService | null {
+    if (!services || services.length === 0 || !name) return null;
+    const trimmed = name.trim();
+    const exact = services.find(s => s.name === trimmed);
+    if (exact) return exact;
+    const norm = (s: string) => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+    const target = norm(trimmed);
+    return services.find(s => norm(s.name) === target) || null;
+}
+
 // --- MANTENIMIENTO AUTOMÁTICO AGENDA ---
 async function runScheduleMaintenance() {
     if (!base) return;
@@ -3271,11 +3288,24 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         let slotsNeeded = 1;
         let serviceLabel = '';
         if (serviceKey && matchedAgenda) {
-            const svc = matchedAgenda.services.find(s => s.name === serviceKey);
+            // Matching tolerante: "Averia" sin tilde matchea "Avería" en config.
+            // Sin esto, antes caía silenciosamente a slotsNeeded=1 y la cita de
+            // 4h se reservaba como 1 slot suelto.
+            const svc = findServiceLoose(matchedAgenda.services, serviceKey);
             if (svc) {
+                if (svc.name !== serviceKey.trim()) {
+                    console.warn(`⚠️ [Slots] Laura pasó servicio "${serviceKey}" pero en config está "${svc.name}". Matcheado por normalización.`);
+                }
                 slotsNeeded = Math.max(1, Math.ceil(svc.durationMin / slotGranularity));
                 serviceLabel = svc.name;
                 console.log(`📅 [Slots] Servicio "${svc.name}" → ${svc.durationMin}min → ${slotsNeeded} slot(s) de ${slotGranularity}min`);
+            } else {
+                // No matchea ni siquiera con normalización: el bot pidió un
+                // servicio que no existe. Devolvemos error claro para que
+                // vuelva a pedir y use un nombre válido — en vez de mostrar
+                // huecos de 1 slot por error.
+                const available = (matchedAgenda.services || []).map(s => `"${s.name}"`).join(', ');
+                return `⚠️ El servicio "${serviceKey}" no está configurado en la agenda "${matchedAgenda.name}". Servicios disponibles: ${available || '(ninguno)'}. Pregúntale al cliente cuál de estos quiere y vuelve a llamar a get_available_appointments con el nombre EXACTO.`;
             }
         }
 
@@ -3537,7 +3567,32 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 granularity = ag?.duration || 60;
             }
             const durationMin = slotIds.length * granularity;
-            console.log(`📅 [Book] Bloque: ${slotIds.length} slot(s) × ${granularity}min = ${durationMin}min total${service ? ` (servicio: ${service})` : ''}`);
+
+            // Resolver nombre CANÓNICO del servicio (sin tildes mal escritas,
+            // mismo case que en la config) para guardar consistente en Airtable.
+            // Esto es lo que ve el panel humano de Averías — si cada reserva
+            // guarda una variante diferente, el filtro se vuelve frágil.
+            let canonicalService = service || '';
+            if (service && service.trim()) {
+                try {
+                    const allAgendasForSvc = await getAgendas();
+                    const agName = (leadRecord.get('Agenda') as string) || '';
+                    const agForSvc = agName ? allAgendasForSvc.find(a => a.name === agName) : allAgendasForSvc[0];
+                    const svc = findServiceLoose(agForSvc?.services, service);
+                    if (svc) {
+                        canonicalService = svc.name;
+                        if (svc.name !== service.trim()) {
+                            console.warn(`⚠️ [Book] Servicio "${service}" normalizado a "${svc.name}" (canónico de la agenda).`);
+                        }
+                    } else {
+                        console.warn(`⚠️ [Book] Servicio "${service}" no existe en agenda "${agName}". Se guarda tal cual.`);
+                    }
+                } catch (e: any) {
+                    console.warn(`⚠️ [Book] No se pudo resolver nombre canónico del servicio: ${e.message}`);
+                }
+            }
+
+            console.log(`📅 [Book] Bloque: ${slotIds.length} slot(s) × ${granularity}min = ${durationMin}min total${canonicalService ? ` (servicio: ${canonicalService})` : ''}`);
 
             console.log(`📅 [Book] Actualizando cita a Booked...`);
             // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
@@ -3555,7 +3610,7 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 "Extra": field4,
                 "Notas": field5,
                 "DurationMin": durationMin,   // duración total de la cita en minutos
-                "ServiceType": service || ''  // tipo de servicio elegido (ej. "Avería") — visible en el panel humano
+                "ServiceType": canonicalService  // nombre canónico del servicio — visible en el panel humano
             });
 
             // Si la cita ocupa múltiples slots, marcar los secundarios como Booked también.
@@ -5487,9 +5542,15 @@ app.put('/api/appointments/:id', async (req, res) => {
                 if (!matchedAgenda) {
                     return res.status(400).json({ error: `Agenda "${agendaName}" no encontrada — no se puede calcular el bloque del servicio.` });
                 }
-                const svc = matchedAgenda.services?.find(s => s.name === serviceName);
+                // Matching tolerante (sin tildes/case) — mismo motivo que en
+                // getAvailableAppointments. Aquí afecta al flujo manual del
+                // calendario; el frontend pasa el nombre tal cual del <select>
+                // que ya debería coincidir, pero por si acaso futuras llamadas
+                // (API externa, scripts) lo pasen distinto.
+                const svc = findServiceLoose(matchedAgenda.services, serviceName);
                 if (!svc) {
-                    return res.status(400).json({ error: `Servicio "${serviceName}" no existe en la agenda "${matchedAgenda.name}".` });
+                    const available = (matchedAgenda.services || []).map(s => `"${s.name}"`).join(', ');
+                    return res.status(400).json({ error: `Servicio "${serviceName}" no existe en la agenda "${matchedAgenda.name}". Disponibles: ${available || '(ninguno)'}.` });
                 }
                 const granularity = matchedAgenda.duration || 60;
                 const slotsNeeded = Math.max(1, Math.ceil(svc.durationMin / granularity));
@@ -5547,7 +5608,7 @@ app.put('/api/appointments/:id', async (req, res) => {
                         }
                         // Ahora sí: actualizar líder + secundarios DENTRO del lock.
                         f['DurationMin'] = blockDuration;
-                        f['ServiceType'] = serviceName;  // guardar el tipo elegido para el panel de Averías
+                        f['ServiceType'] = svc.name;  // nombre canónico (no el del body) para el panel de Averías
                         try {
                             await updateAppointmentFields(req.params.id, f);
                         } catch (e: any) {
