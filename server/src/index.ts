@@ -1214,8 +1214,11 @@ async function sendFCMNotification(payload: { title: string, body: string, data?
 }
 
 // Envía Web Push a TODAS las suscripciones de un usuario (multi-dispositivo).
-// Si una suscripción está expirada (410 Gone) o desconocida (404), la
-// eliminamos para no volver a intentarlo y persistimos el cambio en Airtable.
+// Si una suscripción está expirada (410 Gone), desconocida (404) o firmada
+// con una clave VAPID incompatible (401/403), la eliminamos para no volver
+// a intentarlo y persistimos el cambio en Airtable. Esto cubre el caso de
+// regeneración de claves VAPID: las subs viejas se autolimpian al primer
+// intento fallido en lugar de quedarse residuales generando errores eternos.
 async function sendPushNotification(userIdentifier: string, payload: { title: string, body: string, icon?: string, url?: string, phone?: string, tag?: string }) {
     if (!webPushEnabled) return;
     const subs = pushSubscriptions.get(userIdentifier);
@@ -1232,8 +1235,13 @@ async function sendPushNotification(userIdentifier: string, payload: { title: st
             okCount++;
         } catch (error: any) {
             const code = error.statusCode;
-            if (code === 410 || code === 404) {
+            // 410/404: suscripción caducada o desconocida (clásicos del estándar)
+            // 401/403: la clave VAPID con la que se creó la sub ya no coincide
+            //          con la que firma el servidor → sub huérfana, hay que borrarla
+            //          para que el usuario se re-suscriba al volver a abrir la app.
+            if (code === 410 || code === 404 || code === 401 || code === 403) {
                 expiredEndpoints.push(sub.endpoint);
+                console.warn(`🧹 [Push] Marcada para limpieza sub de ${userIdentifier} (HTTP ${code}, endpoint=${(sub.endpoint || '').slice(-20)})`);
             } else {
                 console.error(`❌ [Push] Error enviando a ${userIdentifier} (endpoint=${(sub.endpoint || '').slice(-20)}):`, error.message);
             }
@@ -1244,7 +1252,7 @@ async function sendPushNotification(userIdentifier: string, payload: { title: st
         for (const ep of expiredEndpoints) removePushSubscription(userIdentifier, ep);
         // Persistir la limpieza para que no se vuelva a cargar al reiniciar
         try { await saveWebPushSubscriptionToAirtable(userIdentifier, null); } catch {}
-        console.log(`🧹 [Push] Limpiadas ${expiredEndpoints.length} suscripción(es) expirada(s) de ${userIdentifier}`);
+        console.log(`🧹 [Push] Limpiadas ${expiredEndpoints.length} suscripción(es) inválida(s) de ${userIdentifier}`);
     }
 }
 
