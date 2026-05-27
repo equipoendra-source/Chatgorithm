@@ -666,7 +666,7 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
 
                     {/* OTROS COMPONENTES */}
                     {activeTab === 'whatsapp' && <WhatsAppTemplatesManager />}
-                    {activeTab === 'analytics' && <AnalyticsDashboard initialAccountId={selectedAccountId} />}
+                    {activeTab === 'analytics' && <AnalyticsDashboard initialAccountId={selectedAccountId} socket={socket} />}
                     {activeTab === 'audit' && <AuditLogView />}
                     {activeTab === 'agenda' && <CalendarDashboard />}
                     {activeTab === 'bot_config' && (

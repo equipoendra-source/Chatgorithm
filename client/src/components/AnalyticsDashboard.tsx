@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   BarChart3,
   Users,
@@ -55,9 +55,14 @@ interface AnalyticsDashboardProps {
   // dashboard sigue siendo independiente — se puede cambiar dentro sin
   // afectar al Sidebar.
   initialAccountId?: string | null;
+  // Socket compartido por App.tsx. Cuando llega, escuchamos eventos de
+  // citas para refrescar los KPIs en tiempo real (sin recargar la página).
+  // Opcional: si no se pasa, la pantalla funciona pero requiere refresh
+  // manual para ver datos nuevos.
+  socket?: any;
 }
 
-const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountId }) => {
+const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountId, socket }) => {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
 
@@ -92,7 +97,12 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
       .catch(() => setAccounts([]));
   }, []);
 
-  useEffect(() => {
+  // Fetch reutilizable del payload de analíticas. `silent=true` lo usa el
+  // refresh por socket: no muestra spinner ni resetea errores, solo
+  // actualiza los datos en silencio (la pantalla parpadearía si pusiéramos
+  // loading=true cada vez que llega un evento de cita).
+  const fetchAnalytics = useCallback((silent = false) => {
+    if (!silent) setLoading(true);
     fetch(`${API_URL}/analytics`)
       .then(async res => {
         const json = await res.json();
@@ -101,18 +111,50 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
       })
       .then(d => {
         if (!d || !d.kpis) {
-          setMissingData(true);
+          if (!silent) setMissingData(true);
         } else {
           setData(d);
+          if (silent) setMissingData(false);
         }
-        setLoading(false);
+        if (!silent) setLoading(false);
       })
       .catch(err => {
         console.error("Error fetching analytics:", err);
-        setError(err.message);
-        setLoading(false);
+        if (!silent) {
+          setError(err.message);
+          setLoading(false);
+        }
       });
   }, []);
+
+  useEffect(() => {
+    fetchAnalytics();
+  }, [fetchAnalytics]);
+
+  // Refresh en tiempo real: cuando llega una cita nueva, se cancela una o se
+  // actualiza el estado de una cita (incluido marcar/desmarcar incidente),
+  // refrescamos los KPIs en silencio. Debounce de 500ms para coalescer
+  // ráfagas (ej. bloque multi-slot que dispara varios appointment_event).
+  // Mismo patrón que CalendarDashboard.
+  useEffect(() => {
+    if (!socket) return;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const scheduleRefresh = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => { fetchAnalytics(true); }, 500);
+    };
+    socket.on('appointment_changed', scheduleRefresh);
+    socket.on('new_appointment', scheduleRefresh);
+    socket.on('appointment_cancelled', scheduleRefresh);
+    socket.on('appointment_event', scheduleRefresh);
+    return () => {
+      if (timer) clearTimeout(timer);
+      socket.off('appointment_changed', scheduleRefresh);
+      socket.off('new_appointment', scheduleRefresh);
+      socket.off('appointment_cancelled', scheduleRefresh);
+      socket.off('appointment_event', scheduleRefresh);
+    };
+  }, [socket, fetchAnalytics]);
 
   // --- Derivar datos según filtro de cuenta ---
   const accountStats: AccountStat[] = useMemo(() => Array.isArray(data?.accounts) ? data.accounts : [], [data]);
