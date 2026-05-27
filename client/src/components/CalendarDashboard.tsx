@@ -750,11 +750,18 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // contiene "aver" + desde hace 24h (incluye hoy completo aunque la
     // hora ya haya pasado por la mañana). Filtra por agenda y línea de
     // WhatsApp igual que el resto del calendario.
+    //
+    // Sólo cuenta LÍDERES de bloque (requiere clientName y durationMin>0).
+    // Los slots secundarios de una avería (Booked sin clientName) podrían
+    // heredar ServiceType por corrupción de datos — descartarlos evita contar
+    // 4 veces la misma cita y mostrar entradas sin teléfono.
     const breakdownAppointments = (() => {
         const cutoff = Date.now() - 24 * 60 * 60 * 1000;
         return appointments.filter(a => {
             if (a.status !== 'Booked') return false;
             if (!isBreakdownService(a.serviceType)) return false;
+            if (!a.clientName || !a.clientName.trim()) return false;
+            if ((a.durationMin || 0) <= 0) return false;
             if (new Date(a.date).getTime() < cutoff) return false;
             if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
             if (selectedAccountId && a.originPhoneId && a.originPhoneId !== selectedAccountId) return false;
