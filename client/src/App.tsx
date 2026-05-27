@@ -403,6 +403,42 @@ function App() {
         };
         socket.on('appointment_cancelled', onCancelledAppointment);
 
+        // "Vehículo Entregado" — emitido por el server vía logAppointmentEvent
+        // cuando un compañero cambia el Estado del Cliente a esa opción. Llega
+        // por el canal genérico 'appointment_event' (compartido con booked y
+        // cancelled), así que filtramos por type para no duplicar toasts: las
+        // reservas/cancelaciones siguen viniendo por sus eventos dedicados
+        // (new_appointment / appointment_cancelled) y aquí solo reaccionamos
+        // si type==='delivered'.
+        const onAppointmentEvent = (data: any) => {
+            if (!data || data.type !== 'delivered') return;
+            const dateISO = data.appointmentDate || data.dateISO || new Date().toISOString();
+            const humanDate = data.humanDate || (() => {
+                try {
+                    return new Date(dateISO).toLocaleString('es-ES', {
+                        timeZone: 'Europe/Madrid',
+                        weekday: 'short', day: '2-digit', month: 'short',
+                        hour: '2-digit', minute: '2-digit'
+                    });
+                } catch { return ''; }
+            })();
+            const notif: AppointmentNotification = {
+                id: `${data.appointmentId || data.clientPhone}-delivered-${Date.now()}`,
+                appointmentId: data.appointmentId || '',
+                dateISO,
+                clientName: data.clientName || 'Cliente',
+                clientPhone: data.clientPhone || '',
+                agenda: data.agenda || '',
+                humanDate,
+                source: data.source || 'manual',
+                kind: 'delivered',
+                accountId: data.accountId || '',
+                accountName: data.accountName || ''
+            };
+            setAppointmentNotifs(prev => [notif, ...prev].slice(0, 5));
+        };
+        socket.on('appointment_event', onAppointmentEvent);
+
         // Chat asignado:
         //  - Si assignedTo coincide con yo → toast directo "te lo han asignado".
         //  - Si NO hay assignedTo concreto pero hay department, notificar a
@@ -500,6 +536,7 @@ function App() {
             socket.off('quick_replies_list');
             socket.off('new_appointment', onNewAppointment);
             socket.off('appointment_cancelled', onCancelledAppointment);
+            socket.off('appointment_event', onAppointmentEvent);
             socket.off('chat_assigned', onChatAssigned);
             socket.off('team_appointment_reminder', onTeamReminder);
         };

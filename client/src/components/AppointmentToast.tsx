@@ -1,4 +1,4 @@
-import { Calendar, X, CalendarX2, Smartphone } from 'lucide-react';
+import { Calendar, X, CalendarX2, Smartphone, PackageCheck } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { colorForAccount } from '../utils/accountColors';
 
@@ -16,8 +16,10 @@ export interface AppointmentNotification {
     //  - 'client_whatsapp' → la realizó el propio cliente por WhatsApp
     source: 'bot' | 'manual' | 'client_whatsapp';
     // 'booked' (por defecto) → toast morado "Nueva cita".
-    // 'cancelled' → toast rojo "Cita cancelada".
-    kind?: 'booked' | 'cancelled';
+    // 'cancelled'           → toast rojo "Cita cancelada".
+    // 'delivered'           → toast azul cian "Vehículo entregado" (un compañero
+    //                         marcó el estado del cliente desde el calendario).
+    kind?: 'booked' | 'cancelled' | 'delivered';
     // Línea de WhatsApp por la que entró/se hizo la reserva. Si hay >1 cuenta
     // activa, el toast lleva el chip con el nombre y un border lateral del
     // color asignado por accountColors. Si solo hay 1 cuenta, no se muestra.
@@ -44,27 +46,40 @@ export function AppointmentToast({ notifications, onOpen, onDismiss }: Props) {
         <div className="fixed safe-toast-top right-4 z-[9999] flex flex-col gap-2 max-w-sm w-[calc(100%-2rem)] sm:w-96 pointer-events-none">
             {notifications.map(n => {
                 const isCancelled = n.kind === 'cancelled';
+                const isDelivered = n.kind === 'delivered';
                 // Etiqueta del origen — "Laura" para el bot, "Cliente" para WhatsApp del propio cliente.
                 // Sin etiqueta cuando lo hace un trabajador (source='manual').
                 const sourceTag = n.source === 'bot' ? 'Laura' : n.source === 'client_whatsapp' ? 'Cliente' : '';
 
-                // Paleta: morado para reservas, rojo/rosa para cancelaciones.
+                // Paleta por tipo: morado (booked) · rojo (cancelled) · cian (delivered).
+                // El cian de "delivered" es coherente con el icono PackageCheck del
+                // Historial de citas, así son inmediatamente reconocibles entre sí.
                 const cardClasses = isCancelled
                     ? (isDark
                         ? 'bg-slate-900/95 border-rose-500/40 shadow-rose-500/20'
                         : 'bg-white border-rose-200 shadow-rose-200/40')
-                    : (isDark
-                        ? 'bg-slate-900/95 border-purple-500/40 shadow-purple-500/20'
-                        : 'bg-white border-purple-200 shadow-purple-200/40');
+                    : isDelivered
+                        ? (isDark
+                            ? 'bg-slate-900/95 border-sky-500/40 shadow-sky-500/20'
+                            : 'bg-white border-sky-200 shadow-sky-200/40')
+                        : (isDark
+                            ? 'bg-slate-900/95 border-purple-500/40 shadow-purple-500/20'
+                            : 'bg-white border-purple-200 shadow-purple-200/40');
                 const iconWrapClasses = isCancelled
                     ? (isDark ? 'bg-rose-500/20 text-rose-300' : 'bg-rose-100 text-rose-700')
-                    : (isDark ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-700');
+                    : isDelivered
+                        ? (isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700')
+                        : (isDark ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-700');
                 const titleClasses = isCancelled
                     ? (isDark ? 'text-rose-200' : 'text-rose-900')
-                    : (isDark ? 'text-purple-200' : 'text-purple-900');
+                    : isDelivered
+                        ? (isDark ? 'text-sky-200' : 'text-sky-900')
+                        : (isDark ? 'text-purple-200' : 'text-purple-900');
                 const tagClasses = isCancelled
                     ? (isDark ? 'bg-rose-500/20 text-rose-300' : 'bg-rose-100 text-rose-700')
-                    : (isDark ? 'bg-indigo-500/20 text-indigo-300' : 'bg-indigo-100 text-indigo-700');
+                    : isDelivered
+                        ? (isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700')
+                        : (isDark ? 'bg-indigo-500/20 text-indigo-300' : 'bg-indigo-100 text-indigo-700');
 
                 // Color de la cuenta (línea de WhatsApp) si se conoce.
                 const acc = n.accountId ? colorForAccount(n.accountId) : null;
@@ -78,14 +93,14 @@ export function AppointmentToast({ notifications, onOpen, onDismiss }: Props) {
                         // del toast sin parecer doble.
                         style={acc ? { borderLeftColor: acc.hex, borderLeftWidth: '5px', borderLeftStyle: 'solid' } : undefined}
                         className={`pointer-events-auto cursor-pointer rounded-2xl shadow-2xl border backdrop-blur-md p-4 flex items-start gap-3 animate-slide-in-right transition-all hover:scale-[1.02] active:scale-[0.98] ${cardClasses}`}
-                        title={isCancelled ? 'Pinchar para ver el día en el calendario' : 'Pinchar para ver la cita en el calendario'}
+                        title={isCancelled || isDelivered ? 'Pinchar para ver el día en el calendario' : 'Pinchar para ver la cita en el calendario'}
                     >
                         <div className={`flex-shrink-0 w-10 h-10 rounded-xl flex items-center justify-center ${iconWrapClasses}`}>
-                            {isCancelled ? <CalendarX2 className="w-5 h-5" /> : <Calendar className="w-5 h-5" />}
+                            {isCancelled ? <CalendarX2 className="w-5 h-5" /> : isDelivered ? <PackageCheck className="w-5 h-5" /> : <Calendar className="w-5 h-5" />}
                         </div>
                         <div className="flex-1 min-w-0">
                             <div className={`text-sm font-bold flex items-center gap-2 flex-wrap ${titleClasses}`}>
-                                {isCancelled ? 'Cita cancelada' : 'Nueva cita'}
+                                {isCancelled ? 'Cita cancelada' : isDelivered ? 'Vehículo entregado' : 'Nueva cita'}
                                 {sourceTag && (
                                     <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${tagClasses}`}>
                                         {sourceTag}
