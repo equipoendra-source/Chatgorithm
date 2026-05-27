@@ -8064,6 +8064,16 @@ app.post('/api/webpush/unsubscribe', async (req, res) => {
     }
 });
 
+// --- VAPID PUBLIC KEY ENDPOINT ---
+// El cliente la lee de aquí en lugar de tenerla hardcodeada, garantizando
+// que cliente y servidor siempre usen la misma clave y no haya 401.
+app.get('/api/webpush/vapid-key', (_req, res) => {
+    if (!webPushEnabled || !VAPID_PUBLIC_KEY) {
+        return res.status(503).json({ error: 'Web Push no está habilitado en este servidor' });
+    }
+    res.json({ publicKey: VAPID_PUBLIC_KEY });
+});
+
 // --- WEB PUSH SUBSCRIPTION ENDPOINT ---
 // Permite múltiples suscripciones por usuario (escritorio + móvil PWA + ...).
 // Si el mismo dispositivo se vuelve a suscribir (mismo endpoint), se ignora

@@ -267,14 +267,33 @@ class PushNotificationService {
                 return;
             }
 
-            const publicVapidKey = 'BNibvQQfVfb6ozHGy2xqnt5JJV_rqq8hGmj5qQuJb1xozXnN7LX5aVfWlqDqx_1BHDlPvFxTf_IiQOI5Y8mMEFs';
-            
+            // Leer la clave VAPID pública del servidor para garantizar que
+            // cliente y servidor siempre estén sincronizados. Antes estaba
+            // hardcodeada aquí, lo que causaba 401 si el servidor usaba
+            // una clave distinta (ej. tras regenerar las claves en Render).
+            const vapidResp = await fetch(`${API_URL}/webpush/vapid-key`);
+            if (!vapidResp.ok) {
+                console.error('❌ [WebPush] No se pudo obtener la clave VAPID del servidor');
+                return;
+            }
+            const { publicKey: publicVapidKey } = await vapidResp.json();
+            if (!publicVapidKey) {
+                console.error('❌ [WebPush] Servidor no devolvió clave VAPID pública');
+                return;
+            }
+            console.log('🔑 [WebPush] Clave VAPID obtenida del servidor');
+
+            // Si ya hay una suscripción activa, la borramos primero para
+            // forzar una nueva con la clave correcta del servidor.
+            const existingSub = await registration.pushManager.getSubscription();
+            if (existingSub) await existingSub.unsubscribe();
+
             const subscription = await registration.pushManager.subscribe({
                 userVisibleOnly: true,
                 applicationServerKey: this.urlBase64ToUint8Array(publicVapidKey)
             });
 
-            console.log('✅ [WebPush] Suscripción lista');
+            console.log('✅ [WebPush] Suscripción lista con clave del servidor');
             await this.sendWebPushSubscriptionToServer(subscription);
         } catch (error) {
             console.error('❌ [WebPush] Error crítico en suscripción:', error);
