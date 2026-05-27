@@ -2170,14 +2170,41 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 "Marcar entregado" que llama POST /api/appointments/:id/deliver.
                 Tras marcar, la fila desaparece (la cita ya tiene deliveredAt). */}
             {showPendingDeliveryModal && (() => {
-                // Filtro local por texto: teléfono / nombre / matrícula
+                // DOS MODOS de uso del modal:
+                //   1) SIN texto en el buscador → lista de PENDIENTES (citas
+                //      Booked pasadas sin DeliveredAt). Es el "panel" que muestra
+                //      el trabajo por hacer (caso del 90%).
+                //   2) CON texto en el buscador → busca en TODAS las citas
+                //      Booked líderes del histórico (entregadas o no, pasadas o
+                //      futuras). Útil cuando el cliente viene y solo recuerdas
+                //      el teléfono — encuentras su cita aunque ya esté entregada
+                //      (lo verás como "✅ Entregado"), pendiente, o futura.
                 const q = deliverySearchQuery.trim().toLowerCase();
-                const filtered = q
-                    ? pendingDeliveryAppointments.filter(a =>
-                        (a.clientPhone || '').toLowerCase().includes(q) ||
-                        (a.clientName || '').toLowerCase().includes(q) ||
-                        (a.matricula || '').toLowerCase().includes(q)
-                    )
+                const searchMode = q.length > 0;
+                const filtered = searchMode
+                    ? appointments
+                        .filter(a => {
+                            // Líder Booked con datos del cliente
+                            if (a.status !== 'Booked') return false;
+                            if (!a.clientName || !a.clientName.trim()) return false;
+                            if ((a.durationMin || 0) <= 0) return false;
+                            // Aplicar filtros de agenda / cuenta como el resto
+                            if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
+                            if (selectedAccountId && a.originPhoneId && a.originPhoneId !== selectedAccountId) return false;
+                            // Match texto: teléfono / nombre / matrícula
+                            return (
+                                (a.clientPhone || '').toLowerCase().includes(q) ||
+                                (a.clientName || '').toLowerCase().includes(q) ||
+                                (a.matricula || '').toLowerCase().includes(q)
+                            );
+                        })
+                        // Ordenar: pendientes primero (sin deliveredAt), luego entregados por fecha desc
+                        .sort((a, b) => {
+                            const aPend = !a.deliveredAt ? 0 : 1;
+                            const bPend = !b.deliveredAt ? 0 : 1;
+                            if (aPend !== bPend) return aPend - bPend;
+                            return new Date(b.date).getTime() - new Date(a.date).getTime();
+                        })
                     : pendingDeliveryAppointments;
 
                 const markDelivered = async (apptId: string, clientName: string) => {
@@ -2193,14 +2220,34 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                         if (!r.ok) {
                             alert(`No se pudo marcar como entregada:\n${data.error || 'Error desconocido'}`);
                         } else {
-                            // Refrescar lista. El socket appointment_changed ya
-                            // hará lo suyo, pero forzamos para que sea instantáneo.
                             await fetchData();
                         }
                     } catch (e: any) {
                         alert('Error de red marcando entrega: ' + (e?.message || e));
                     } finally {
                         setDeliveringId(null);
+                    }
+                };
+
+                const undoDelivery = async (apptId: string, clientName: string) => {
+                    if (!confirm(`¿Deshacer la entrega del vehículo de ${clientName}?\n\nSe cancelarán los recordatorios postventa pendientes.`)) return;
+                    setUndeliveringId(apptId);
+                    try {
+                        const r = await fetch(`${API_URL}/appointments/${apptId}/undeliver`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ actorUsername: getCurrentUsername() })
+                        });
+                        const data = await r.json();
+                        if (!r.ok) {
+                            alert(`No se pudo deshacer:\n${data.error || 'Error desconocido'}`);
+                        } else {
+                            await fetchData();
+                        }
+                    } catch (e: any) {
+                        alert('Error de red deshaciendo entrega: ' + (e?.message || e));
+                    } finally {
+                        setUndeliveringId(null);
                     }
                 };
 
@@ -2217,11 +2264,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         <PackageCheck size={20} />
                                     </div>
                                     <div className="min-w-0">
-                                        <h3 className={`text-base md:text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Pendientes de entrega</h3>
+                                        <h3 className={`text-base md:text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                            {searchMode ? 'Buscar cita por cliente' : 'Pendientes de entrega'}
+                                        </h3>
                                         <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                            {pendingDeliveryAppointments.length === 0
-                                                ? 'No hay vehículos pendientes de entregar.'
-                                                : `${pendingDeliveryAppointments.length} cita${pendingDeliveryAppointments.length === 1 ? '' : 's'} pendiente${pendingDeliveryAppointments.length === 1 ? '' : 's'} · marca como entregado al devolver el vehículo`}
+                                            {searchMode
+                                                ? `Resultados en todo el histórico de citas reservadas`
+                                                : pendingDeliveryAppointments.length === 0
+                                                    ? 'Sin pendientes · usa el buscador para encontrar cualquier cita'
+                                                    : `${pendingDeliveryAppointments.length} cita${pendingDeliveryAppointments.length === 1 ? '' : 's'} pendiente${pendingDeliveryAppointments.length === 1 ? '' : 's'} · marca como entregado al devolver el vehículo`}
                                         </p>
                                     </div>
                                 </div>
@@ -2234,44 +2285,49 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 </button>
                             </div>
 
-                            {/* Buscador */}
-                            {pendingDeliveryAppointments.length > 0 && (
-                                <div className={`px-4 md:px-5 pt-4 pb-2`}>
-                                    <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
-                                        <Search size={16} className={isDark ? 'text-slate-400' : 'text-slate-500'} />
-                                        <input
-                                            type="text"
-                                            value={deliverySearchQuery}
-                                            onChange={e => setDeliverySearchQuery(e.target.value)}
-                                            placeholder="Buscar por teléfono, nombre o matrícula..."
-                                            className={`flex-1 bg-transparent outline-none text-sm ${isDark ? 'text-white placeholder:text-slate-500' : 'text-slate-800 placeholder:text-slate-400'}`}
-                                            autoFocus
-                                        />
-                                        {deliverySearchQuery && (
-                                            <button
-                                                onClick={() => setDeliverySearchQuery('')}
-                                                className={`p-0.5 rounded ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-500'}`}
-                                                title="Limpiar"
-                                            >
-                                                <X size={14} />
-                                            </button>
-                                        )}
-                                    </div>
+                            {/* Buscador — siempre visible (también si no hay pendientes,
+                                para poder buscar en todo el histórico). */}
+                            <div className={`px-4 md:px-5 pt-4 pb-2`}>
+                                <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                    <Search size={16} className={isDark ? 'text-slate-400' : 'text-slate-500'} />
+                                    <input
+                                        type="text"
+                                        value={deliverySearchQuery}
+                                        onChange={e => setDeliverySearchQuery(e.target.value)}
+                                        placeholder="Buscar cualquier cita por teléfono, nombre o matrícula..."
+                                        className={`flex-1 bg-transparent outline-none text-sm ${isDark ? 'text-white placeholder:text-slate-500' : 'text-slate-800 placeholder:text-slate-400'}`}
+                                        autoFocus
+                                    />
+                                    {deliverySearchQuery && (
+                                        <button
+                                            onClick={() => setDeliverySearchQuery('')}
+                                            className={`p-0.5 rounded ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-500'}`}
+                                            title="Limpiar"
+                                        >
+                                            <X size={14} />
+                                        </button>
+                                    )}
                                 </div>
-                            )}
+                                {searchMode && (
+                                    <p className={`text-[11px] mt-1.5 px-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                        🔎 Buscando en todo el histórico — pendientes primero, luego entregadas.
+                                    </p>
+                                )}
+                            </div>
 
                             {/* Lista */}
-                            <div className="p-3 md:p-5 max-h-[65vh] overflow-y-auto">
-                                {pendingDeliveryAppointments.length === 0 ? (
+                            <div className="p-3 md:p-5 max-h-[60vh] overflow-y-auto">
+                                {!searchMode && pendingDeliveryAppointments.length === 0 ? (
                                     <div className={`text-center py-12 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                                         <PackageCheck size={40} className="mx-auto mb-3 opacity-30" />
                                         <p className="text-sm">Todos los vehículos están entregados.</p>
-                                        <p className="text-xs mt-1 opacity-70">Aquí aparecerán las citas pasadas que aún no estén marcadas como entregadas.</p>
+                                        <p className="text-xs mt-1 opacity-70">Usa el buscador de arriba para encontrar cualquier cita del histórico (entregada o no).</p>
                                     </div>
                                 ) : filtered.length === 0 ? (
                                     <div className={`text-center py-12 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                                         <Search size={40} className="mx-auto mb-3 opacity-30" />
                                         <p className="text-sm">Ningún resultado para "{deliverySearchQuery}".</p>
+                                        <p className="text-xs mt-1 opacity-70">Prueba con el teléfono completo o solo los últimos dígitos.</p>
                                     </div>
                                 ) : (
                                     <div className="space-y-2">
@@ -2280,20 +2336,30 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             const dateStr = dt.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' });
                                             const timeStr = formatTimeRange(b.date, b.durationMin);
                                             const daysAgo = Math.floor((Date.now() - dt.getTime()) / (24 * 60 * 60 * 1000));
-                                            // Badge de antigüedad: <7 días neutro, 7-15 ámbar, >15 rojo
-                                            const ageClass = daysAgo > 15
-                                                ? (isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700')
-                                                : daysAgo > 7
-                                                    ? (isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700')
-                                                    : (isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-600');
-                                            const ageLabel = daysAgo === 0 ? 'Hoy' : daysAgo === 1 ? 'Ayer' : `Hace ${daysAgo} días`;
+                                            const isFuture = daysAgo < 0;
+                                            const isDelivered = !!b.deliveredAt;
+                                            // Badge: si es futura, azul; si entregada, verde; si no, según antigüedad
+                                            const ageClass = isFuture
+                                                ? (isDark ? 'bg-blue-900/40 text-blue-300' : 'bg-blue-100 text-blue-700')
+                                                : isDelivered
+                                                    ? (isDark ? 'bg-emerald-900/40 text-emerald-300' : 'bg-emerald-100 text-emerald-700')
+                                                    : daysAgo > 15
+                                                        ? (isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700')
+                                                        : daysAgo > 7
+                                                            ? (isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700')
+                                                            : (isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-600');
+                                            const ageLabel = isFuture
+                                                ? `En ${Math.abs(daysAgo)} día${Math.abs(daysAgo) === 1 ? '' : 's'}`
+                                                : daysAgo === 0 ? 'Hoy' : daysAgo === 1 ? 'Ayer' : `Hace ${daysAgo} días`;
                                             const isAveria = isBreakdownService(b.serviceType);
+                                            const deliveredDate = isDelivered ? new Date(b.deliveredAt!) : null;
+                                            const deliveredAgo = deliveredDate ? Math.floor((Date.now() - deliveredDate.getTime()) / (24 * 60 * 60 * 1000)) : 0;
                                             return (
                                                 <div
                                                     key={b.id}
-                                                    className={`rounded-xl p-3 md:p-4 border transition ${isDark
-                                                        ? 'bg-slate-800/60 border-slate-700 hover:border-emerald-700'
-                                                        : 'bg-emerald-50/40 border-emerald-100 hover:border-emerald-300'
+                                                    className={`rounded-xl p-3 md:p-4 border transition ${isDelivered
+                                                        ? (isDark ? 'bg-emerald-900/10 border-emerald-800/40' : 'bg-emerald-50/30 border-emerald-200')
+                                                        : (isDark ? 'bg-slate-800/60 border-slate-700 hover:border-emerald-700' : 'bg-white border-slate-200 hover:border-emerald-300')
                                                         }`}
                                                 >
                                                     <div className="flex flex-col md:flex-row md:items-center gap-3">
@@ -2312,12 +2378,17 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
                                                         {/* Datos del cliente y vehículo */}
                                                         <div className="flex-1 min-w-0">
-                                                            <div className={`font-semibold truncate flex items-center gap-1.5 ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                            <div className={`font-semibold truncate flex items-center gap-1.5 flex-wrap ${isDark ? 'text-white' : 'text-slate-800'}`}>
                                                                 <User size={14} className="inline opacity-60" />
                                                                 {b.clientName || 'Cliente sin nombre'}
                                                                 {isAveria && (
                                                                     <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}>
                                                                         Avería
+                                                                    </span>
+                                                                )}
+                                                                {isDelivered && (
+                                                                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded inline-flex items-center gap-1 ${isDark ? 'bg-emerald-900/40 text-emerald-300' : 'bg-emerald-100 text-emerald-700'}`}>
+                                                                        <CheckCircle size={10} /> Entregado
                                                                     </span>
                                                                 )}
                                                             </div>
@@ -2342,20 +2413,44 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                                     <span className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{b.agenda}</span>
                                                                 </div>
                                                             )}
+                                                            {isDelivered && deliveredDate && (
+                                                                <div className={`text-[11px] mt-1 italic ${isDark ? 'text-emerald-400/80' : 'text-emerald-700/80'}`}>
+                                                                    Entregado {deliveredAgo === 0 ? 'hoy' : deliveredAgo === 1 ? 'ayer' : `hace ${deliveredAgo} días`}
+                                                                    {b.deliveredBy ? ` por ${b.deliveredBy}` : ''}
+                                                                </div>
+                                                            )}
                                                         </div>
 
-                                                        {/* Acciones */}
+                                                        {/* Acciones — distintas según estado */}
                                                         <div className="flex flex-col gap-1.5 flex-shrink-0">
-                                                            <button
-                                                                onClick={() => markDelivered(b.id, b.clientName || 'este cliente')}
-                                                                disabled={deliveringId === b.id}
-                                                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
-                                                                title="Marcar vehículo como entregado al cliente"
-                                                            >
-                                                                {deliveringId === b.id
-                                                                    ? (<><Loader2 size={13} className="animate-spin" />Marcando...</>)
-                                                                    : (<><CheckCircle size={13} />Marcar entregado</>)}
-                                                            </button>
+                                                            {isDelivered ? (
+                                                                <button
+                                                                    onClick={() => undoDelivery(b.id, b.clientName || 'este cliente')}
+                                                                    disabled={undeliveringId === b.id}
+                                                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-amber-700 hover:bg-amber-600 text-white' : 'bg-amber-600 hover:bg-amber-700 text-white'}`}
+                                                                    title="Deshacer la marca de entrega (cancela los recordatorios postventa)"
+                                                                >
+                                                                    {undeliveringId === b.id
+                                                                        ? (<><Loader2 size={13} className="animate-spin" />...</>)
+                                                                        : (<><RotateCcw size={13} />Deshacer</>)}
+                                                                </button>
+                                                            ) : isFuture ? (
+                                                                <span className={`px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5 ${isDark ? 'bg-blue-900/30 text-blue-300' : 'bg-blue-50 text-blue-700'}`} title="La cita aún no ha pasado, no se puede entregar todavía">
+                                                                    <Clock size={13} />
+                                                                    Cita futura
+                                                                </span>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={() => markDelivered(b.id, b.clientName || 'este cliente')}
+                                                                    disabled={deliveringId === b.id}
+                                                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
+                                                                    title="Marcar vehículo como entregado al cliente"
+                                                                >
+                                                                    {deliveringId === b.id
+                                                                        ? (<><Loader2 size={13} className="animate-spin" />Marcando...</>)
+                                                                        : (<><CheckCircle size={13} />Marcar entregado</>)}
+                                                                </button>
+                                                            )}
                                                             <button
                                                                 onClick={() => {
                                                                     setShowPendingDeliveryModal(false);
