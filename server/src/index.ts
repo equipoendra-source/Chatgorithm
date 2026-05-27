@@ -1611,7 +1611,10 @@ async function notifyClientOfManualCancellation(data: {
 // sigue funcionando (la reserva/cancelación no se ve afectada).
 let _appointmentEventsTableMissingWarned = false;
 async function logAppointmentEvent(data: {
-    type: 'booked' | 'cancelled';
+    // 'delivered' = el equipo marcó "Vehículo Entregado" en el contacto (no es
+    // una reserva ni una cancelación, pero queremos que aparezca en el
+    // Historial de citas para que todo el equipo se entere en tiempo real).
+    type: 'booked' | 'cancelled' | 'delivered';
     appointmentId: string;
     clientName: string;
     clientPhone: string;
@@ -1627,6 +1630,9 @@ async function logAppointmentEvent(data: {
 
     if (!base) return;
     try {
+        // typecast: true → si el single-select `type` aún no tiene la opción
+        // 'delivered' (porque la tabla se creó cuando solo había booked/cancelled),
+        // Airtable la añade automáticamente. Cero fricción al desplegar.
         await base(TABLE_APPOINTMENT_EVENTS).create([{
             fields: {
                 type: data.type,
@@ -1638,12 +1644,12 @@ async function logAppointmentEvent(data: {
                 source: data.source,
                 createdAt
             }
-        }]);
+        }], { typecast: true });
     } catch (e: any) {
         // Si la tabla aún no existe, avisar una sola vez en lugar de spamear logs.
         if (/could not find|unknown.*table|table.*not found/i.test(e.message || '')) {
             if (!_appointmentEventsTableMissingWarned) {
-                console.warn(`⚠️ [AppointmentEvents] La tabla "${TABLE_APPOINTMENT_EVENTS}" no existe en Airtable. Crea una tabla con campos: type (single select: booked/cancelled), appointmentId, clientName, clientPhone, appointmentDate (date+time), agenda, source (single select: bot/manual/client_whatsapp), createdAt (date+time).`);
+                console.warn(`⚠️ [AppointmentEvents] La tabla "${TABLE_APPOINTMENT_EVENTS}" no existe en Airtable. Crea una tabla con campos: type (single select: booked/cancelled/delivered), appointmentId, clientName, clientPhone, appointmentDate (date+time), agenda, source (single select: bot/manual/client_whatsapp), createdAt (date+time).`);
                 _appointmentEventsTableMissingWarned = true;
             }
         } else {
@@ -2133,14 +2139,19 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
         console.log(`🚗 [PostVenta] Trigger: ${clean} cambió a "Vehículo Entregado"`);
         const clientName = (contactRec.get('name') as string) || 'cliente';
         const originId = (contactRec.get('origin_phone_id') as string) || waPhoneId || 'default';
+        const nowIso = new Date().toISOString();
 
         // Guardar fecha de entrega
         try {
-            await base('Contacts').update([{ id: contactRec.id, fields: { delivery_date: new Date().toISOString() } }]);
+            await base('Contacts').update([{ id: contactRec.id, fields: { delivery_date: nowIso } }]);
         } catch (e) { console.error('Error guardando delivery_date:', e); }
 
-        // Buscar datos del vehículo en la última cita
+        // Buscar datos del vehículo y de la última cita en una sola consulta
+        // (la usamos tanto para el vehicleDesc de la postventa como para el
+        // appointmentId/agenda del evento del historial).
         let vehicleDesc = 'vehículo';
+        let lastApptId = '';
+        let lastApptAgenda = '';
         try {
             // Filtramos por {ClientName}!='' para coger el LÍDER de un bloque
             // multi-slot. Sin esto, una avería de 4h devolvía el último slot
@@ -2155,12 +2166,31 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
                 const modelo = appts[0].get('Modelo') as string;
                 if (marca && modelo) vehicleDesc = `${marca} ${modelo}`;
                 else if (marca) vehicleDesc = marca;
+                lastApptId = appts[0].id;
+                lastApptAgenda = (appts[0].get('Agenda') as string) || '';
             }
-        } catch (e) { /* usar default */ }
+        } catch (e) { /* usar defaults */ }
 
         schedulePostSaleSequence(clean, clientName, vehicleDesc, originId).catch(e =>
             console.error('❌ [PostVenta] Error programando secuencia:', e)
         );
+
+        // Registrar el evento en el Historial de citas — así todo el equipo se
+        // entera al instante (vía socket 'appointment_event' que ya escucha
+        // AppointmentHistoryPanel) y queda traza en Airtable.
+        // - appointmentId: id de la última cita asociada (para que al pulsar
+        //   en el historial salte al día de esa cita en el calendario).
+        // - appointmentDate: usamos la fecha de ENTREGA (= ahora), no la de la
+        //   cita, porque lo que ordena el historial es cuándo pasó la entrega.
+        logAppointmentEvent({
+            type: 'delivered',
+            appointmentId: lastApptId,
+            clientName,
+            clientPhone: clean,
+            appointmentDate: nowIso,
+            agenda: lastApptAgenda,
+            source: 'manual'
+        }).catch(() => { /* logAppointmentEvent ya logea su error */ });
     }
     // Deshacer entrega → cancelar la secuencia postventa pendiente (evita recordatorios
     // antes de la entrega real si se marcó por error).

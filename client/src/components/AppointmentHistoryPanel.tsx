@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from 'react';
-import { X, RefreshCw, CheckCircle2, XCircle, Bot, User, MessageCircle } from 'lucide-react';
+import { X, RefreshCw, CheckCircle2, XCircle, Bot, User, MessageCircle, PackageCheck } from 'lucide-react';
 import { API_URL } from '../config/api';
 
 export interface AppointmentEvent {
     id: string;
-    type: 'booked' | 'cancelled' | string;
+    // 'delivered' = un compañero marcó "Vehículo Entregado" en el cliente
+    // (no es una cita en sí, pero aparece en el historial para que el equipo
+    // se entere en tiempo real).
+    type: 'booked' | 'cancelled' | 'delivered' | string;
     appointmentId: string;
     clientName: string;
     clientPhone: string;
@@ -75,7 +78,7 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [warning, setWarning] = useState<string | null>(null);
-    const [filter, setFilter] = useState<'all' | 'booked' | 'cancelled'>('all');
+    const [filter, setFilter] = useState<'all' | 'booked' | 'cancelled' | 'delivered'>('all');
 
     const fetchEvents = async () => {
         setLoading(true);
@@ -100,7 +103,7 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
     useEffect(() => {
         if (!socket) return;
         const onEvent = (evt: any) => {
-            if (!evt || (evt.type !== 'booked' && evt.type !== 'cancelled')) return;
+            if (!evt || (evt.type !== 'booked' && evt.type !== 'cancelled' && evt.type !== 'delivered')) return;
             setEvents(prev => [{
                 id: `live-${evt.appointmentId}-${evt.createdAt}`,
                 type: evt.type,
@@ -140,8 +143,8 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
                     </button>
                 </div>
 
-                <div className={`flex gap-1 px-4 py-2 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
-                    {(['all', 'booked', 'cancelled'] as const).map(k => (
+                <div className={`flex flex-wrap gap-1 px-4 py-2 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                    {(['all', 'booked', 'cancelled', 'delivered'] as const).map(k => (
                         <button
                             key={k}
                             onClick={() => setFilter(k)}
@@ -149,7 +152,7 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
                                 ? (isDark ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30' : 'bg-indigo-100 text-indigo-700 border border-indigo-200')
                                 : (isDark ? 'text-slate-400 hover:bg-white/5' : 'text-slate-500 hover:bg-slate-100')}`}
                         >
-                            {k === 'all' ? 'Todos' : k === 'booked' ? 'Reservas' : 'Cancelaciones'}
+                            {k === 'all' ? 'Todos' : k === 'booked' ? 'Reservas' : k === 'cancelled' ? 'Cancelaciones' : 'Entregas'}
                         </button>
                     ))}
                 </div>
@@ -168,7 +171,20 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
                     ) : filtered.length === 0 ? (
                         <div className={`text-center py-12 text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Aún no hay eventos.</div>
                     ) : filtered.map(evt => {
+                        // Tres tipos de evento, cada uno con su paleta:
+                        //  - booked     → verde esmeralda (✓ nueva cita)
+                        //  - cancelled  → rojo rosa     (✗ cancelada)
+                        //  - delivered  → azul/cian     (📦 vehículo entregado, neutral y distinto del verde)
                         const isBooked = evt.type === 'booked';
+                        const isDelivered = evt.type === 'delivered';
+                        const isCancelled = evt.type === 'cancelled';
+                        const palette = isBooked
+                            ? { border: isDark ? 'border-emerald-700/30' : 'border-emerald-100', bg: isDark ? 'bg-emerald-900/10 hover:bg-emerald-900/20' : 'bg-emerald-50/60 hover:bg-emerald-100', icon: isDark ? 'text-emerald-400' : 'text-emerald-600', title: isDark ? 'text-emerald-300' : 'text-emerald-800' }
+                            : isDelivered
+                                ? { border: isDark ? 'border-sky-700/30' : 'border-sky-100', bg: isDark ? 'bg-sky-900/10 hover:bg-sky-900/20' : 'bg-sky-50/60 hover:bg-sky-100', icon: isDark ? 'text-sky-400' : 'text-sky-600', title: isDark ? 'text-sky-300' : 'text-sky-800' }
+                                : { border: isDark ? 'border-rose-700/30' : 'border-rose-100', bg: isDark ? 'bg-rose-900/10 hover:bg-rose-900/20' : 'bg-rose-50/60 hover:bg-rose-100', icon: isDark ? 'text-rose-400' : 'text-rose-600', title: isDark ? 'text-rose-300' : 'text-rose-800' };
+                        const title = isBooked ? 'Nueva cita' : isDelivered ? 'Vehículo entregado' : isCancelled ? 'Cancelada' : evt.type;
+                        const IconComp = isBooked ? CheckCircle2 : isDelivered ? PackageCheck : XCircle;
                         return (
                             <button
                                 key={evt.id}
@@ -176,17 +192,15 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
                                     if (onJumpToDay && evt.appointmentDate) onJumpToDay(evt.appointmentDate.slice(0, 10));
                                     onClose();
                                 }}
-                                className={`w-full text-left flex items-start gap-3 px-3 py-2.5 rounded-xl mb-1 transition border ${isBooked
-                                    ? (isDark ? 'border-emerald-700/30 bg-emerald-900/10 hover:bg-emerald-900/20' : 'border-emerald-100 bg-emerald-50/60 hover:bg-emerald-100')
-                                    : (isDark ? 'border-rose-700/30 bg-rose-900/10 hover:bg-rose-900/20' : 'border-rose-100 bg-rose-50/60 hover:bg-rose-100')}`}
+                                className={`w-full text-left flex items-start gap-3 px-3 py-2.5 rounded-xl mb-1 transition border ${palette.border} ${palette.bg}`}
                             >
-                                <div className={`mt-0.5 flex-shrink-0 ${isBooked ? (isDark ? 'text-emerald-400' : 'text-emerald-600') : (isDark ? 'text-rose-400' : 'text-rose-600')}`}>
-                                    {isBooked ? <CheckCircle2 className="w-5 h-5" /> : <XCircle className="w-5 h-5" />}
+                                <div className={`mt-0.5 flex-shrink-0 ${palette.icon}`}>
+                                    <IconComp className="w-5 h-5" />
                                 </div>
                                 <div className="flex-1 min-w-0">
                                     <div className="flex items-center gap-2 flex-wrap">
-                                        <span className={`text-sm font-bold ${isBooked ? (isDark ? 'text-emerald-300' : 'text-emerald-800') : (isDark ? 'text-rose-300' : 'text-rose-800')}`}>
-                                            {isBooked ? 'Nueva cita' : 'Cancelada'}
+                                        <span className={`text-sm font-bold ${palette.title}`}>
+                                            {title}
                                         </span>
                                         <span className={`text-sm font-semibold ${isDark ? 'text-slate-100' : 'text-slate-700'}`}>
                                             {evt.clientName || 'Sin nombre'}
