@@ -1667,6 +1667,7 @@ async function logAppointmentEvent(data: {
 // Best-effort: si la tabla no existe en Airtable, log a consola y seguimos.
 type AuditAction =
     | 'appointment.create' | 'appointment.update' | 'appointment.cancel' | 'appointment.delete'
+    | 'appointment.deliver' | 'appointment.undeliver'
     | 'contact.assign' | 'contact.unassign' | 'contact.status_change' | 'contact.update'
     | 'bot.toggle' | 'bot.config_update'
     | 'template.create' | 'template.delete'
@@ -5486,7 +5487,16 @@ app.get('/api/appointments', async (req, res) => {
                 // Tipo de servicio elegido (ej. "Avería", "Revisión"). Se
                 // guarda en el líder de cada bloque y lo usa el panel humano
                 // de Averías para filtrar citas que requieren llamada.
-                serviceType: (r.get('ServiceType') as string) || ''
+                serviceType: (r.get('ServiceType') as string) || '',
+                // Fecha en la que el coche fue entregado al cliente tras el
+                // servicio. Vacío = cita aún pendiente de entregar. Lo usa el
+                // panel "Pendientes de entrega" del calendario para filtrar
+                // citas Booked en el pasado sin DeliveredAt. También sirve de
+                // ancla para campañas postventa ("clientes con entrega hace X
+                // días"). Tolerante: si el campo no existe en Airtable, queda
+                // null y nada se rompe.
+                deliveredAt: (r.get('DeliveredAt') as string) || null,
+                deliveredBy: (r.get('DeliveredBy') as string) || ''
             };
         }));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
@@ -5857,6 +5867,177 @@ app.put('/api/appointments/:id', async (req, res) => {
 
         res.json({ success: true });
     } catch (e: any) { console.error('[API] Error PUT /appointments/:id:', e.message); res.status(400).json({ error: "Error updating" }); }
+});
+
+// === ENTREGA DE VEHÍCULO POSTVENTA ===
+// Marca una cita como "vehículo entregado". El campo DeliveredAt en la tabla
+// Appointments es el ancla temporal real para campañas postventa (encuesta de
+// satisfacción 3 días después, recordatorio de revisión anual a los 365 días,
+// etc). El cambio simultáneo de status del contacto a "Vehículo Entregado"
+// reutiliza handleContactStatusChange — que ya escribe delivery_date en
+// Contacts y dispara la secuencia postventa configurada.
+//
+// Idempotente: si la cita ya está marcada como entregada, devuelve 200 con
+// {alreadyDelivered: true} en lugar de error. Útil cuando dos trabajadores
+// pulsan "marcar entregado" a la vez.
+app.post('/api/appointments/:id/deliver', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    try {
+        const actor = String(req.body.actorUsername || 'system');
+        const rec = await base('Appointments').find(req.params.id);
+        const status = (rec.get('Status') as string) || '';
+        const existingDelivered = rec.get('DeliveredAt') as string;
+        const clientName = (rec.get('ClientName') as string) || '';
+        const clientPhone = cleanNumber((rec.get('ClientPhone') as string) || '');
+
+        // Solo se entregan citas reservadas con cliente real (líder de bloque).
+        if (status !== 'Booked' || !clientName.trim()) {
+            return res.status(400).json({
+                error: 'Solo se pueden marcar como entregadas las citas reservadas con cliente.'
+            });
+        }
+        if (existingDelivered) {
+            return res.json({ success: true, alreadyDelivered: true, deliveredAt: existingDelivered });
+        }
+
+        const now = new Date().toISOString();
+        // Tolerante: si el campo no existe aún en Airtable, devolvemos error
+        // claro pidiendo al admin que lo cree (lo contrario sería un 500 sin
+        // pista de qué hacer).
+        try {
+            await base('Appointments').update([{
+                id: req.params.id,
+                fields: { DeliveredAt: now, DeliveredBy: actor }
+            }]);
+        } catch (e: any) {
+            if (/DeliveredAt|DeliveredBy|unknown.*field/i.test(e.message || '')) {
+                return res.status(503).json({
+                    error: 'Los campos DeliveredAt (Date+time) y DeliveredBy (Single line text) no existen en la tabla Appointments. Créalos en Airtable para activar esta función.'
+                });
+            }
+            throw e;
+        }
+
+        // Cambiar status del contacto a "Vehículo Entregado" — esto dispara la
+        // secuencia postventa (delivery_date en Contacts + plantillas WhatsApp
+        // programadas vía schedulePostSaleSequence). Reutilizamos el handler
+        // existente para no duplicar lógica.
+        if (clientPhone) {
+            try {
+                const contacts = await base('Contacts').select({
+                    filterByFormula: `{phone}='${clientPhone}'`, maxRecords: 1
+                }).firstPage();
+                if (contacts.length > 0) {
+                    const contactRec = contacts[0];
+                    const oldStatus = (contactRec.get('status') as string) || '';
+                    if (oldStatus !== 'Vehículo Entregado') {
+                        await base('Contacts').update([{
+                            id: contactRec.id,
+                            fields: { status: 'Vehículo Entregado' }
+                        }]);
+                        // Dispara delivery_date + secuencia postventa
+                        await handleContactStatusChange(contactRec, oldStatus, 'Vehículo Entregado', clientPhone);
+                        io.emit('contact_updated_notification');
+                    }
+                }
+            } catch (contactErr: any) {
+                console.warn('[Deliver] No se pudo actualizar el contacto:', contactErr?.message);
+                // No bloqueamos la entrega por esto: la cita queda marcada,
+                // el contacto puede actualizarse a mano.
+            }
+        }
+
+        // Audit log + evento socket para refrescar calendarios abiertos
+        logAudit({
+            action: 'appointment.deliver', user: actor, targetType: 'appointment',
+            targetId: req.params.id, targetName: clientName,
+            summary: `Vehículo entregado: ${clientName} (cita ${req.params.id})`,
+            origin: 'web'
+        }).catch(() => {});
+
+        try {
+            io.emit('appointment_changed', { id: req.params.id, action: 'delivered' });
+        } catch (_) { /* nunca bloquear por socket */ }
+
+        res.json({ success: true, deliveredAt: now, deliveredBy: actor });
+    } catch (e: any) {
+        console.error('[API] Error POST /appointments/:id/deliver:', e.message);
+        res.status(500).json({ error: 'Error marcando entrega.' });
+    }
+});
+
+// Deshacer entrega — corrección de errores humanos. Borra DeliveredAt y
+// DeliveredBy, y revierte el status del contacto si seguía en "Vehículo
+// Entregado" (cancelando la secuencia postventa pendiente vía
+// handleContactStatusChange).
+app.post('/api/appointments/:id/undeliver', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    try {
+        const actor = String(req.body.actorUsername || 'system');
+        const rec = await base('Appointments').find(req.params.id);
+        const existingDelivered = rec.get('DeliveredAt') as string;
+        const clientName = (rec.get('ClientName') as string) || '';
+        const clientPhone = cleanNumber((rec.get('ClientPhone') as string) || '');
+
+        if (!existingDelivered) {
+            return res.json({ success: true, notDelivered: true });
+        }
+
+        try {
+            // Airtable acepta null en runtime para borrar fechas, pero el SDK
+            // de TS no lo permite en la firma. Cast a any es la salida limpia
+            // (typecast no aplica aquí porque no es coerción de tipo, es null).
+            await base('Appointments').update([{
+                id: req.params.id,
+                fields: { DeliveredAt: null, DeliveredBy: '' } as any
+            }]);
+        } catch (e: any) {
+            if (/DeliveredAt|DeliveredBy|unknown.*field/i.test(e.message || '')) {
+                return res.status(503).json({
+                    error: 'Los campos DeliveredAt/DeliveredBy no existen en Airtable.'
+                });
+            }
+            throw e;
+        }
+
+        // Revertir contacto a "Abierto" si seguía en "Vehículo Entregado"
+        if (clientPhone) {
+            try {
+                const contacts = await base('Contacts').select({
+                    filterByFormula: `{phone}='${clientPhone}'`, maxRecords: 1
+                }).firstPage();
+                if (contacts.length > 0) {
+                    const contactRec = contacts[0];
+                    const oldStatus = (contactRec.get('status') as string) || '';
+                    if (oldStatus === 'Vehículo Entregado') {
+                        await base('Contacts').update([{
+                            id: contactRec.id, fields: { status: 'Abierto' }
+                        }]);
+                        await handleContactStatusChange(contactRec, oldStatus, 'Abierto', clientPhone);
+                        io.emit('contact_updated_notification');
+                    }
+                }
+            } catch (contactErr: any) {
+                console.warn('[Undeliver] No se pudo actualizar el contacto:', contactErr?.message);
+            }
+        }
+
+        logAudit({
+            action: 'appointment.undeliver', user: actor, targetType: 'appointment',
+            targetId: req.params.id, targetName: clientName,
+            summary: `Entrega DESHECHA: ${clientName} (cita ${req.params.id})`,
+            origin: 'web'
+        }).catch(() => {});
+
+        try {
+            io.emit('appointment_changed', { id: req.params.id, action: 'undelivered' });
+        } catch (_) { /* */ }
+
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('[API] Error POST /appointments/:id/undeliver:', e.message);
+        res.status(500).json({ error: 'Error deshaciendo entrega.' });
+    }
 });
 
 app.delete('/api/appointments/:id', async (req, res) => {
@@ -9003,7 +9184,12 @@ app.get('/api/campaigns-contacts', async (req, res) => {
             // opted_out_notifications = campo antiguo (respaldo): si está activo, excluido de todo
             optedOutCampaigns: !!r.get('opted_out_campaigns') || !!r.get('opted_out_notifications'),
             optedOutReminders: !!r.get('opted_out_reminders') || !!r.get('opted_out_notifications'),
-            lastMessageTime: (r.get('last_message_time') as string) || null
+            lastMessageTime: (r.get('last_message_time') as string) || null,
+            // Fecha en la que se marcó al cliente como "Vehículo Entregado".
+            // Es el ancla real para campañas postventa por días desde entrega
+            // (encuesta de satisfacción, recordatorio de revisión anual, etc).
+            // Lo expone el frontend en el filtro nuevo "entregado hace X días".
+            deliveryDate: (r.get('delivery_date') as string) || null
         })).filter(c => c.phone);
         const filtered = onlyOptedIn ? list.filter(c => c.optInMarketing && !c.optedOutCampaigns) : list;
         res.json(filtered);

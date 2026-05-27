@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import {
     Calendar as CalendarIcon, Clock, Plus, Trash2, User, CheckCircle,
-    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History, Wrench
+    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History, Wrench,
+    PackageCheck, Search, RotateCcw
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -38,6 +39,13 @@ interface Appointment {
     // Se guarda en el líder del bloque. El panel "Averías" filtra por aquí
     // para mostrar al equipo humano las citas que requieren llamar al cliente.
     serviceType?: string;
+    // Fecha en la que el vehículo fue entregado al cliente (formato ISO).
+    // Null/vacío = aún pendiente de entrega. Cuando tiene valor, la cita
+    // desaparece del panel "Pendientes de entrega". También es el ancla real
+    // para campañas postventa por días desde la entrega.
+    deliveredAt?: string | null;
+    // Username del trabajador que marcó la entrega. Solo informativo.
+    deliveredBy?: string;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -149,6 +157,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Panel de Averías: muestra todas las citas Booked cuyo serviceType
     // contenga "avería" para que el equipo humano las llame y confirme duración.
     const [showBreakdownsModal, setShowBreakdownsModal] = useState(false);
+    // Panel "Pendientes de entrega": citas Booked en el pasado sin DeliveredAt.
+    // Sirve para que el trabajador marque qué vehículos ya se han entregado
+    // (sin tener que buscar la cita original en el calendario por fecha).
+    const [showPendingDeliveryModal, setShowPendingDeliveryModal] = useState(false);
+    const [deliverySearchQuery, setDeliverySearchQuery] = useState('');
+    const [deliveringId, setDeliveringId] = useState<string | null>(null); // spinner del botón
+    const [undeliveringId, setUndeliveringId] = useState<string | null>(null);
     const [draftAgendas, setDraftAgendas] = useState<Agenda[]>([]);
     const [savingAgendas, setSavingAgendas] = useState(false);
     const [agendaFilter, setAgendaFilter] = useState<string>('');  // '' = todas
@@ -769,6 +784,33 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         }).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
     })();
 
+    // Citas PENDIENTES DE ENTREGA: el coche aún no se ha devuelto al cliente.
+    //
+    // Criterio:
+    //  - status='Booked' (no canceladas, no plantillas Available)
+    //  - clientName no vacío (líder de bloque — descarta secundarios de avería)
+    //  - durationMin > 0 (refuerzo del criterio anterior)
+    //  - deliveredAt sin valor (aún no entregado)
+    //  - fecha de la cita en el pasado (no tiene sentido entregar antes)
+    //  - respeta filtros de agenda y línea de WhatsApp como el resto
+    //
+    // Sin filtro de cuántos días atrás: el usuario puede tener una cita de hace
+    // 2 meses sin marcar. Se muestra TODO el backlog para que pueda limpiarlo.
+    // El badge de antigüedad (verde/ámbar/rojo) avisa visualmente del retraso.
+    const pendingDeliveryAppointments = (() => {
+        const now = Date.now();
+        return appointments.filter(a => {
+            if (a.status !== 'Booked') return false;
+            if (!a.clientName || !a.clientName.trim()) return false;
+            if ((a.durationMin || 0) <= 0) return false;
+            if (a.deliveredAt) return false; // ya entregada
+            if (new Date(a.date).getTime() > now) return false; // cita futura, no se puede entregar aún
+            if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
+            if (selectedAccountId && a.originPhoneId && a.originPhoneId !== selectedAccountId) return false;
+            return true;
+        }).sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime()); // más reciente arriba
+    })();
+
     // Lunes de la semana que contiene `date`
     const getWeekStart = (date: Date) => {
         const d = new Date(date.getFullYear(), date.getMonth(), date.getDate());
@@ -1027,6 +1069,20 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 {breakdownAppointments.length > 0 && (
                                     <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-amber-500 text-amber-950' : 'bg-amber-600 text-white'}`}>
                                         {breakdownAppointments.length}
+                                    </span>
+                                )}
+                            </button>
+                            {/* Panel "Pendientes de entrega": citas Booked en el pasado sin DeliveredAt */}
+                            <button
+                                onClick={() => setShowPendingDeliveryModal(true)}
+                                className={`relative px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-emerald-300 bg-emerald-900/30 hover:bg-emerald-900/50' : 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100'}`}
+                                title="Marcar como entregadas las citas cuyos vehículos ya se han devuelto al cliente"
+                            >
+                                <PackageCheck size={18} />
+                                <span className="hidden md:inline">Entregas</span>
+                                {pendingDeliveryAppointments.length > 0 && (
+                                    <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-emerald-500 text-emerald-950' : 'bg-emerald-600 text-white'}`}>
+                                        {pendingDeliveryAppointments.length}
                                     </span>
                                 )}
                             </button>
@@ -2104,6 +2160,229 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     </div>
                 </div>
             )}
+
+            {/* Panel "Pendientes de entrega": citas Booked en el pasado sin
+                DeliveredAt. Buscador por teléfono/nombre/matrícula y botón
+                "Marcar entregado" que llama POST /api/appointments/:id/deliver.
+                Tras marcar, la fila desaparece (la cita ya tiene deliveredAt). */}
+            {showPendingDeliveryModal && (() => {
+                // Filtro local por texto: teléfono / nombre / matrícula
+                const q = deliverySearchQuery.trim().toLowerCase();
+                const filtered = q
+                    ? pendingDeliveryAppointments.filter(a =>
+                        (a.clientPhone || '').toLowerCase().includes(q) ||
+                        (a.clientName || '').toLowerCase().includes(q) ||
+                        (a.matricula || '').toLowerCase().includes(q)
+                    )
+                    : pendingDeliveryAppointments;
+
+                const markDelivered = async (apptId: string, clientName: string) => {
+                    if (!confirm(`¿Confirmas que has entregado el vehículo de ${clientName}?\n\nEsto disparará la secuencia postventa (encuesta + recordatorios).`)) return;
+                    setDeliveringId(apptId);
+                    try {
+                        const r = await fetch(`${API_URL}/appointments/${apptId}/deliver`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ actorUsername: getCurrentUsername() })
+                        });
+                        const data = await r.json();
+                        if (!r.ok) {
+                            alert(`No se pudo marcar como entregada:\n${data.error || 'Error desconocido'}`);
+                        } else {
+                            // Refrescar lista. El socket appointment_changed ya
+                            // hará lo suyo, pero forzamos para que sea instantáneo.
+                            await fetchData();
+                        }
+                    } catch (e: any) {
+                        alert('Error de red marcando entrega: ' + (e?.message || e));
+                    } finally {
+                        setDeliveringId(null);
+                    }
+                };
+
+                return (
+                    <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center p-2 md:p-4 bg-black/60 backdrop-blur-sm overflow-y-auto" onClick={() => { setShowPendingDeliveryModal(false); setDeliverySearchQuery(''); }}>
+                        <div
+                            onClick={e => e.stopPropagation()}
+                            className={`w-full max-w-3xl rounded-2xl shadow-2xl my-4 ${isDark ? 'bg-slate-900 border border-slate-700' : 'bg-white border border-slate-200'}`}
+                        >
+                            {/* Cabecera */}
+                            <div className={`flex items-center justify-between p-4 md:p-5 border-b ${isDark ? 'border-slate-700' : 'border-slate-200'}`}>
+                                <div className="flex items-center gap-3 min-w-0">
+                                    <div className={`p-2 rounded-xl flex-shrink-0 ${isDark ? 'bg-emerald-900/40 text-emerald-300' : 'bg-emerald-100 text-emerald-700'}`}>
+                                        <PackageCheck size={20} />
+                                    </div>
+                                    <div className="min-w-0">
+                                        <h3 className={`text-base md:text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Pendientes de entrega</h3>
+                                        <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                            {pendingDeliveryAppointments.length === 0
+                                                ? 'No hay vehículos pendientes de entregar.'
+                                                : `${pendingDeliveryAppointments.length} cita${pendingDeliveryAppointments.length === 1 ? '' : 's'} pendiente${pendingDeliveryAppointments.length === 1 ? '' : 's'} · marca como entregado al devolver el vehículo`}
+                                        </p>
+                                    </div>
+                                </div>
+                                <button
+                                    onClick={() => { setShowPendingDeliveryModal(false); setDeliverySearchQuery(''); }}
+                                    className={`p-2 rounded-lg transition flex-shrink-0 ${isDark ? 'hover:bg-slate-700 text-slate-300' : 'hover:bg-slate-100 text-slate-600'}`}
+                                    title="Cerrar"
+                                >
+                                    <X size={20} />
+                                </button>
+                            </div>
+
+                            {/* Buscador */}
+                            {pendingDeliveryAppointments.length > 0 && (
+                                <div className={`px-4 md:px-5 pt-4 pb-2`}>
+                                    <div className={`flex items-center gap-2 rounded-xl border px-3 py-2 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                        <Search size={16} className={isDark ? 'text-slate-400' : 'text-slate-500'} />
+                                        <input
+                                            type="text"
+                                            value={deliverySearchQuery}
+                                            onChange={e => setDeliverySearchQuery(e.target.value)}
+                                            placeholder="Buscar por teléfono, nombre o matrícula..."
+                                            className={`flex-1 bg-transparent outline-none text-sm ${isDark ? 'text-white placeholder:text-slate-500' : 'text-slate-800 placeholder:text-slate-400'}`}
+                                            autoFocus
+                                        />
+                                        {deliverySearchQuery && (
+                                            <button
+                                                onClick={() => setDeliverySearchQuery('')}
+                                                className={`p-0.5 rounded ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-500'}`}
+                                                title="Limpiar"
+                                            >
+                                                <X size={14} />
+                                            </button>
+                                        )}
+                                    </div>
+                                </div>
+                            )}
+
+                            {/* Lista */}
+                            <div className="p-3 md:p-5 max-h-[65vh] overflow-y-auto">
+                                {pendingDeliveryAppointments.length === 0 ? (
+                                    <div className={`text-center py-12 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                        <PackageCheck size={40} className="mx-auto mb-3 opacity-30" />
+                                        <p className="text-sm">Todos los vehículos están entregados.</p>
+                                        <p className="text-xs mt-1 opacity-70">Aquí aparecerán las citas pasadas que aún no estén marcadas como entregadas.</p>
+                                    </div>
+                                ) : filtered.length === 0 ? (
+                                    <div className={`text-center py-12 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                        <Search size={40} className="mx-auto mb-3 opacity-30" />
+                                        <p className="text-sm">Ningún resultado para "{deliverySearchQuery}".</p>
+                                    </div>
+                                ) : (
+                                    <div className="space-y-2">
+                                        {filtered.map(b => {
+                                            const dt = new Date(b.date);
+                                            const dateStr = dt.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' });
+                                            const timeStr = formatTimeRange(b.date, b.durationMin);
+                                            const daysAgo = Math.floor((Date.now() - dt.getTime()) / (24 * 60 * 60 * 1000));
+                                            // Badge de antigüedad: <7 días neutro, 7-15 ámbar, >15 rojo
+                                            const ageClass = daysAgo > 15
+                                                ? (isDark ? 'bg-red-900/40 text-red-300' : 'bg-red-100 text-red-700')
+                                                : daysAgo > 7
+                                                    ? (isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700')
+                                                    : (isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-600');
+                                            const ageLabel = daysAgo === 0 ? 'Hoy' : daysAgo === 1 ? 'Ayer' : `Hace ${daysAgo} días`;
+                                            const isAveria = isBreakdownService(b.serviceType);
+                                            return (
+                                                <div
+                                                    key={b.id}
+                                                    className={`rounded-xl p-3 md:p-4 border transition ${isDark
+                                                        ? 'bg-slate-800/60 border-slate-700 hover:border-emerald-700'
+                                                        : 'bg-emerald-50/40 border-emerald-100 hover:border-emerald-300'
+                                                        }`}
+                                                >
+                                                    <div className="flex flex-col md:flex-row md:items-center gap-3">
+                                                        {/* Fecha + antigüedad */}
+                                                        <div className="flex-shrink-0 md:w-32">
+                                                            <div className={`text-xs uppercase font-semibold ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}>
+                                                                {dateStr}
+                                                            </div>
+                                                            <div className={`text-sm font-mono font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                                {timeStr}
+                                                            </div>
+                                                            <span className={`inline-block mt-1 text-[10px] font-bold px-1.5 py-0.5 rounded ${ageClass}`}>
+                                                                {ageLabel}
+                                                            </span>
+                                                        </div>
+
+                                                        {/* Datos del cliente y vehículo */}
+                                                        <div className="flex-1 min-w-0">
+                                                            <div className={`font-semibold truncate flex items-center gap-1.5 ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                                                <User size={14} className="inline opacity-60" />
+                                                                {b.clientName || 'Cliente sin nombre'}
+                                                                {isAveria && (
+                                                                    <span className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${isDark ? 'bg-amber-900/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}>
+                                                                        Avería
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            {b.clientPhone && (
+                                                                <a
+                                                                    href={`tel:${b.clientPhone}`}
+                                                                    className={`inline-flex items-center gap-1 text-sm mt-0.5 hover:underline ${isDark ? 'text-emerald-400' : 'text-emerald-700'}`}
+                                                                    title="Llamar al cliente"
+                                                                >
+                                                                    <Phone size={13} />
+                                                                    {b.clientPhone}
+                                                                </a>
+                                                            )}
+                                                            {(b.matricula || b.marca || b.modelo) && (
+                                                                <div className={`text-xs mt-1 truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                                    {[b.matricula, b.marca, b.modelo].filter(Boolean).join(' · ')}
+                                                                </div>
+                                                            )}
+                                                            {b.agenda && (
+                                                                <div className="flex items-center gap-1 mt-1">
+                                                                    <span className="inline-block w-2 h-2 rounded-full" style={{ backgroundColor: agendaColor(b.agenda) }} />
+                                                                    <span className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{b.agenda}</span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        {/* Acciones */}
+                                                        <div className="flex flex-col gap-1.5 flex-shrink-0">
+                                                            <button
+                                                                onClick={() => markDelivered(b.id, b.clientName || 'este cliente')}
+                                                                disabled={deliveringId === b.id}
+                                                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
+                                                                title="Marcar vehículo como entregado al cliente"
+                                                            >
+                                                                {deliveringId === b.id
+                                                                    ? (<><Loader2 size={13} className="animate-spin" />Marcando...</>)
+                                                                    : (<><CheckCircle size={13} />Marcar entregado</>)}
+                                                            </button>
+                                                            <button
+                                                                onClick={() => {
+                                                                    setShowPendingDeliveryModal(false);
+                                                                    setDeliverySearchQuery('');
+                                                                    setCurrentDate(new Date(dt.getFullYear(), dt.getMonth(), dt.getDate()));
+                                                                    setViewMode('day');
+                                                                    handleOpenEdit(b);
+                                                                }}
+                                                                className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 ${isDark ? 'bg-slate-700 hover:bg-slate-600 text-slate-200' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
+                                                                title="Abrir cita en el calendario"
+                                                            >
+                                                                <Eye size={13} />
+                                                                Ver cita
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                )}
+                            </div>
+
+                            {/* Pie informativo */}
+                            <div className={`px-4 md:px-5 py-3 border-t text-[11px] ${isDark ? 'border-slate-700 text-slate-500' : 'border-slate-200 text-slate-500'}`}>
+                                💡 Al marcar como entregado se activan los recordatorios postventa automáticos (encuesta, próxima revisión...) según la configuración del bot.
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
         </div>
     );
 };

@@ -77,6 +77,10 @@ interface ContactForCampaign {
     optedOutCampaigns: boolean;
     optedOutReminders: boolean;
     lastMessageTime: string | null;
+    // Fecha en la que se marcó el "Vehículo Entregado" (delivery_date en
+    // Airtable). Sirve para filtrar destinatarios postventa por días desde
+    // la entrega (encuesta T+3, recordatorio revisión T+365, etc).
+    deliveryDate?: string | null;
 }
 
 interface MetaTemplate {
@@ -856,6 +860,11 @@ const CampaignWizard: React.FC<{
     const [contactFilterTag, setContactFilterTag] = useState<string>('');
     const [contactFilterDept, setContactFilterDept] = useState<string>('');
     const [contactFilterOptIn, setContactFilterOptIn] = useState<boolean>(true);
+    // Rango "vehículo entregado hace entre MIN y MAX días". '' = sin filtro.
+    // Casos típicos: 3-7 días (encuesta satisfacción), 350-380 días (revisión
+    // anual), 170-190 días (cambio neumáticos cada 6 meses).
+    const [contactFilterDeliveredMinDays, setContactFilterDeliveredMinDays] = useState<string>('');
+    const [contactFilterDeliveredMaxDays, setContactFilterDeliveredMaxDays] = useState<string>('');
 
     // Cargar plantillas + cuentas WhatsApp al iniciar
     useEffect(() => {
@@ -906,14 +915,25 @@ const CampaignWizard: React.FC<{
 
     // Contactos filtrados
     const filteredContacts = useMemo(() => {
+        const minD = contactFilterDeliveredMinDays !== '' ? Number(contactFilterDeliveredMinDays) : null;
+        const maxD = contactFilterDeliveredMaxDays !== '' ? Number(contactFilterDeliveredMaxDays) : null;
         return contacts.filter(c => {
             if (contactFilterOptIn && (!c.optInMarketing || c.optedOutCampaigns)) return false;
             if (contactSearch && !(c.name?.toLowerCase().includes(contactSearch.toLowerCase()) || c.phone.includes(contactSearch))) return false;
             if (contactFilterTag && !(c.tags || []).includes(contactFilterTag)) return false;
             if (contactFilterDept && c.department !== contactFilterDept) return false;
+            // Filtro "vehículo entregado hace entre MIN y MAX días". Si solo se
+            // rellena uno, el otro queda abierto. Si el contacto no tiene
+            // delivery_date, se excluye automáticamente cuando hay filtro.
+            if (minD !== null || maxD !== null) {
+                if (!c.deliveryDate) return false;
+                const ageDays = Math.floor((Date.now() - new Date(c.deliveryDate).getTime()) / 86400000);
+                if (minD !== null && ageDays < minD) return false;
+                if (maxD !== null && ageDays > maxD) return false;
+            }
             return true;
         });
-    }, [contacts, contactSearch, contactFilterTag, contactFilterDept, contactFilterOptIn]);
+    }, [contacts, contactSearch, contactFilterTag, contactFilterDept, contactFilterOptIn, contactFilterDeliveredMinDays, contactFilterDeliveredMaxDays]);
 
     // Variables detectadas en la plantilla seleccionada
     const selectedTemplate = useMemo(() => templates.find(t => t.name === templateName), [templates, templateName]);
@@ -1103,6 +1123,8 @@ const CampaignWizard: React.FC<{
                             filterTag={contactFilterTag} setFilterTag={setContactFilterTag}
                             filterDept={contactFilterDept} setFilterDept={setContactFilterDept}
                             filterOptIn={contactFilterOptIn} setFilterOptIn={setContactFilterOptIn}
+                            filterDeliveredMinDays={contactFilterDeliveredMinDays} setFilterDeliveredMinDays={setContactFilterDeliveredMinDays}
+                            filterDeliveredMaxDays={contactFilterDeliveredMaxDays} setFilterDeliveredMaxDays={setContactFilterDeliveredMaxDays}
                             allTags={allTags} allDepartments={allDepartments}
                             totalAvailable={contacts.length}
                         />
@@ -1290,7 +1312,10 @@ const Step2Variables: React.FC<any> = ({ isDark, variables, setVariables, templa
 const Step3Recipients: React.FC<any> = ({
     isDark, contacts, loading, recipients, setRecipients,
     search, setSearch, filterTag, setFilterTag, filterDept, setFilterDept,
-    filterOptIn, setFilterOptIn, allTags, allDepartments, totalAvailable
+    filterOptIn, setFilterOptIn,
+    filterDeliveredMinDays, setFilterDeliveredMinDays,
+    filterDeliveredMaxDays, setFilterDeliveredMaxDays,
+    allTags, allDepartments, totalAvailable
 }) => {
     const allSelected = contacts.length > 0 && contacts.every((c: any) => recipients.includes(c.phone));
     const toggleAll = () => {
@@ -1342,6 +1367,46 @@ const Step3Recipients: React.FC<any> = ({
                     <input type="checkbox" checked={filterOptIn} onChange={(e) => setFilterOptIn(e.target.checked)} />
                     Solo opt-in
                 </label>
+            </div>
+
+            {/* Filtro postventa: "vehículo entregado hace entre X y Y días".
+                Si los dos quedan vacíos no se aplica. Si solo uno, el otro
+                queda abierto. Casos típicos: 3-7 días encuesta de satisfacción,
+                170-190 cambio de neumáticos, 350-380 revisión anual. */}
+            <div className={`p-3 rounded-lg border ${isDark ? 'bg-emerald-500/5 border-emerald-500/20 text-slate-300' : 'bg-emerald-50 border-emerald-200 text-slate-700'}`}>
+                <div className="flex items-center gap-2 mb-2">
+                    <span className="text-xs font-semibold">📦 Postventa — vehículo entregado hace</span>
+                    <span className="text-[10px] text-slate-500">(opcional)</span>
+                </div>
+                <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="text-xs">entre</span>
+                    <input
+                        type="number" min="0" placeholder="min"
+                        value={filterDeliveredMinDays}
+                        onChange={(e) => setFilterDeliveredMinDays(e.target.value)}
+                        className={`w-20 px-2 py-1.5 rounded text-sm border ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}
+                    />
+                    <span className="text-xs">y</span>
+                    <input
+                        type="number" min="0" placeholder="max"
+                        value={filterDeliveredMaxDays}
+                        onChange={(e) => setFilterDeliveredMaxDays(e.target.value)}
+                        className={`w-20 px-2 py-1.5 rounded text-sm border ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`}
+                    />
+                    <span className="text-xs">días</span>
+                    {(filterDeliveredMinDays !== '' || filterDeliveredMaxDays !== '') && (
+                        <button
+                            type="button"
+                            onClick={() => { setFilterDeliveredMinDays(''); setFilterDeliveredMaxDays(''); }}
+                            className={`text-xs px-2 py-1 rounded ${isDark ? 'bg-slate-700 hover:bg-slate-600 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}
+                        >
+                            Limpiar
+                        </button>
+                    )}
+                    <div className="text-[10px] text-slate-500 w-full mt-1">
+                        💡 Ejemplos: <strong>3-7</strong> encuesta · <strong>170-190</strong> cambio neumáticos · <strong>350-380</strong> revisión anual
+                    </div>
+                </div>
             </div>
 
             {/* Resumen + Toggle todos */}
