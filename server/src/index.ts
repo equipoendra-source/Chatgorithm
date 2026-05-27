@@ -931,14 +931,17 @@ async function saveWebPushSubscriptionToAirtable(username: string, _subscription
         }
 
         const subscriptionData = JSON.stringify(list);
+        // Solo usamos los campos que existen en la tabla Airtable
+        // (username + subscription). Los timestamps createdAt/updatedAt no
+        // existen y rompían el persistir con "Unknown field name".
         if (existing.length > 0) {
             await base('WebPushSubscriptions').update([{
                 id: existing[0].id,
-                fields: { subscription: subscriptionData, updatedAt: new Date().toISOString() }
+                fields: { subscription: subscriptionData }
             }]);
         } else {
             await base('WebPushSubscriptions').create([{
-                fields: { username, subscription: subscriptionData, createdAt: new Date().toISOString() }
+                fields: { username, subscription: subscriptionData }
             }]);
         }
         console.log(`🌐 [WebPush] Persistidas ${list.length} suscripción(es) para ${username}`);
@@ -7930,6 +7933,44 @@ app.get('/api/debug/agent-card-preview', async (req, res) => {
         const name = (req.query.name as string) || 'Paco';
         const url = await generateAgentCard(name);
         res.redirect(url);
+    } catch (e: any) {
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// --- DEBUG: verificar si las claves VAPID son un par válido + generar uno nuevo ---
+// Si las claves del servidor están desemparejadas (pública y privada no son
+// el mismo par), TODOS los pushes fallan con 401 aunque el cliente use la
+// pública correcta del servidor. Este endpoint detecta ese fallo y permite
+// generar un par nuevo para copiar a Render.
+app.get('/api/debug/vapid-info', (_req, res) => {
+    const pub = process.env.VAPID_PUBLIC_KEY || '';
+    const priv = process.env.VAPID_PRIVATE_KEY || '';
+    // Generar un par nuevo solo para mostrar el formato esperado
+    let freshPair: any = null;
+    try { freshPair = webpush.generateVAPIDKeys(); } catch (e: any) { freshPair = { error: e.message }; }
+    res.json({
+        currentPublic: pub,
+        currentPublicLen: pub.length,
+        currentPrivateLen: priv.length,
+        webPushEnabled,
+        note: 'Si los pushes dan 401 a pesar de tener la suscripción válida, las dos claves no son un par. Usa freshPair para generar uno nuevo.',
+        freshPair
+    });
+});
+
+// --- DEBUG: limpiar suscripciones de un usuario (memoria + Airtable) ---
+// Útil cuando hay que forzar re-suscripción desde cero.
+app.post('/api/debug/clear-push/:username', async (req, res) => {
+    const username = req.params.username;
+    pushSubscriptions.delete(username);
+    try {
+        const existing = await base('WebPushSubscriptions').select({
+            filterByFormula: `{username} = '${username}'`,
+            maxRecords: 1
+        }).firstPage();
+        if (existing.length > 0) await base('WebPushSubscriptions').destroy([existing[0].id]);
+        res.json({ success: true, username, message: `Suscripciones de ${username} eliminadas (memoria + Airtable)` });
     } catch (e: any) {
         res.status(500).json({ error: e.message });
     }
