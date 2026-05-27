@@ -1474,6 +1474,21 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 <div className="text-sm text-slate-500 font-medium uppercase tracking-wide mt-1">
                                     {new Date(selectedAppt.date).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' })}
                                 </div>
+                                {/* Badge del tipo de servicio (Avería / Reparación / Revisión…)
+                                    para que el trabajador sepa de un vistazo qué tipo de cita es
+                                    sin tener que mirar el panel de Averías o la agenda. Resaltado
+                                    en ámbar si es Avería porque requiere llamar al cliente. */}
+                                {selectedAppt.status === 'Booked' && selectedAppt.serviceType && (
+                                    <div className="mt-3 flex items-center justify-center">
+                                        <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide border ${isBreakdownService(selectedAppt.serviceType)
+                                            ? (isDark ? 'bg-amber-900/30 text-amber-300 border-amber-700' : 'bg-amber-100 text-amber-800 border-amber-300')
+                                            : (isDark ? 'bg-blue-900/30 text-blue-300 border-blue-700' : 'bg-blue-100 text-blue-800 border-blue-300')}`}>
+                                            {isBreakdownService(selectedAppt.serviceType) ? <Wrench size={12} /> : <CalendarIcon size={12} />}
+                                            {selectedAppt.serviceType}
+                                            {selectedAppt.durationMin ? ` · ${selectedAppt.durationMin >= 60 ? `${Math.floor(selectedAppt.durationMin / 60)}h${selectedAppt.durationMin % 60 ? ` ${selectedAppt.durationMin % 60}min` : ''}` : `${selectedAppt.durationMin}min`}` : ''}
+                                        </span>
+                                    </div>
+                                )}
                             </div>
 
                             <div>
