@@ -3708,11 +3708,23 @@ async function getClientVehicles(clientPhone: string): Promise<string> {
     }
 }
 
-// Da de baja un vehículo del cliente (soft delete: Active=false).
-// Usado por Laura cuando el cliente pide "dame de baja el coche X" / "ya no tengo
-// el coche con matrícula Y". La búsqueda es por teléfono + matrícula normalizada
-// (mayúsculas, sin espacios) para que "1140 csj" empareje con "1140CSJ".
-// Devuelve un mensaje legible para que el bot lo confirme al cliente.
+// Da de baja un vehículo del cliente. HARD DELETE en Airtable.
+//
+// Por qué hard delete y no soft delete: el campo Active es un checkbox de
+// Airtable. En su lenguaje de fórmulas un checkbox DESMARCADO y un checkbox
+// NUNCA TOCADO son indistinguibles — ambos evalúan a BLANK, no a FALSE.
+// El cliente JS de Airtable los expone igual (undefined en ambos casos).
+// Como necesitamos mantener el filtro tolerante `OR(TRUE, BLANK)` para los
+// vehículos legacy (registros antiguos donde el campo Active aún no existía),
+// un soft-delete con Active=false los dejaría dentro del filtro al quedar
+// como BLANK → reaparecerían en la siguiente consulta y Laura se contradiría
+// ("he dado de baja el Mercedes... veo que tiene registrados: Mercedes").
+//
+// Destruir el record es la única forma fiable de hacerlo desaparecer sin
+// tocar el schema de Airtable. Si el cliente se equivoca y quiere recuperar
+// el coche, vuelve a registrarlo con register_vehicle (es lo que el prompt
+// le dice a Laura ya). Airtable conserva el record en la papelera ~7 días
+// por si hay que recuperarlo manualmente desde el panel.
 async function unregisterVehicle(clientPhone: string, plate: string): Promise<string> {
     if (!base) return "Error técnico al dar de baja el vehículo.";
     const clean = cleanNumber(clientPhone);
@@ -3721,21 +3733,25 @@ async function unregisterVehicle(clientPhone: string, plate: string): Promise<st
     if (!matricula) return "Error: el cliente no ha indicado matrícula. Pídesela antes de volver a llamar a esta función.";
     try {
         const records = await base(TABLE_VEHICLES).select({
-            // Active=TRUE() OR BLANK → coherente con getClientVehicles. Sin esto,
-            // un vehículo legacy que el cliente sí ve listado no se podría dar
-            // de baja, lo que confundiría al cliente ("lo veo pero no se borra").
+            // Tolerante a Active=BLANK (legacy). Cualquier record que coincida
+            // por teléfono+matrícula se considera candidato a borrado, salvo
+            // los que tengan Active explícitamente FALSE (no se dan en la
+            // práctica desde que el soft-delete dejó de usarse, pero por si
+            // queda alguno residual: NOT({Active}=FALSE() ) no funciona aquí
+            // por el motivo del comentario de arriba, así que basta con incluir
+            // TRUE y BLANK).
             filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(matricula)}', OR({Active}=TRUE(), {Active}=BLANK()))`,
             maxRecords: 1
         }).firstPage();
         if (records.length === 0) {
             console.log(`🚗 [Vehicles] Baja solicitada pero sin coincidencia: ${matricula} (${clean})`);
-            return `No encontré ningún vehículo activo con matrícula ${matricula} para este cliente. Si la matrícula es correcta puede que ya estuviera dado de baja. Llama a get_client_vehicles para ver la lista actualizada y confirma con el cliente cuál quiere dar de baja.`;
+            return `No encontré ningún vehículo con matrícula ${matricula} para este cliente. Si la matrícula es correcta puede que ya estuviera dado de baja. Llama a get_client_vehicles para ver la lista actualizada y confirma con el cliente cuál quiere dar de baja.`;
         }
         const rec = records[0]!;
         const marca = (rec.get('Marca') as string) || '';
         const modelo = (rec.get('Modelo') as string) || '';
-        await base(TABLE_VEHICLES).update([{ id: rec.id, fields: { Active: false } }]);
-        console.log(`🚗 [Vehicles] Vehículo dado de baja: ${matricula} (${clean})`);
+        await base(TABLE_VEHICLES).destroy([rec.id]);
+        console.log(`🚗 [Vehicles] Vehículo dado de baja (hard delete): ${matricula} (${clean})`);
         const desc = [marca, modelo].filter(Boolean).join(' ').trim() || 'vehículo';
         return `✅ Vehículo dado de baja: ${desc} (matrícula ${matricula}). Confirma al cliente que ya no aparece en su lista y, si quiere, ofrécele consultar los vehículos que le quedan o registrar uno nuevo. NO llames a stop_conversation — sigue la conversación normalmente.`;
     } catch (e: any) {
@@ -4417,7 +4433,7 @@ Cuando el cliente diga que ya no tiene un coche (lo vendió, lo dio de baja, lo 
 3. Si el cliente solo tiene 1 vehículo registrado y pide "dame de baja mi coche", úsalo directamente.
 4. NUNCA inventes una matrícula — si no estás 100% seguro, pregunta antes de llamar a la tool.
 5. Tras dar de baja, confirma al cliente que el vehículo ya no aparece en su lista. NO llames a stop_conversation — continúa la conversación.
-6. unregister_vehicle es una desactivación reversible (el dato no se borra del histórico, solo se oculta). Si el cliente se equivoca y quiere recuperar el coche, puede volver a registrarlo con register_vehicle.`;
+6. unregister_vehicle elimina el vehículo de la lista del cliente. Si el cliente se equivoca y quiere recuperar el coche, simplemente pídele los datos otra vez y vuelve a registrarlo con register_vehicle.`;
 
             // Instrucciones de derivación a departamentos — dinámicas según config del cliente
             // Laura llamará a assign_department con uno de estos nombres exactos (N dinámico).
@@ -8804,14 +8820,19 @@ app.get('/api/contacts/:phone/vehicles', async (req, res) => {
     }
 });
 
-// Desactivar (borrar suave) un vehículo del cliente desde el panel
+// Borrar un vehículo del cliente desde el panel del CRM. HARD DELETE.
+// Ver comentario largo en unregisterVehicle() sobre por qué no usamos soft
+// delete: un checkbox desmarcado en Airtable es indistinguible de uno nunca
+// tocado, así que Active=false reaparecería en el filtro `OR(TRUE, BLANK)`
+// que necesitamos mantener por compatibilidad con vehículos legacy. La
+// papelera de Airtable conserva el record ~7 días por si hay que recuperarlo.
 app.delete('/api/contacts/:phone/vehicles/:id', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     try {
-        await base(TABLE_VEHICLES).update([{ id: req.params.id, fields: { Active: false } }]);
+        await base(TABLE_VEHICLES).destroy([req.params.id]);
         res.json({ success: true });
     } catch (e: any) {
-        console.error('[Vehicles] Error al desactivar vehículo:', e.message);
+        console.error('[Vehicles] Error al borrar vehículo:', e.message);
         res.status(500).json({ error: e.message });
     }
 });
