@@ -1413,7 +1413,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                         <div className="p-6 space-y-4 overflow-y-auto flex-1">
                             <div className={`text-center mb-6 p-4 rounded-xl border ${isDark ? 'bg-slate-900 border-slate-700' : 'bg-slate-50 border-slate-100'}`}>
                                 <div className={`text-2xl font-bold font-mono ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                                    {formatTimeRange(selectedAppt.date)}
+                                    {/* Pasamos durationMin para que un bloque multi-slot
+                                        (ej. Avería 2h en 2 huecos de 1h) muestre "13:00 - 15:00"
+                                        en lugar de "13:00 - 14:00". Sin esto el header del modal
+                                        contradecía visualmente el chip del calendario. */}
+                                    {formatTimeRange(selectedAppt.date, selectedAppt.durationMin)}
                                 </div>
                                 <div className="text-sm text-slate-500 font-medium uppercase tracking-wide mt-1">
                                     {new Date(selectedAppt.date).toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long' })}
