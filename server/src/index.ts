@@ -2131,8 +2131,12 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
         // Buscar datos del vehículo en la última cita
         let vehicleDesc = 'vehículo';
         try {
+            // Filtramos por {ClientName}!='' para coger el LÍDER de un bloque
+            // multi-slot. Sin esto, una avería de 4h devolvía el último slot
+            // secundario (sin Marca/Modelo) y el cliente recibía la secuencia
+            // postventa diciendo "su vehículo" en vez de "su Mazda 2".
             const appts = await base('Appointments').select({
-                filterByFormula: `AND({ClientPhone}='${clean}', {Status}='Booked')`,
+                filterByFormula: `AND({ClientPhone}='${clean}', {Status}='Booked', {ClientName}!='')`,
                 sort: [{ field: 'Date', direction: 'desc' }], maxRecords: 1
             }).firstPage();
             if (appts.length > 0) {
@@ -2217,8 +2221,14 @@ async function runNotificationScheduler() {
         // ============================================
         // FASE 1: Recordatorios de citas (T-24h, T-1h)
         // ============================================
+        // IMPORTANTE: filtramos por {ClientName}!='' para coger SOLO los líderes
+        // de bloque. Una cita multi-slot (Avería 4h) ocupa 4 filas en Airtable:
+        // 1 líder con ClientName + DurationMin=240, y 3 secundarios sólo con
+        // Status=Booked + ClientPhone (sin ClientName). Sin este filtro, el
+        // cliente recibiría 4 recordatorios para la misma cita y los 3
+        // secundarios saldrían "Hola cliente" (sin nombre) con horas erróneas.
         const bookedAppts = await base('Appointments').select({
-            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='')`
+            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='', {ClientName}!='')`
         }).all();
 
         for (const appt of bookedAppts) {
@@ -6354,6 +6364,10 @@ app.get('/api/analytics', async (req, res) => {
             const monthBooked = allAppts.filter(a => {
                 const d = a.get('Date') as string;
                 if (!d || a.get('Status') !== 'Booked') return false;
+                // Solo líderes de bloque (ClientName no vacío). Sin este filtro,
+                // una avería multi-slot contaría 4 veces en el total y deflataría
+                // el % de incidentes (que solo marca el líder).
+                if (!a.get('ClientName')) return false;
                 return madridDay(new Date(d)).slice(0, 7) === monthKey;
             });
             const incCount = monthBooked.filter(a => !!a.get('Incident')).length;
@@ -6487,6 +6501,10 @@ app.get('/api/analytics', async (req, res) => {
         accountIds.forEach(id => { incidentsByAccount[id] = { total: 0, incidents: 0 }; });
         allAppts.forEach(a => {
             if (a.get('Status') !== 'Booked') return;
+            // Solo líderes de bloque: una avería multi-slot ocupa 4 filas pero
+            // es UNA cita. Sin este filtro las cards por cuenta mostraban 4×
+            // las citas reales para clientes con avería.
+            if (!a.get('ClientName')) return;
             const cp = cleanNumber((a.get('ClientPhone') as string) || '');
             if (!cp) return;
             const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
@@ -6595,9 +6613,11 @@ function computeConversionKpis(contacts: readonly any[], messages: readonly any[
     });
 
     // Indexar primera cita Booked por phone (también con last9 para alinear)
+    // Solo líderes de bloque para no incluir secundarios de citas multi-slot.
     const firstBookingByPhone: Record<string, number> = {};
     appts.forEach(a => {
         if (a.get('Status') !== 'Booked') return;
+        if (!a.get('ClientName')) return;
         const cp = (a.get('ClientPhone') as string) || '';
         if (!cp) return;
         const dateStr = a.get('Date') as string;
@@ -7814,8 +7834,10 @@ app.get('/api/debug/notif-scheduler', async (req, res) => {
         }
 
         // 2. List booked appointments and their window status
+        // Solo líderes de bloque (ver runNotificationScheduler) para no inflar
+        // el debug con slots secundarios de citas multi-slot (Avería, etc.).
         const bookedAppts = await base('Appointments').select({
-            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='')`
+            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='', {ClientName}!='')`
         }).all();
 
         for (const appt of bookedAppts) {
