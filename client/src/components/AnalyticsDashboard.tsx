@@ -302,8 +302,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
         </div>
       </div>
 
-      {/* KPIs Cards (4 cards) */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+      {/* KPIs Cards (4 cards con cuenta filtrada, 5 con "Todas" — añade "Con Cita") */}
+      <div className={`grid grid-cols-1 md:grid-cols-2 ${selectedAccount ? 'lg:grid-cols-4' : 'lg:grid-cols-5'} gap-6`}>
         <div className={`p-6 rounded-2xl border shadow-sm flex items-center gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
           <div className={`p-3 rounded-xl ${isDark ? 'bg-blue-500/20 text-blue-400' : 'bg-blue-50 text-blue-600'}`}><MessageSquare size={24} /></div>
           <div>
@@ -352,19 +352,36 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
             </div>
           </div>
         ) : (
-          <div className={`p-6 rounded-2xl border shadow-sm flex items-center gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
-            <div className={`p-3 rounded-xl ${isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-50 text-amber-600'}`}><Zap size={24} /></div>
-            <div className="min-w-0">
-              <p className={`text-xs font-bold uppercase tracking-wider truncate ${isDark ? 'text-slate-400' : 'text-slate-400'}`} title={incidents.monthLabel}>
-                Sin Cita{incidents.monthLabel ? ` · ${incidents.monthLabel}` : ''}
-              </p>
-              <h3 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                {incidents.count}
-                <span className="text-base font-bold text-amber-500 ml-2">{incidents.percentage}%</span>
-              </h3>
-              <p className="text-[11px] text-slate-400 mt-0.5">de {incidents.total} citas reservadas</p>
+          <>
+            <div className={`p-6 rounded-2xl border shadow-sm flex items-center gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+              <div className={`p-3 rounded-xl ${isDark ? 'bg-amber-500/20 text-amber-400' : 'bg-amber-50 text-amber-600'}`}><Zap size={24} /></div>
+              <div className="min-w-0">
+                <p className={`text-xs font-bold uppercase tracking-wider truncate ${isDark ? 'text-slate-400' : 'text-slate-400'}`} title={incidents.monthLabel}>
+                  Sin Cita{incidents.monthLabel ? ` · ${incidents.monthLabel}` : ''}
+                </p>
+                <h3 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                  {incidents.count}
+                  <span className="text-base font-bold text-amber-500 ml-2">{incidents.percentage}%</span>
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">de {incidents.total} citas reservadas</p>
+              </div>
             </div>
-          </div>
+
+            {/* Complementario de "Sin Cita": citas reservadas que NO son incidente */}
+            <div className={`p-6 rounded-2xl border shadow-sm flex items-center gap-4 ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+              <div className={`p-3 rounded-xl ${isDark ? 'bg-emerald-500/20 text-emerald-400' : 'bg-emerald-50 text-emerald-600'}`}><CalendarCheck size={24} /></div>
+              <div className="min-w-0">
+                <p className={`text-xs font-bold uppercase tracking-wider truncate ${isDark ? 'text-slate-400' : 'text-slate-400'}`} title={incidents.monthLabel}>
+                  Con Cita{incidents.monthLabel ? ` · ${incidents.monthLabel}` : ''}
+                </p>
+                <h3 className={`text-3xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                  {Math.max(0, incidents.total - incidents.count)}
+                  <span className="text-base font-bold text-emerald-500 ml-2">{incidents.total > 0 ? 100 - incidents.percentage : 0}%</span>
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">de {incidents.total} citas reservadas</p>
+              </div>
+            </div>
+          </>
         )}
       </div>
 
