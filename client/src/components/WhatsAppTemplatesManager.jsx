@@ -17,7 +17,9 @@ import {
   Phone,
   User,
   Bell,
-  Megaphone
+  Megaphone,
+  Eye,
+  Copy
 } from 'lucide-react';
 import { API_URL as API_URL_BASE } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
@@ -54,6 +56,9 @@ const WhatsAppTemplatesManager = () => {
     phone: '',
     variables: {}
   });
+
+  // Estado para VER detalle de una plantilla (modal de solo lectura).
+  const [viewTemplate, setViewTemplate] = useState(null);
 
   useEffect(() => { fetchTemplates(); }, []);
 
@@ -158,6 +163,25 @@ const WhatsAppTemplatesManager = () => {
     }
   };
 
+  // --- VER / DUPLICAR ---
+  // Duplica una plantilla en el formulario de creación. Las plantillas de
+  // WhatsApp aprobadas NO se pueden editar en sitio (regla de Meta): la forma
+  // válida de "editar" es crear una versión nueva. Pre-rellenamos todo y
+  // sugerimos un nombre nuevo (Meta exige nombres únicos).
+  const duplicateForEdit = (template) => {
+    const suggestedName = `${template.name}_v2`;
+    setFormData({
+      name: suggestedName,
+      category: template.category || 'MARKETING',
+      language: template.language || 'es_ES',
+      body: template.body || '',
+      footer: template.footer || ''
+    });
+    setVariableMap(template.variableMapping ? { ...template.variableMapping } : {});
+    setViewTemplate(null);
+    setIsModalOpen(true);
+  };
+
   // --- UI HELPERS ---
   const handleDelete = async (id, name) => {
     if (!window.confirm(`¿Estás seguro de eliminar "${name}"?`)) return;
@@ -209,7 +233,7 @@ const WhatsAppTemplatesManager = () => {
     }
   };
 
-  const renderPreviewText = (text, values) => {
+  const renderPreviewText = (text, values, mapping) => {
     if (!text) return <span className="text-gray-400 italic">Escribe el contenido...</span>;
     const parts = text.split(/({{\d+}})/g);
     return parts.map((part, i) => {
@@ -220,8 +244,9 @@ const WhatsAppTemplatesManager = () => {
           const val = values[num];
           return <span key={i} className="font-bold text-slate-900 bg-yellow-100 px-1 rounded">{val || `[...]`}</span>;
         }
-        // Modo diseño
-        const label = variableMap[num] || `Variable ${num}`;
+        // Modo diseño: usa el mapeo explícito (al ver una plantilla) o el del
+        // formulario de creación por defecto.
+        const label = (mapping || variableMap)[num] || `Variable ${num}`;
         return <span key={i} className="bg-blue-100 text-blue-800 px-1.5 py-0.5 rounded mx-0.5 border border-blue-200 text-xs font-semibold inline-block">[{label}]</span>;
       }
       return <span key={i}>{part}</span>;
@@ -318,11 +343,24 @@ const WhatsAppTemplatesManager = () => {
               <tbody className={`divide-y ${isDark ? 'divide-slate-700' : 'divide-slate-200'}`}>
                 {filteredTemplates.map((template) => (
                   <tr key={template.id} className={`${isDark ? 'hover:bg-slate-800' : 'hover:bg-white'} transition-colors`}>
-                    <td className="p-4"><div className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{template.name}</div><div className="text-xs text-slate-400 truncate max-w-[200px] mt-0.5 opacity-75">{template.body}</div></td>
+                    <td className="p-4">
+                      <button onClick={() => setViewTemplate(template)} className="text-left group/name" title="Ver plantilla">
+                        <div className={`font-bold group-hover/name:underline ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{template.name}</div>
+                        <div className="text-xs text-slate-400 truncate max-w-[200px] mt-0.5 opacity-75">{template.body}</div>
+                      </button>
+                    </td>
                     <td className="p-4"><span className={`px-2 py-1 rounded text-xs font-bold ${isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-600'}`}>{template.category}</span></td>
                     <td className="p-4 text-slate-600 text-sm uppercase">{template.language}</td>
                     <td className="p-4"><div className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-bold border ${getStatusColor(template.status)}`}>{getStatusIcon(template.status)} {template.status === 'APPROVED' ? 'Aprobada' : template.status === 'PENDING' ? 'Revisión' : 'Rechazada'}</div></td>
                     <td className="p-4 text-right flex justify-end gap-2">
+                      {/* BOTÓN VER */}
+                      <button
+                        onClick={() => setViewTemplate(template)}
+                        className={`transition-colors p-2 rounded-lg ${isDark ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+                        title="Ver plantilla"
+                      >
+                        <Eye size={16} />
+                      </button>
                       {/* BOTÓN ENVIAR */}
                       {template.status === 'APPROVED' && (
                         <button
@@ -414,6 +452,70 @@ const WhatsAppTemplatesManager = () => {
               >
                 {isSubmitting ? <RefreshCw className="animate-spin" /> : <Send />}
                 {isSubmitting ? 'Enviando...' : 'Enviar Mensaje'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* --- MODAL VER PLANTILLA (solo lectura) --- */}
+      {viewTemplate && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-[100] flex items-center justify-center p-4 animate-in fade-in duration-200">
+          <div className={`rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col overflow-hidden animate-in zoom-in-95 duration-200 ${isDark ? 'glass-panel border-white/5' : 'bg-white'}`}>
+            <div className={`p-6 border-b flex justify-between items-center ${isDark ? 'border-white/5 bg-slate-900/30' : 'border-slate-100 bg-slate-50'}`}>
+              <h2 className={`text-lg font-bold flex items-center gap-2 min-w-0 ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                <Eye className="text-blue-500 shrink-0" size={20} /> <span className="truncate">{viewTemplate.name}</span>
+              </h2>
+              <button onClick={() => setViewTemplate(null)} className={`p-1 rounded-full transition shrink-0 ${isDark ? 'text-slate-400 hover:bg-slate-700' : 'text-slate-400 hover:text-slate-600'}`}><XCircle size={24} /></button>
+            </div>
+
+            <div className="p-6 space-y-5 overflow-y-auto">
+              {/* Metadatos */}
+              <div className="flex flex-wrap gap-2">
+                <span className={`px-2.5 py-1 rounded-full text-xs font-bold border inline-flex items-center gap-1.5 ${getStatusColor(viewTemplate.status)}`}>
+                  {getStatusIcon(viewTemplate.status)} {viewTemplate.status === 'APPROVED' ? 'Aprobada' : viewTemplate.status === 'PENDING' ? 'En revisión' : viewTemplate.status === 'REJECTED' ? 'Rechazada' : viewTemplate.status}
+                </span>
+                <span className={`px-2.5 py-1 rounded-full text-xs font-bold ${isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-600'}`}>{viewTemplate.category}</span>
+                <span className={`px-2.5 py-1 rounded-full text-xs font-bold uppercase ${isDark ? 'bg-slate-700 text-slate-300' : 'bg-slate-200 text-slate-600'}`}>{viewTemplate.language}</span>
+              </div>
+
+              {/* Mensaje (vista previa con variables resaltadas) */}
+              <div>
+                <label className="text-xs font-bold text-slate-400 uppercase mb-1.5 block">Mensaje</label>
+                <div className={`p-4 rounded-xl border ${isDark ? 'bg-[#0c1920] border-slate-700' : 'bg-[#EFEAE2] border-slate-200'}`}>
+                  <div className={`p-3 rounded-lg shadow-sm rounded-tr-none ${isDark ? 'bg-[#202c33] text-slate-200' : 'bg-white text-slate-800'}`}>
+                    <p className="text-sm whitespace-pre-wrap leading-relaxed">{renderPreviewText(viewTemplate.body, null, viewTemplate.variableMapping)}</p>
+                    {viewTemplate.footer && <p className="text-[11px] text-slate-400 mt-2 pt-1.5 border-t border-slate-600/20">{viewTemplate.footer}</p>}
+                  </div>
+                </div>
+              </div>
+
+              {/* Variables */}
+              {viewTemplate.variableMapping && Object.keys(viewTemplate.variableMapping).length > 0 && (
+                <div>
+                  <label className="text-xs font-bold text-slate-400 uppercase mb-1.5 block">Variables</label>
+                  <div className="space-y-1.5">
+                    {Object.keys(viewTemplate.variableMapping).sort().map(num => (
+                      <div key={num} className="flex items-center gap-2 text-sm">
+                        <span className={`font-mono text-xs font-bold px-2 py-1 rounded border shrink-0 ${isDark ? 'bg-slate-700 text-blue-300 border-blue-900' : 'bg-blue-50 text-blue-600 border-blue-100'}`}>{`{{${num}}}`}</span>
+                        <span className={isDark ? 'text-slate-300' : 'text-slate-600'}>{viewTemplate.variableMapping[num] || '—'}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Aviso edición Meta */}
+              <div className={`text-xs p-3 rounded-lg border flex gap-2 ${isDark ? 'bg-amber-900/20 border-amber-800/50 text-amber-200' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                <Info size={16} className="shrink-0 mt-0.5" />
+                <span>Las plantillas aprobadas por WhatsApp no se pueden editar directamente. Para cambiar el texto, duplícala y reenvíala a Meta como una versión nueva.</span>
+              </div>
+            </div>
+
+            <div className={`p-4 border-t flex justify-end gap-3 ${isDark ? 'bg-slate-800 border-slate-700' : 'border-slate-100 bg-white'}`}>
+              <button onClick={() => setViewTemplate(null)} className={`px-5 py-2.5 font-bold rounded-xl transition ${isDark ? 'text-slate-400 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>Cerrar</button>
+              <button onClick={() => duplicateForEdit(viewTemplate)} className="px-5 py-2.5 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg active:scale-95 transition-all flex items-center gap-2">
+                <Copy size={16} /> Duplicar para editar
               </button>
             </div>
           </div>
