@@ -90,6 +90,20 @@ const isClientStatusDelivered = (clientStatus?: string | null): boolean => {
     return norm(clientStatus || '') === 'vehiculo entregado';
 };
 
+// Verde en el calendario SOLO si la cita se entregó DE VERDAD (deliveredAt con
+// fecha) Y el cliente sigue en "Vehículo Entregado".
+//
+// Por qué exigir deliveredAt: clientStatus se resuelve en el backend por número
+// de teléfono, pero las citas guardan el móvil SIN prefijo (689…) mientras que
+// los contactos lo guardan CON prefijo (34689…). Como nunca casan exactamente,
+// el backend cae al respaldo por los últimos 9 dígitos y una cita puede heredar
+// el "Vehículo Entregado" de OTRO contacto con los mismos 9 dígitos → falso
+// verde (citas pasadas nunca entregadas saliendo en verde). deliveredAt es un
+// dato propio de la cita (lo pone el botón Entregas / el modal al entregar), así
+// que es infalible: si está vacío, la cita NO se entregó y va en amarillo.
+const shouldPaintDelivered = (s: { clientStatus?: string | null; deliveredAt?: string | null }): boolean =>
+    isClientStatusDelivered(s.clientStatus) && !!s.deliveredAt;
+
 // Tipo de servicio con duración variable dentro de una agenda
 interface AgendaService {
     id: string;
@@ -1121,7 +1135,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // OJO: el criterio es el ESTADO ACTUAL del cliente, no la fecha histórica
         // deliveredAt. Así si después de entregar el coche el compañero cambia el
         // status a "Cerrado", la cita deja de mostrarse en verde.
-        const isDelivered = isClientStatusDelivered(s.clientStatus);
+        const isDelivered = shouldPaintDelivered(s);
         const isBooked = s.status === 'Booked';
         return (
             <div
@@ -1371,7 +1385,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <div
                                                 key={s.id}
                                                 onClick={() => handleOpenEdit(s)}
-                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${isClientStatusDelivered(s.clientStatus)
+                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${shouldPaintDelivered(s)
                                                     ? (isDark
                                                         ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90'
                                                         : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
@@ -1404,7 +1418,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     )}
                                                     {/* En móvil mostramos el nombre del cliente si está reservado */}
                                                     {s.status === 'Booked' && (
-                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${isClientStatusDelivered(s.clientStatus)
+                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${shouldPaintDelivered(s)
                                                             ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
                                                             : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
                                                             • {s.clientName || 'Cliente'}
@@ -1556,7 +1570,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
                                     const end = new Date(start.getTime() + dur * 60000);
                                     const isBooked = s.status === 'Booked';
-                                    const isDelivered = isClientStatusDelivered(s.clientStatus);
+                                    const isDelivered = shouldPaintDelivered(s);
                                     return (
                                         <div
                                             key={s.id}
