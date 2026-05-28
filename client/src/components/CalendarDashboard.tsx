@@ -1128,10 +1128,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 key={s.id}
                 onClick={() => handleOpenEdit(s)}
                 className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${isDelivered
-                    ? (isDark ? 'bg-emerald-900/40 border-emerald-800 text-emerald-200 hover:bg-emerald-900/60' : 'bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100')
+                    ? (isDark ? 'bg-emerald-800/60 border-emerald-500 text-emerald-100 hover:bg-emerald-700/70' : 'bg-emerald-200 border-emerald-400 text-emerald-900 hover:bg-emerald-300')
                     : isBooked
-                        ? (isDark ? 'bg-amber-900/40 border-amber-800 text-amber-200 hover:bg-amber-900/60' : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
-                        : (isDark ? 'bg-sky-900/30 border-sky-800/60 text-sky-300 hover:bg-sky-900/50' : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
+                        ? (isDark ? 'bg-amber-800/60 border-amber-500 text-amber-100 hover:bg-amber-700/70' : 'bg-amber-200 border-amber-400 text-amber-900 hover:bg-amber-300')
+                        : (isDark ? 'bg-sky-800/50 border-sky-500 text-sky-100 hover:bg-sky-700/60' : 'bg-sky-200 border-sky-400 text-sky-900 hover:bg-sky-300')
                     }`}
             >
                 {agendas.length > 1 && s.agenda && (
@@ -1373,15 +1373,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 onClick={() => handleOpenEdit(s)}
                                                 className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${isClientStatusDelivered(s.clientStatus)
                                                     ? (isDark
-                                                        ? 'bg-emerald-900/40 border-emerald-800 text-emerald-300 hover:bg-emerald-900/60'
-                                                        : 'bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100')
+                                                        ? 'bg-emerald-800/60 border-emerald-500 text-emerald-100 hover:bg-emerald-700/70'
+                                                        : 'bg-emerald-200 border-emerald-400 text-emerald-900 hover:bg-emerald-300')
                                                     : s.status === 'Booked'
                                                         ? (isDark
-                                                            ? 'bg-amber-900/40 border-amber-800 text-amber-300 hover:bg-amber-900/60'
-                                                            : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
+                                                            ? 'bg-amber-800/60 border-amber-500 text-amber-100 hover:bg-amber-700/70'
+                                                            : 'bg-amber-200 border-amber-400 text-amber-900 hover:bg-amber-300')
                                                         : (isDark
-                                                            ? 'bg-sky-900/40 border-sky-800 text-sky-300 hover:bg-sky-900/60'
-                                                            : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
+                                                            ? 'bg-sky-800/50 border-sky-500 text-sky-100 hover:bg-sky-700/60'
+                                                            : 'bg-sky-200 border-sky-400 text-sky-900 hover:bg-sky-300')
                                                     }`}
                                             >
                                                 <div className="flex flex-col md:flex-row md:items-center gap-1">
@@ -1528,13 +1528,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{slots.length}</div>
                                     <div className="text-[11px] font-semibold uppercase text-slate-400">Huecos</div>
                                 </div>
-                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-amber-900/20 border-amber-800' : 'bg-amber-50 border-amber-100'}`}>
-                                    <div className="text-2xl font-bold text-amber-500">{booked}</div>
-                                    <div className="text-[11px] font-semibold uppercase text-amber-400">Reservadas</div>
+                                <div className={`p-3 rounded-2xl border-2 text-center ${isDark ? 'bg-amber-800/40 border-amber-500' : 'bg-amber-100 border-amber-400'}`}>
+                                    <div className={`text-2xl font-bold ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>{booked}</div>
+                                    <div className={`text-[11px] font-semibold uppercase ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>Reservadas</div>
                                 </div>
-                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-sky-900/20 border-sky-800' : 'bg-sky-50 border-sky-100'}`}>
-                                    <div className="text-2xl font-bold text-sky-500">{free}</div>
-                                    <div className="text-[11px] font-semibold uppercase text-sky-400">Libres</div>
+                                <div className={`p-3 rounded-2xl border-2 text-center ${isDark ? 'bg-sky-800/40 border-sky-500' : 'bg-sky-100 border-sky-400'}`}>
+                                    <div className={`text-2xl font-bold ${isDark ? 'text-sky-300' : 'text-sky-700'}`}>{free}</div>
+                                    <div className={`text-[11px] font-semibold uppercase ${isDark ? 'text-sky-400' : 'text-sky-600'}`}>Libres</div>
                                 </div>
                             </div>
 
@@ -1561,10 +1561,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         <div
                                             key={s.id}
                                             onClick={() => handleOpenEdit(s)}
-                                            className={`flex items-stretch gap-3 p-3 rounded-2xl border cursor-pointer transition ${isDelivered
-                                                ? (isDark ? 'bg-emerald-900/25 border-emerald-800 hover:bg-emerald-900/40' : 'bg-emerald-50 border-emerald-100 hover:bg-emerald-100')
+                                            className={`flex items-stretch gap-3 p-3 rounded-2xl border-2 cursor-pointer transition ${isDelivered
+                                                ? (isDark ? 'bg-emerald-800/50 border-emerald-500 hover:bg-emerald-700/60' : 'bg-emerald-100 border-emerald-400 hover:bg-emerald-200')
                                                 : isBooked
-                                                    ? (isDark ? 'bg-amber-900/25 border-amber-800 hover:bg-amber-900/40' : 'bg-amber-50 border-amber-100 hover:bg-amber-100')
+                                                    ? (isDark ? 'bg-amber-800/50 border-amber-500 hover:bg-amber-700/60' : 'bg-amber-100 border-amber-400 hover:bg-amber-200')
                                                     : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
                                                 }`}
                                         >
@@ -1605,13 +1605,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             {/* Etiqueta de estado + incidente */}
                                             <div className="flex flex-col items-end justify-center gap-1 flex-shrink-0">
                                                 {s.incident && (
-                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}><Zap size={11} />Sin Cita</span>
+                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-700/60 text-amber-100 border-amber-500' : 'bg-amber-200 text-amber-900 border-amber-400'}`}><Zap size={11} />Sin Cita</span>
                                                 )}
                                                 {isDelivered
-                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-emerald-800/50 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}><PackageCheck size={11} />Entregado</span>
+                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-emerald-700/70 text-emerald-50 border-emerald-400' : 'bg-emerald-300 text-emerald-900 border-emerald-500'}`}><PackageCheck size={11} />Entregado</span>
                                                     : isBooked
-                                                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/50 text-amber-200' : 'bg-amber-100 text-amber-700'}`}><User size={11} />Reservada</span>
-                                                        : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-sky-800/40 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>Libre</span>}
+                                                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-700/70 text-amber-50 border-amber-400' : 'bg-amber-300 text-amber-900 border-amber-500'}`}><User size={11} />Reservada</span>
+                                                        : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-700/70 text-sky-50 border-sky-400' : 'bg-sky-300 text-sky-900 border-sky-500'}`}>Libre</span>}
                                             </div>
                                         </div>
                                     );
