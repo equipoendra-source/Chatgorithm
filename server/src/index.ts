@@ -7338,9 +7338,24 @@ app.post('/api/team/upload', teamUpload.single('file'), async (req: any, res: an
         const resourceType = req.file.mimetype.startsWith('audio/') || req.file.mimetype.startsWith('video/')
             ? 'video' : req.file.mimetype.startsWith('image/') ? 'image' : 'raw';
 
+        // Para documentos (resource_type 'raw') Cloudinary genera un public_id
+        // aleatorio SIN extensión, así que la URL acaba sin .pdf y se sirve como
+        // application/octet-stream. Consecuencia: el archivo se descarga con un
+        // nombre raro sin extensión y —lo importante— Meta NO puede adjuntarlo en
+        // la plantilla (rechaza el documento) porque no lo reconoce como PDF.
+        // Forzamos un public_id que conserve la extensión original para que la URL
+        // termine en .pdf/.docx… y Cloudinary la sirva con el Content-Type correcto.
+        const uploadOpts: any = { resource_type: resourceType as any, folder: 'team_uploads' };
+        if (resourceType === 'raw') {
+            const ext = (req.file.originalname.match(/\.([a-zA-Z0-9]+)$/)?.[1] || '').toLowerCase();
+            const base = (req.file.originalname.replace(/\.[^.]+$/, '') || 'archivo')
+                .replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 60) || 'archivo';
+            if (ext) uploadOpts.public_id = `${base}_${Date.now()}.${ext}`;
+        }
+
         const fileUrl = await new Promise<string>((resolve, reject) => {
             const stream = cloudinary.uploader.upload_stream(
-                { resource_type: resourceType as any, folder: 'team_uploads' },
+                uploadOpts,
                 (error, result) => {
                     if (error) reject(error);
                     else resolve(result!.secure_url);
