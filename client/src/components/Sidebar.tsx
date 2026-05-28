@@ -120,8 +120,6 @@ export function Sidebar({
     // Forms
     const [newContactPhone, setNewContactPhone] = useState('');
     const [newContactName, setNewContactName] = useState('');
-    const [newContactEmail, setNewContactEmail] = useState('');
-    const [newContactAddress, setNewContactAddress] = useState('');
     const [newContactDepartment, setNewContactDepartment] = useState('');
     const [newContactTags, setNewContactTags] = useState('');
     const [newContactMatricula, setNewContactMatricula] = useState('');
@@ -375,8 +373,8 @@ export function Sidebar({
     }, [currentView, teamChannel]);
 
     const resetNewContactForm = () => {
-        setNewContactPhone(''); setNewContactName(''); setNewContactEmail('');
-        setNewContactAddress(''); setNewContactDepartment(''); setNewContactTags('');
+        setNewContactPhone(''); setNewContactName('');
+        setNewContactDepartment(''); setNewContactTags('');
         setNewContactMatricula(''); setNewContactMarca(''); setNewContactModelo('');
     };
 
@@ -397,8 +395,6 @@ export function Sidebar({
                 body: JSON.stringify({
                     phone: cleanInput,
                     name: newContactName,
-                    email: newContactEmail,
-                    address: newContactAddress,
                     department: newContactDepartment,
                     tags: tagsArr,
                     matricula: newContactMatricula,
@@ -875,8 +871,6 @@ export function Sidebar({
                             <div className="space-y-4 px-6 overflow-y-auto flex-1">
                                 <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Teléfono *</label><input required placeholder="Ej: 34600123456" value={newContactPhone} onChange={e => setNewContactPhone(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
                                 <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Nombre *</label><input required placeholder="Ej: Juan Pérez" value={newContactName} onChange={e => setNewContactName(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
-                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Email</label><input placeholder="juan@email.com" value={newContactEmail} onChange={e => setNewContactEmail(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
-                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Dirección</label><input placeholder="Calle, nº, ciudad" value={newContactAddress} onChange={e => setNewContactAddress(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
 
                                 {/* Vehículo — alimenta toda la postventa (recordatorios personalizados) */}
                                 <div className={`rounded-xl border p-3 space-y-3 ${isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
@@ -888,8 +882,8 @@ export function Sidebar({
                                     </div>
                                 </div>
 
-                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Departamento</label><input placeholder="Ej: Taller, Ventas..." value={newContactDepartment} onChange={e => setNewContactDepartment(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
-                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Etiquetas</label><input placeholder="Separadas por comas: VIP, flota..." value={newContactTags} onChange={e => setNewContactTags(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Departamento (opcional)</label><input placeholder="Ej: Taller, Ventas..." value={newContactDepartment} onChange={e => setNewContactDepartment(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Etiquetas (opcional)</label><input placeholder="Separadas por comas: VIP, flota..." value={newContactTags} onChange={e => setNewContactTags(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
                             </div>
                             <div className="flex gap-2 p-6 pt-4 flex-shrink-0">
                                 <button type="button" onClick={() => { setShowAddContact(false); resetNewContactForm(); }} className={`flex-1 py-3 font-bold rounded-xl transition ${isDark ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-slate-600 hover:bg-gray-200'}`}>Cancelar</button>
