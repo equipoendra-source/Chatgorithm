@@ -1128,10 +1128,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 key={s.id}
                 onClick={() => handleOpenEdit(s)}
                 className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${isDelivered
-                    ? (isDark ? 'bg-emerald-800/60 border-emerald-500 text-emerald-100 hover:bg-emerald-700/70' : 'bg-emerald-200 border-emerald-400 text-emerald-900 hover:bg-emerald-300')
+                    ? (isDark ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90' : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
                     : isBooked
-                        ? (isDark ? 'bg-amber-800/60 border-amber-500 text-amber-100 hover:bg-amber-700/70' : 'bg-amber-200 border-amber-400 text-amber-900 hover:bg-amber-300')
-                        : (isDark ? 'bg-sky-800/50 border-sky-500 text-sky-100 hover:bg-sky-700/60' : 'bg-sky-200 border-sky-400 text-sky-900 hover:bg-sky-300')
+                        ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
+                        : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
                     }`}
             >
                 {agendas.length > 1 && s.agenda && (
@@ -1373,15 +1373,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 onClick={() => handleOpenEdit(s)}
                                                 className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${isClientStatusDelivered(s.clientStatus)
                                                     ? (isDark
-                                                        ? 'bg-emerald-800/60 border-emerald-500 text-emerald-100 hover:bg-emerald-700/70'
-                                                        : 'bg-emerald-200 border-emerald-400 text-emerald-900 hover:bg-emerald-300')
+                                                        ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90'
+                                                        : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
                                                     : s.status === 'Booked'
                                                         ? (isDark
-                                                            ? 'bg-amber-800/60 border-amber-500 text-amber-100 hover:bg-amber-700/70'
-                                                            : 'bg-amber-200 border-amber-400 text-amber-900 hover:bg-amber-300')
+                                                            ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90'
+                                                            : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
                                                         : (isDark
-                                                            ? 'bg-sky-800/50 border-sky-500 text-sky-100 hover:bg-sky-700/60'
-                                                            : 'bg-sky-200 border-sky-400 text-sky-900 hover:bg-sky-300')
+                                                            ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80'
+                                                            : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
                                                     }`}
                                             >
                                                 <div className="flex flex-col md:flex-row md:items-center gap-1">
@@ -1528,13 +1528,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{slots.length}</div>
                                     <div className="text-[11px] font-semibold uppercase text-slate-400">Huecos</div>
                                 </div>
-                                <div className={`p-3 rounded-2xl border-2 text-center ${isDark ? 'bg-amber-800/40 border-amber-500' : 'bg-amber-100 border-amber-400'}`}>
-                                    <div className={`text-2xl font-bold ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>{booked}</div>
-                                    <div className={`text-[11px] font-semibold uppercase ${isDark ? 'text-amber-400' : 'text-amber-600'}`}>Reservadas</div>
+                                <div className={`p-3 rounded-2xl border-2 text-center ${isDark ? 'bg-amber-700/60 border-amber-400' : 'bg-amber-300 border-amber-600'}`}>
+                                    <div className={`text-2xl font-bold ${isDark ? 'text-amber-100' : 'text-amber-900'}`}>{booked}</div>
+                                    <div className={`text-[11px] font-semibold uppercase ${isDark ? 'text-amber-200' : 'text-amber-800'}`}>Reservadas</div>
                                 </div>
-                                <div className={`p-3 rounded-2xl border-2 text-center ${isDark ? 'bg-sky-800/40 border-sky-500' : 'bg-sky-100 border-sky-400'}`}>
-                                    <div className={`text-2xl font-bold ${isDark ? 'text-sky-300' : 'text-sky-700'}`}>{free}</div>
-                                    <div className={`text-[11px] font-semibold uppercase ${isDark ? 'text-sky-400' : 'text-sky-600'}`}>Libres</div>
+                                <div className={`p-3 rounded-2xl border-2 text-center ${isDark ? 'bg-sky-700/60 border-sky-400' : 'bg-sky-300 border-sky-600'}`}>
+                                    <div className={`text-2xl font-bold ${isDark ? 'text-sky-100' : 'text-sky-900'}`}>{free}</div>
+                                    <div className={`text-[11px] font-semibold uppercase ${isDark ? 'text-sky-200' : 'text-sky-800'}`}>Libres</div>
                                 </div>
                             </div>
 
@@ -1562,9 +1562,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             key={s.id}
                                             onClick={() => handleOpenEdit(s)}
                                             className={`flex items-stretch gap-3 p-3 rounded-2xl border-2 cursor-pointer transition ${isDelivered
-                                                ? (isDark ? 'bg-emerald-800/50 border-emerald-500 hover:bg-emerald-700/60' : 'bg-emerald-100 border-emerald-400 hover:bg-emerald-200')
+                                                ? (isDark ? 'bg-emerald-700/70 border-emerald-400 hover:bg-emerald-600/80' : 'bg-emerald-300 border-emerald-600 hover:bg-emerald-400')
                                                 : isBooked
-                                                    ? (isDark ? 'bg-amber-800/50 border-amber-500 hover:bg-amber-700/60' : 'bg-amber-100 border-amber-400 hover:bg-amber-200')
+                                                    ? (isDark ? 'bg-amber-700/70 border-amber-400 hover:bg-amber-600/80' : 'bg-amber-300 border-amber-600 hover:bg-amber-400')
                                                     : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
                                                 }`}
                                         >
@@ -1605,13 +1605,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             {/* Etiqueta de estado + incidente */}
                                             <div className="flex flex-col items-end justify-center gap-1 flex-shrink-0">
                                                 {s.incident && (
-                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-700/60 text-amber-100 border-amber-500' : 'bg-amber-200 text-amber-900 border-amber-400'}`}><Zap size={11} />Sin Cita</span>
+                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/80 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><Zap size={11} />Sin Cita</span>
                                                 )}
                                                 {isDelivered
-                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-emerald-700/70 text-emerald-50 border-emerald-400' : 'bg-emerald-300 text-emerald-900 border-emerald-500'}`}><PackageCheck size={11} />Entregado</span>
+                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-emerald-600/90 text-white border-emerald-300' : 'bg-emerald-600 text-white border-emerald-800'}`}><PackageCheck size={11} />Entregado</span>
                                                     : isBooked
-                                                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-700/70 text-amber-50 border-amber-400' : 'bg-amber-300 text-amber-900 border-amber-500'}`}><User size={11} />Reservada</span>
-                                                        : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-700/70 text-sky-50 border-sky-400' : 'bg-sky-300 text-sky-900 border-sky-500'}`}>Libre</span>}
+                                                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/90 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><User size={11} />Reservada</span>
+                                                        : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-600/90 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700'}`}>Libre</span>}
                                             </div>
                                         </div>
                                     );
