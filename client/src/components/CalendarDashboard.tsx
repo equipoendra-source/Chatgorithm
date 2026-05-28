@@ -1011,13 +1011,21 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // Para bloques multi-slot el líder muestra hora inicio-fin (ej. "13:00-17:00").
         // Para citas de 1 hueco o Available, solo la hora de inicio.
         const isMultiSlotLeader = s.status === 'Booked' && (s.durationMin || 0) > slotDuration;
+        // Tres estados visuales: entregado (verde) > reservado (ámbar) > libre (azul).
+        // El delivered tiene prioridad sobre booked porque una cita entregada
+        // técnicamente sigue siendo Booked en el modelo, pero queremos que el
+        // equipo la distinga de un vistazo en el calendario.
+        const isDelivered = !!s.deliveredAt;
+        const isBooked = s.status === 'Booked';
         return (
             <div
                 key={s.id}
                 onClick={() => handleOpenEdit(s)}
-                className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${s.status === 'Booked'
-                    ? (isDark ? 'bg-amber-900/40 border-amber-800 text-amber-200 hover:bg-amber-900/60' : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
-                    : (isDark ? 'bg-sky-900/30 border-sky-800/60 text-sky-300 hover:bg-sky-900/50' : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
+                className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${isDelivered
+                    ? (isDark ? 'bg-emerald-900/40 border-emerald-800 text-emerald-200 hover:bg-emerald-900/60' : 'bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100')
+                    : isBooked
+                        ? (isDark ? 'bg-amber-900/40 border-amber-800 text-amber-200 hover:bg-amber-900/60' : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
+                        : (isDark ? 'bg-sky-900/30 border-sky-800/60 text-sky-300 hover:bg-sky-900/50' : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
                     }`}
             >
                 {agendas.length > 1 && s.agenda && (
@@ -1257,13 +1265,17 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <div
                                                 key={s.id}
                                                 onClick={() => handleOpenEdit(s)}
-                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${s.status === 'Booked'
+                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${s.deliveredAt
                                                     ? (isDark
-                                                        ? 'bg-amber-900/40 border-amber-800 text-amber-300 hover:bg-amber-900/60'
-                                                        : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
-                                                    : (isDark
-                                                        ? 'bg-sky-900/40 border-sky-800 text-sky-300 hover:bg-sky-900/60'
-                                                        : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
+                                                        ? 'bg-emerald-900/40 border-emerald-800 text-emerald-300 hover:bg-emerald-900/60'
+                                                        : 'bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100')
+                                                    : s.status === 'Booked'
+                                                        ? (isDark
+                                                            ? 'bg-amber-900/40 border-amber-800 text-amber-300 hover:bg-amber-900/60'
+                                                            : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
+                                                        : (isDark
+                                                            ? 'bg-sky-900/40 border-sky-800 text-sky-300 hover:bg-sky-900/60'
+                                                            : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
                                                     }`}
                                             >
                                                 <div className="flex flex-col md:flex-row md:items-center gap-1">
@@ -1286,7 +1298,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     )}
                                                     {/* En móvil mostramos el nombre del cliente si está reservado */}
                                                     {s.status === 'Booked' && (
-                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${isDark ? 'text-amber-400' : 'text-amber-500'}`}>
+                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${s.deliveredAt
+                                                            ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
+                                                            : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
                                                             • {s.clientName || 'Cliente'}
                                                         </span>
                                                     )}
@@ -1436,13 +1450,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
                                     const end = new Date(start.getTime() + dur * 60000);
                                     const isBooked = s.status === 'Booked';
+                                    const isDelivered = !!s.deliveredAt;
                                     return (
                                         <div
                                             key={s.id}
                                             onClick={() => handleOpenEdit(s)}
-                                            className={`flex items-stretch gap-3 p-3 rounded-2xl border cursor-pointer transition ${isBooked
-                                                ? (isDark ? 'bg-amber-900/25 border-amber-800 hover:bg-amber-900/40' : 'bg-amber-50 border-amber-100 hover:bg-amber-100')
-                                                : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
+                                            className={`flex items-stretch gap-3 p-3 rounded-2xl border cursor-pointer transition ${isDelivered
+                                                ? (isDark ? 'bg-emerald-900/25 border-emerald-800 hover:bg-emerald-900/40' : 'bg-emerald-50 border-emerald-100 hover:bg-emerald-100')
+                                                : isBooked
+                                                    ? (isDark ? 'bg-amber-900/25 border-amber-800 hover:bg-amber-900/40' : 'bg-amber-50 border-amber-100 hover:bg-amber-100')
+                                                    : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
                                                 }`}
                                         >
                                             {/* Bloque horario */}
@@ -1484,9 +1501,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 {s.incident && (
                                                     <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}><Zap size={11} />Sin Cita</span>
                                                 )}
-                                                {isBooked
-                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/50 text-amber-200' : 'bg-amber-100 text-amber-700'}`}><User size={11} />Reservada</span>
-                                                    : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-sky-800/40 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>Libre</span>}
+                                                {isDelivered
+                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-emerald-800/50 text-emerald-200' : 'bg-emerald-100 text-emerald-700'}`}><PackageCheck size={11} />Entregado</span>
+                                                    : isBooked
+                                                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/50 text-amber-200' : 'bg-amber-100 text-amber-700'}`}><User size={11} />Reservada</span>
+                                                        : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-sky-800/40 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>Libre</span>}
                                             </div>
                                         </div>
                                     );
