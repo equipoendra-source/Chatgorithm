@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
     Calendar as CalendarIcon, Clock, Plus, Trash2, User, CheckCircle,
     RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History, Wrench,
-    PackageCheck, Search, RotateCcw
+    PackageCheck, Search, RotateCcw, FileText, Upload
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -46,6 +46,9 @@ interface Appointment {
     deliveredAt?: string | null;
     // Username del trabajador que marcó la entrega. Solo informativo.
     deliveredBy?: string;
+    // URL de la factura del cliente (subida a Cloudinary). Se adjunta y envía
+    // por WhatsApp al marcar "Vehículo Entregado".
+    invoiceUrl?: string;
     // Estado actual del contacto (Contacts.status). Lo manda el backend al
     // cargar /api/appointments. Lo usamos para colorear el slot en el
     // calendario: si vale "Vehículo Entregado", la cita se pinta en verde
@@ -203,6 +206,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [editContactStatus, setEditContactStatus] = useState('');
     const [originalContactStatus, setOriginalContactStatus] = useState('');
     const [loadingContactStatus, setLoadingContactStatus] = useState(false);
+    // Factura del cliente adjunta a la cita (se envía al marcar entregado).
+    const [invoiceUrl, setInvoiceUrl] = useState('');
+    const [uploadingInvoice, setUploadingInvoice] = useState(false);
 
     // Etiquetas dinámicas según sector configurado en el wizard de Laura
     const [fieldLabels, setFieldLabels] = useState<FieldLabels>(DEFAULT_FIELD_LABELS);
@@ -581,6 +587,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setEditExtra(appt.extra || appt.field4 || '');
         setEditNotas(appt.notas || appt.field5 || '');
         setEditIncident(!!appt.incident);
+        setInvoiceUrl(appt.invoiceUrl || '');
         // Cargar el estado del contacto (cliente) asociado a esta cita
         setEditContactStatus('');
         setOriginalContactStatus('');
@@ -597,6 +604,44 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 .catch(() => { /* sin estado */ })
                 .finally(() => setLoadingContactStatus(false));
         }
+    };
+
+    // Sube la factura a Cloudinary (reusa /team/upload) y guarda la URL en la
+    // cita. Al marcar "Vehículo Entregado", el backend la envía por WhatsApp.
+    const handleInvoiceUpload = async (file: File | undefined | null) => {
+        if (!file || !selectedAppt) return;
+        setUploadingInvoice(true);
+        try {
+            const fd = new FormData();
+            fd.append('file', file, file.name);
+            const up = await fetch(`${API_URL}/team/upload`, { method: 'POST', body: fd });
+            const upData = await up.json();
+            if (!up.ok || !upData.url) { alert('No se pudo subir la factura.'); return; }
+            const save = await fetch(`${API_URL}/appointments/${selectedAppt.id}/invoice`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ invoiceUrl: upData.url })
+            });
+            const saveData = await save.json();
+            if (save.ok) setInvoiceUrl(upData.url);
+            else alert('❌ ' + (saveData.error || 'No se pudo guardar la factura.'));
+        } catch {
+            alert('Error de conexión al subir la factura.');
+        } finally {
+            setUploadingInvoice(false);
+        }
+    };
+
+    const handleInvoiceRemove = async () => {
+        if (!selectedAppt) return;
+        setUploadingInvoice(true);
+        try {
+            const save = await fetch(`${API_URL}/appointments/${selectedAppt.id}/invoice`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ invoiceUrl: '' })
+            });
+            if (save.ok) setInvoiceUrl('');
+        } catch { /* sin bloqueo */ }
+        finally { setUploadingInvoice(false); }
     };
 
     const handleUpdateAppt = async () => {
@@ -1932,6 +1977,36 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             disabled={readOnly}
                                         />
                                     </div>
+                                </div>
+                            )}
+
+                            {/* Factura del cliente — se adjunta y envía por WhatsApp al
+                                marcar "Vehículo Entregado". Solo para citas reservadas con cliente. */}
+                            {selectedAppt.status === 'Booked' && selectedAppt.clientPhone && (
+                                <div className={`pt-4 border-t mt-4 ${isDark ? 'border-slate-700' : 'border-slate-100'}`}>
+                                    <label className="text-xs font-bold uppercase mb-1.5 flex items-center gap-1.5 text-slate-400">
+                                        <FileText size={13} /> Factura del cliente
+                                    </label>
+                                    {invoiceUrl ? (
+                                        <div className={`flex items-center gap-2 p-2.5 rounded-lg border ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                            <FileText size={16} className="text-emerald-500 shrink-0" />
+                                            <a href={invoiceUrl} target="_blank" rel="noopener noreferrer" className="text-sm flex-1 truncate text-blue-500 hover:underline">Ver factura adjunta</a>
+                                            {!readOnly && (
+                                                <button onClick={handleInvoiceRemove} disabled={uploadingInvoice} title="Quitar factura" className="p-1 rounded hover:bg-red-500/20 text-slate-400 hover:text-red-400 transition">
+                                                    <Trash2 size={14} />
+                                                </button>
+                                            )}
+                                        </div>
+                                    ) : (
+                                        !readOnly && (
+                                            <label className={`flex items-center justify-center gap-2 p-2.5 rounded-lg border border-dashed cursor-pointer text-sm transition ${isDark ? 'border-slate-600 text-slate-400 hover:border-emerald-500 hover:text-emerald-400' : 'border-slate-300 text-slate-500 hover:border-emerald-400 hover:text-emerald-600'} ${uploadingInvoice ? 'opacity-60 pointer-events-none' : ''}`}>
+                                                {uploadingInvoice ? <RotateCcw size={15} className="animate-spin" /> : <Upload size={15} />}
+                                                {uploadingInvoice ? 'Subiendo…' : 'Adjuntar factura (PDF/imagen)'}
+                                                <input type="file" accept="application/pdf,image/*" className="hidden" disabled={uploadingInvoice} onChange={e => { handleInvoiceUpload(e.target.files?.[0]); e.currentTarget.value = ''; }} />
+                                            </label>
+                                        )
+                                    )}
+                                    <p className="text-[11px] text-slate-400 mt-1">Se enviará al cliente por WhatsApp al marcar "Vehículo Entregado".</p>
                                 </div>
                             )}
 

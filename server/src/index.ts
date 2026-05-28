@@ -2012,6 +2012,51 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
     }
 }
 
+// Nombre de la plantilla (aprobada en Meta con CABECERA DE DOCUMENTO) que se usa
+// para enviar la factura al entregar el vehículo. El admin debe crearla en Meta:
+//   - Categoría: UTILITY
+//   - Cabecera: Documento (Document)
+//   - Cuerpo: ej. "Hola {{1}}, te adjuntamos la factura de tu visita. ¡Gracias!"
+const INVOICE_TEMPLATE = 'factura_entrega';
+
+// Igual que sendTemplateMessage pero con cabecera de DOCUMENTO — para adjuntar la
+// factura (PDF) a una plantilla aprobada con header de tipo document. Funciona
+// aunque la ventana de 24h del cliente esté cerrada (es una plantilla).
+async function sendTemplateWithDocument(phone: string, templateName: string, bodyVars: string[], documentUrl: string, filename: string, originPhoneId: string): Promise<true | string> {
+    const token = getToken(originPhoneId);
+    if (!token) { const msg = `Token no encontrado para ${originPhoneId}`; console.error(`❌ [Factura] ${msg}`); return msg; }
+    const cleanTo = cleanNumber(phone);
+    try {
+        const components: any[] = [
+            { type: "header", parameters: [{ type: "document", document: { link: documentUrl, filename: filename || 'Factura.pdf' } }] }
+        ];
+        if (bodyVars.length > 0) {
+            components.push({ type: "body", parameters: bodyVars.map(v => ({ type: "text", text: v })) });
+        }
+        await axios.post(
+            `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
+            { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: "es_ES" }, components } },
+            { headers: { Authorization: `Bearer ${token}` } }
+        );
+        await saveAndEmitMessage({
+            text: `[Factura] ${templateName}`,
+            sender: "Sistema",
+            recipient: cleanTo,
+            timestamp: new Date().toISOString(),
+            type: "template",
+            origin_phone_id: originPhoneId
+        });
+        return true;
+    } catch (e: any) {
+        const metaErr = e.response?.data?.error;
+        const errorMsg = metaErr
+            ? `Meta ${metaErr.code || ''} ${metaErr.error_subcode || ''}: ${metaErr.message || ''} ${metaErr.error_data?.details || ''}`.trim()
+            : (e.message || 'unknown');
+        console.error(`❌ [Factura] Error enviando plantilla ${templateName} a ${cleanTo}:`, errorMsg);
+        return errorMsg;
+    }
+}
+
 // --- Programar notificación con idempotencia ---
 async function scheduleNotification(params: {
     type: string, phone: string, appointmentId?: string,
@@ -5512,6 +5557,9 @@ app.get('/api/appointments', async (req, res) => {
                 // null y nada se rompe.
                 deliveredAt: (r.get('DeliveredAt') as string) || null,
                 deliveredBy: (r.get('DeliveredBy') as string) || '',
+                // URL de la factura subida a Cloudinary (si se adjuntó en el
+                // popup de la cita). Se envía al cliente al marcar entregado.
+                invoiceUrl: (r.get('InvoiceUrl') as string) || '',
                 // Estado actual del cliente (Contacts.status). Lo usa el
                 // calendario para colorear la cita según el estado vigente
                 // (verde si "Vehículo Entregado"). Si el contacto aún no
@@ -5915,6 +5963,7 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
         const existingDelivered = rec.get('DeliveredAt') as string;
         const clientName = (rec.get('ClientName') as string) || '';
         const clientPhone = cleanNumber((rec.get('ClientPhone') as string) || '');
+        const invoiceUrl = (rec.get('InvoiceUrl') as string) || '';
 
         // Solo se entregan citas reservadas con cliente real (líder de bloque).
         if (status !== 'Booked' || !clientName.trim()) {
@@ -5948,6 +5997,7 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
         // secuencia postventa (delivery_date en Contacts + plantillas WhatsApp
         // programadas vía schedulePostSaleSequence). Reutilizamos el handler
         // existente para no duplicar lógica.
+        let contactOrigin = '';
         if (clientPhone) {
             try {
                 const contacts = await base('Contacts').select({
@@ -5955,6 +6005,7 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
                 }).firstPage();
                 if (contacts.length > 0) {
                     const contactRec = contacts[0];
+                    contactOrigin = (contactRec.get('origin_phone_id') as string) || '';
                     const oldStatus = (contactRec.get('status') as string) || '';
                     if (oldStatus !== 'Vehículo Entregado') {
                         // typecast: true igual que en PUT /contacts/:phone/status —
@@ -5978,6 +6029,16 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
             }
         }
 
+        // Enviar la factura al cliente (si se adjuntó en el popup de la cita).
+        // Plantilla con cabecera de documento → llega aunque la ventana de 24h
+        // esté cerrada. Fire-and-forget: no bloquea ni revierte la entrega.
+        if (invoiceUrl && clientPhone) {
+            const originId = contactOrigin || waPhoneId || 'default';
+            sendTemplateWithDocument(clientPhone, INVOICE_TEMPLATE, [clientName || 'cliente'], invoiceUrl, 'Factura.pdf', originId)
+                .then(r => { if (r !== true) console.warn(`[Deliver] No se pudo enviar la factura a ${clientPhone}: ${r}`); })
+                .catch(e => console.warn('[Deliver] Error enviando factura:', e?.message));
+        }
+
         // Audit log + evento socket para refrescar calendarios abiertos
         logAudit({
             action: 'appointment.deliver', user: actor, targetType: 'appointment',
@@ -5994,6 +6055,27 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
     } catch (e: any) {
         console.error('[API] Error POST /appointments/:id/deliver:', e.message);
         res.status(500).json({ error: 'Error marcando entrega.' });
+    }
+});
+
+// Guarda (o borra) la URL de la factura asociada a una cita. La factura se sube
+// antes a Cloudinary vía /api/team/upload; aquí solo persistimos la URL en el
+// campo InvoiceUrl de Appointments. Tolerante: si el campo no existe en Airtable,
+// devuelve 503 con instrucción clara en vez de un 500 opaco.
+app.post('/api/appointments/:id/invoice', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    const invoiceUrl = String(req.body?.invoiceUrl ?? '').trim();
+    try {
+        await base('Appointments').update([{ id: req.params.id, fields: { InvoiceUrl: invoiceUrl } as any }]);
+        res.json({ success: true, invoiceUrl });
+    } catch (e: any) {
+        if (/InvoiceUrl|unknown.*field/i.test(e.message || '')) {
+            return res.status(503).json({
+                error: 'El campo InvoiceUrl (URL o Single line text) no existe en la tabla Appointments. Créalo en Airtable para activar esta función.'
+            });
+        }
+        console.error('[API] Error POST /appointments/:id/invoice:', e.message);
+        res.status(500).json({ error: 'Error guardando la factura.' });
     }
 });
 
