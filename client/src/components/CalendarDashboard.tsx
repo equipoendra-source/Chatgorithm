@@ -74,19 +74,21 @@ const DEFAULT_FIELD_LABELS: FieldLabels = {
     field5: { label: 'Notas', placeholder: 'Notas adicionales', key: 'notes', description: '' }
 };
 
-// Una cita se considera "entregada" cuando tiene la marca deliveredAt
-// (la fecha en la que el coche se devolvió al cliente). Ese campo se setea
-// SOLO al pulsar el botón "Marcar como entregado" del panel pendientes, o
-// al cambiar el "Estado del Cliente" a "Vehículo Entregado" en el modal de
-// la cita (se hace dispatchear al endpoint /api/appointments/:id/deliver
-// detrás de las bambalinas — ver handleSaveEdit).
-//
-// IMPORTANTE: NO usamos el status del contacto (Contacts.status) para
-// decidir el color, porque ese status es GLOBAL del cliente. Si un cliente
-// tiene varias citas y solo se entregó una, la ÚLTIMA acción del equipo
-// le habrá puesto "Vehículo Entregado" — pero sus otras citas (pasadas
-// o futuras) no están entregadas. Cada cita tiene su propio deliveredAt.
+// `isAppointmentDelivered` (deliveredAt de la cita concreta) se sigue usando
+// para el panel "Pendientes de Entrega" y los badges/acciones de ese panel —
+// ahí sí queremos distinguir si ESA cita en particular ya fue entregada.
 const isAppointmentDelivered = (a: { deliveredAt?: string | null }): boolean => !!a.deliveredAt;
+
+// Decide el color VERDE del slot en el calendario. Regla simple solicitada
+// por el equipo: si el Estado del Cliente es "Vehículo Entregado", la cita
+// va en verde; cualquier otro estado (Abierto, Nuevo, Cerrado, sin estado)
+// va en amarillo. Comparación normalizada (NFD + minúsculas + trim) para
+// que tildes o variaciones de mayúsculas en el single-select de Airtable
+// no rompan el match.
+const isClientStatusDelivered = (clientStatus?: string | null): boolean => {
+    const norm = (s: string) => (s || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+    return norm(clientStatus || '') === 'vehiculo entregado';
+};
 
 // Tipo de servicio con duración variable dentro de una agenda
 interface AgendaService {
@@ -1119,7 +1121,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // OJO: el criterio es el ESTADO ACTUAL del cliente, no la fecha histórica
         // deliveredAt. Así si después de entregar el coche el compañero cambia el
         // status a "Cerrado", la cita deja de mostrarse en verde.
-        const isDelivered = isAppointmentDelivered(s);
+        const isDelivered = isClientStatusDelivered(s.clientStatus);
         const isBooked = s.status === 'Booked';
         return (
             <div
@@ -1369,7 +1371,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <div
                                                 key={s.id}
                                                 onClick={() => handleOpenEdit(s)}
-                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${isAppointmentDelivered(s)
+                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${isClientStatusDelivered(s.clientStatus)
                                                     ? (isDark
                                                         ? 'bg-emerald-900/40 border-emerald-800 text-emerald-300 hover:bg-emerald-900/60'
                                                         : 'bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100')
@@ -1402,7 +1404,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     )}
                                                     {/* En móvil mostramos el nombre del cliente si está reservado */}
                                                     {s.status === 'Booked' && (
-                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${isAppointmentDelivered(s)
+                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${isClientStatusDelivered(s.clientStatus)
                                                             ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
                                                             : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
                                                             • {s.clientName || 'Cliente'}
@@ -1554,7 +1556,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
                                     const end = new Date(start.getTime() + dur * 60000);
                                     const isBooked = s.status === 'Booked';
-                                    const isDelivered = isAppointmentDelivered(s);
+                                    const isDelivered = isClientStatusDelivered(s.clientStatus);
                                     return (
                                         <div
                                             key={s.id}
