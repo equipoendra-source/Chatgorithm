@@ -1016,8 +1016,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 key={s.id}
                 onClick={() => handleOpenEdit(s)}
                 className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${s.status === 'Booked'
-                    ? (isDark ? 'bg-purple-900/40 border-purple-800 text-purple-200 hover:bg-purple-900/60' : 'bg-purple-50 border-purple-100 text-purple-700 hover:bg-purple-100')
-                    : (isDark ? 'bg-green-900/30 border-green-800/60 text-green-300 hover:bg-green-900/50' : 'bg-green-50 border-green-100 text-green-700 hover:bg-green-100')
+                    ? (isDark ? 'bg-amber-900/40 border-amber-800 text-amber-200 hover:bg-amber-900/60' : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
+                    : (isDark ? 'bg-sky-900/30 border-sky-800/60 text-sky-300 hover:bg-sky-900/50' : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
                     }`}
             >
                 {agendas.length > 1 && s.agenda && (
@@ -1228,7 +1228,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <div className="flex flex-col items-end gap-1">
                                                 <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${booked === total
                                                     ? (isDark ? 'bg-red-900/30 text-red-400 border border-red-800/50' : 'bg-red-100 text-red-600')
-                                                    : (isDark ? 'bg-green-900/30 text-green-400 border border-green-800/50' : 'bg-green-100 text-green-600')
+                                                    : (isDark ? 'bg-sky-900/30 text-sky-400 border border-sky-800/50' : 'bg-sky-100 text-sky-600')
                                                     }`}>
                                                     {booked}/{total} <span className="hidden md:inline">Ocupados</span>
                                                 </span>
@@ -1259,11 +1259,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 onClick={() => handleOpenEdit(s)}
                                                 className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${s.status === 'Booked'
                                                     ? (isDark
-                                                        ? 'bg-purple-900/40 border-purple-800 text-purple-300 hover:bg-purple-900/60'
-                                                        : 'bg-purple-50 border-purple-100 text-purple-700 hover:bg-purple-100')
+                                                        ? 'bg-amber-900/40 border-amber-800 text-amber-300 hover:bg-amber-900/60'
+                                                        : 'bg-amber-50 border-amber-100 text-amber-700 hover:bg-amber-100')
                                                     : (isDark
-                                                        ? 'bg-green-900/40 border-green-800 text-green-300 hover:bg-green-900/60'
-                                                        : 'bg-green-50 border-green-100 text-green-700 hover:bg-green-100')
+                                                        ? 'bg-sky-900/40 border-sky-800 text-sky-300 hover:bg-sky-900/60'
+                                                        : 'bg-sky-50 border-sky-100 text-sky-700 hover:bg-sky-100')
                                                     }`}
                                             >
                                                 <div className="flex flex-col md:flex-row md:items-center gap-1">
@@ -1286,7 +1286,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     )}
                                                     {/* En móvil mostramos el nombre del cliente si está reservado */}
                                                     {s.status === 'Booked' && (
-                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${isDark ? 'text-purple-400' : 'text-purple-500'}`}>
+                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${isDark ? 'text-amber-400' : 'text-amber-500'}`}>
                                                             • {s.clientName || 'Cliente'}
                                                         </span>
                                                     )}
@@ -1358,7 +1358,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <div className="flex flex-col items-end gap-1">
                                                 <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${booked === slots.length
                                                     ? (isDark ? 'bg-red-900/30 text-red-400' : 'bg-red-100 text-red-600')
-                                                    : (isDark ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-600')
+                                                    : (isDark ? 'bg-sky-900/30 text-sky-400' : 'bg-sky-100 text-sky-600')
                                                     }`}>{booked}/{slots.length}</span>
                                                 {hoursInfo && hoursInfo.freeHours > 0 && (
                                                     <span
@@ -1408,13 +1408,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     <div className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{slots.length}</div>
                                     <div className="text-[11px] font-semibold uppercase text-slate-400">Huecos</div>
                                 </div>
-                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-purple-900/20 border-purple-800' : 'bg-purple-50 border-purple-100'}`}>
-                                    <div className="text-2xl font-bold text-purple-500">{booked}</div>
-                                    <div className="text-[11px] font-semibold uppercase text-purple-400">Reservadas</div>
+                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-amber-900/20 border-amber-800' : 'bg-amber-50 border-amber-100'}`}>
+                                    <div className="text-2xl font-bold text-amber-500">{booked}</div>
+                                    <div className="text-[11px] font-semibold uppercase text-amber-400">Reservadas</div>
                                 </div>
-                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-green-900/20 border-green-800' : 'bg-green-50 border-green-100'}`}>
-                                    <div className="text-2xl font-bold text-green-500">{free}</div>
-                                    <div className="text-[11px] font-semibold uppercase text-green-400">Libres</div>
+                                <div className={`p-3 rounded-2xl border text-center ${isDark ? 'bg-sky-900/20 border-sky-800' : 'bg-sky-50 border-sky-100'}`}>
+                                    <div className="text-2xl font-bold text-sky-500">{free}</div>
+                                    <div className="text-[11px] font-semibold uppercase text-sky-400">Libres</div>
                                 </div>
                             </div>
 
@@ -1441,7 +1441,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             key={s.id}
                                             onClick={() => handleOpenEdit(s)}
                                             className={`flex items-stretch gap-3 p-3 rounded-2xl border cursor-pointer transition ${isBooked
-                                                ? (isDark ? 'bg-purple-900/25 border-purple-800 hover:bg-purple-900/40' : 'bg-purple-50 border-purple-100 hover:bg-purple-100')
+                                                ? (isDark ? 'bg-amber-900/25 border-amber-800 hover:bg-amber-900/40' : 'bg-amber-50 border-amber-100 hover:bg-amber-100')
                                                 : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
                                                 }`}
                                         >
@@ -1474,7 +1474,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                         </div>
                                                     </>
                                                 ) : (
-                                                    <span className={`text-sm font-semibold ${isDark ? 'text-green-400' : 'text-green-600'}`}>
+                                                    <span className={`text-sm font-semibold ${isDark ? 'text-sky-400' : 'text-sky-600'}`}>
                                                         Hueco libre{agendas.length > 1 && s.agenda ? ` · ${s.agenda}` : ''}
                                                     </span>
                                                 )}
@@ -1485,8 +1485,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/40 text-amber-300' : 'bg-amber-100 text-amber-700'}`}><Zap size={11} />Sin Cita</span>
                                                 )}
                                                 {isBooked
-                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-purple-800/50 text-purple-200' : 'bg-purple-100 text-purple-700'}`}><User size={11} />Reservada</span>
-                                                    : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-green-800/40 text-green-300' : 'bg-green-100 text-green-700'}`}>Libre</span>}
+                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 ${isDark ? 'bg-amber-800/50 text-amber-200' : 'bg-amber-100 text-amber-700'}`}><User size={11} />Reservada</span>
+                                                    : <span className={`text-[10px] font-bold px-2 py-1 rounded-full ${isDark ? 'bg-sky-800/40 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>Libre</span>}
                                             </div>
                                         </div>
                                     );

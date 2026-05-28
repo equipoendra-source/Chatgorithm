@@ -51,35 +51,36 @@ export function AppointmentToast({ notifications, onOpen, onDismiss }: Props) {
                 // Sin etiqueta cuando lo hace un trabajador (source='manual').
                 const sourceTag = n.source === 'bot' ? 'Laura' : n.source === 'client_whatsapp' ? 'Cliente' : '';
 
-                // Paleta por tipo: morado (booked) · rojo (cancelled) · cian (delivered).
-                // El cian de "delivered" es coherente con el icono PackageCheck del
-                // Historial de citas, así son inmediatamente reconocibles entre sí.
+                // Paleta por tipo: ámbar (booked) · rojo (cancelled) · verde esmeralda (delivered).
+                // Coherente con el Historial de citas: nueva cita = amarillo (llama
+                // la atención por ser la acción más frecuente), entregado = verde
+                // (cerrado positivo), cancelada = rojo (cerrado negativo).
                 const cardClasses = isCancelled
                     ? (isDark
                         ? 'bg-slate-900/95 border-rose-500/40 shadow-rose-500/20'
                         : 'bg-white border-rose-200 shadow-rose-200/40')
                     : isDelivered
                         ? (isDark
-                            ? 'bg-slate-900/95 border-sky-500/40 shadow-sky-500/20'
-                            : 'bg-white border-sky-200 shadow-sky-200/40')
+                            ? 'bg-slate-900/95 border-emerald-500/40 shadow-emerald-500/20'
+                            : 'bg-white border-emerald-200 shadow-emerald-200/40')
                         : (isDark
-                            ? 'bg-slate-900/95 border-purple-500/40 shadow-purple-500/20'
-                            : 'bg-white border-purple-200 shadow-purple-200/40');
+                            ? 'bg-slate-900/95 border-amber-500/40 shadow-amber-500/20'
+                            : 'bg-white border-amber-200 shadow-amber-200/40');
                 const iconWrapClasses = isCancelled
                     ? (isDark ? 'bg-rose-500/20 text-rose-300' : 'bg-rose-100 text-rose-700')
                     : isDelivered
-                        ? (isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700')
-                        : (isDark ? 'bg-purple-500/20 text-purple-300' : 'bg-purple-100 text-purple-700');
+                        ? (isDark ? 'bg-emerald-500/20 text-emerald-300' : 'bg-emerald-100 text-emerald-700')
+                        : (isDark ? 'bg-amber-500/20 text-amber-300' : 'bg-amber-100 text-amber-700');
                 const titleClasses = isCancelled
                     ? (isDark ? 'text-rose-200' : 'text-rose-900')
                     : isDelivered
-                        ? (isDark ? 'text-sky-200' : 'text-sky-900')
-                        : (isDark ? 'text-purple-200' : 'text-purple-900');
+                        ? (isDark ? 'text-emerald-200' : 'text-emerald-900')
+                        : (isDark ? 'text-amber-200' : 'text-amber-900');
                 const tagClasses = isCancelled
                     ? (isDark ? 'bg-rose-500/20 text-rose-300' : 'bg-rose-100 text-rose-700')
                     : isDelivered
-                        ? (isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700')
-                        : (isDark ? 'bg-indigo-500/20 text-indigo-300' : 'bg-indigo-100 text-indigo-700');
+                        ? (isDark ? 'bg-emerald-500/20 text-emerald-300' : 'bg-emerald-100 text-emerald-700')
+                        : (isDark ? 'bg-amber-500/20 text-amber-300' : 'bg-amber-100 text-amber-700');
 
                 // Color de la cuenta (línea de WhatsApp) si se conoce.
                 const acc = n.accountId ? colorForAccount(n.accountId) : null;

@@ -172,16 +172,16 @@ export const AppointmentHistoryPanel: React.FC<Props> = ({ isOpen, onClose, isDa
                         <div className={`text-center py-12 text-sm ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Aún no hay eventos.</div>
                     ) : filtered.map(evt => {
                         // Tres tipos de evento, cada uno con su paleta:
-                        //  - booked     → verde esmeralda (✓ nueva cita)
+                        //  - booked     → ámbar/amarillo (✓ nueva cita)
                         //  - cancelled  → rojo rosa     (✗ cancelada)
-                        //  - delivered  → azul/cian     (📦 vehículo entregado, neutral y distinto del verde)
+                        //  - delivered  → verde esmeralda (📦 vehículo entregado)
                         const isBooked = evt.type === 'booked';
                         const isDelivered = evt.type === 'delivered';
                         const isCancelled = evt.type === 'cancelled';
                         const palette = isBooked
-                            ? { border: isDark ? 'border-emerald-700/30' : 'border-emerald-100', bg: isDark ? 'bg-emerald-900/10 hover:bg-emerald-900/20' : 'bg-emerald-50/60 hover:bg-emerald-100', icon: isDark ? 'text-emerald-400' : 'text-emerald-600', title: isDark ? 'text-emerald-300' : 'text-emerald-800' }
+                            ? { border: isDark ? 'border-amber-700/30' : 'border-amber-100', bg: isDark ? 'bg-amber-900/10 hover:bg-amber-900/20' : 'bg-amber-50/60 hover:bg-amber-100', icon: isDark ? 'text-amber-400' : 'text-amber-600', title: isDark ? 'text-amber-300' : 'text-amber-800' }
                             : isDelivered
-                                ? { border: isDark ? 'border-sky-700/30' : 'border-sky-100', bg: isDark ? 'bg-sky-900/10 hover:bg-sky-900/20' : 'bg-sky-50/60 hover:bg-sky-100', icon: isDark ? 'text-sky-400' : 'text-sky-600', title: isDark ? 'text-sky-300' : 'text-sky-800' }
+                                ? { border: isDark ? 'border-emerald-700/30' : 'border-emerald-100', bg: isDark ? 'bg-emerald-900/10 hover:bg-emerald-900/20' : 'bg-emerald-50/60 hover:bg-emerald-100', icon: isDark ? 'text-emerald-400' : 'text-emerald-600', title: isDark ? 'text-emerald-300' : 'text-emerald-800' }
                                 : { border: isDark ? 'border-rose-700/30' : 'border-rose-100', bg: isDark ? 'bg-rose-900/10 hover:bg-rose-900/20' : 'bg-rose-50/60 hover:bg-rose-100', icon: isDark ? 'text-rose-400' : 'text-rose-600', title: isDark ? 'text-rose-300' : 'text-rose-800' };
                         const title = isBooked ? 'Nueva cita' : isDelivered ? 'Vehículo entregado' : isCancelled ? 'Cancelada' : evt.type;
                         const IconComp = isBooked ? CheckCircle2 : isDelivered ? PackageCheck : XCircle;
