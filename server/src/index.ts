@@ -9355,6 +9355,96 @@ app.delete('/api/contacts/:phone/vehicles/:id', async (req, res) => {
     }
 });
 
+// Helper: devuelve los vehículos activos de un cliente en el formato del API.
+async function listClientVehicles(clean: string) {
+    if (!base) return [];
+    const records = await base(TABLE_VEHICLES).select({
+        filterByFormula: `AND({ClientPhone}='${clean}', OR({Active}=TRUE(), {Active}=BLANK()))`
+    }).all();
+    return records.map(r => ({
+        id: r.id,
+        matricula: (r.get('Matricula') as string) || '',
+        marca: (r.get('Marca') as string) || '',
+        modelo: (r.get('Modelo') as string) || '',
+        extra: (r.get('Extra') as string) || '',
+        notas: (r.get('Notas') as string) || ''
+    }));
+}
+
+// Añadir un vehículo a mano al cliente desde el panel del chat. La matrícula es
+// obligatoria (es la clave del vehículo). Si ya existe esa matrícula para el
+// cliente, actualiza marca/modelo PRESERVANDO Extra/Notas (que rellena el bot).
+app.post('/api/contacts/:phone/vehicles', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const clean = cleanNumber(req.params.phone);
+    const { matricula, marca, modelo } = req.body || {};
+    if (!clean) return res.status(400).json({ error: 'Teléfono inválido.' });
+    if (!matricula || !String(matricula).trim()) {
+        return res.status(400).json({ error: 'La matrícula es obligatoria.' });
+    }
+    const normMatricula = String(matricula).trim().replace(/\s+/g, '').toUpperCase();
+    try {
+        const existing = await base(TABLE_VEHICLES).select({
+            filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(normMatricula)}')`,
+            maxRecords: 1
+        }).firstPage();
+        if (existing.length > 0) {
+            // Ya existe: solo actualizamos marca/modelo, sin tocar Extra/Notas/Active.
+            await base(TABLE_VEHICLES).update([{
+                id: existing[0].id,
+                fields: { Marca: String(marca || ''), Modelo: String(modelo || '') }
+            }]);
+        } else {
+            await base(TABLE_VEHICLES).create([{
+                fields: { ClientPhone: clean, Matricula: normMatricula, Marca: String(marca || ''), Modelo: String(modelo || ''), Active: true }
+            }]);
+        }
+        res.json({ success: true, vehicles: await listClientVehicles(clean) });
+    } catch (e: any) {
+        console.error('[Vehicles] Error al añadir vehículo:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Editar un vehículo existente por su id de Airtable. A diferencia del POST
+// (que identifica por matrícula), aquí actualizamos el registro concreto, lo que
+// permite CORREGIR la propia matrícula de un vehículo ya guardado.
+app.put('/api/contacts/:phone/vehicles/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const clean = cleanNumber(req.params.phone);
+    const { matricula, marca, modelo } = req.body || {};
+    if (!matricula || !String(matricula).trim()) {
+        return res.status(400).json({ error: 'La matrícula es obligatoria.' });
+    }
+    const normMatricula = String(matricula).trim().replace(/\s+/g, '').toUpperCase();
+    try {
+        // Salvaguarda: el registro debe pertenecer a este cliente.
+        const rec = await base(TABLE_VEHICLES).find(req.params.id);
+        if (cleanNumber(rec.get('ClientPhone')) !== clean) {
+            return res.status(403).json({ error: 'Ese vehículo no pertenece a este cliente.' });
+        }
+        // Evitar duplicar la matrícula con OTRO vehículo del mismo cliente.
+        const dup = await base(TABLE_VEHICLES).select({
+            filterByFormula: `AND({ClientPhone}='${clean}', {Matricula}='${escAt(normMatricula)}')`
+        }).all();
+        if (dup.some(d => d.id !== req.params.id)) {
+            return res.status(409).json({ error: `Ya existe otro vehículo con la matrícula ${normMatricula}.` });
+        }
+        // Solo actualizamos los campos del formulario; Extra/Notas se preservan.
+        await base(TABLE_VEHICLES).update([{
+            id: req.params.id,
+            fields: { Matricula: normMatricula, Marca: String(marca || ''), Modelo: String(modelo || '') }
+        }]);
+        res.json({ success: true, vehicles: await listClientVehicles(clean) });
+    } catch (e: any) {
+        console.error('[Vehicles] Error al editar vehículo:', e.message);
+        if (/not found|could not find/i.test(e.message || '')) {
+            return res.status(404).json({ error: 'Vehículo no encontrado.' });
+        }
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // Resumen estadístico global de campañas (para el dashboard)
 app.get('/api/campaigns-stats', async (_req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
