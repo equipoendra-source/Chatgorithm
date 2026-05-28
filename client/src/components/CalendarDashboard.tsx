@@ -1549,6 +1549,22 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </span>
                                     </div>
                                 )}
+                                {/* Badge de "Vehículo entregado": si la cita ya se marcó como
+                                    entregada (desde el panel de Entregas o aquí mismo), se muestra
+                                    en verde con la hora y quién lo hizo. Indica que la secuencia
+                                    postventa ya está en marcha. */}
+                                {selectedAppt.deliveredAt && (
+                                    <div className="mt-3 flex flex-col items-center gap-1">
+                                        <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide border ${isDark ? 'bg-emerald-900/30 text-emerald-300 border-emerald-700' : 'bg-emerald-100 text-emerald-800 border-emerald-300'}`}>
+                                            <PackageCheck size={12} />
+                                            Vehículo entregado
+                                        </span>
+                                        <span className="text-[11px] text-slate-400">
+                                            {new Date(selectedAppt.deliveredAt).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                            {selectedAppt.deliveredBy ? ` · ${selectedAppt.deliveredBy}` : ''}
+                                        </span>
+                                    </div>
+                                )}
                             </div>
 
                             <div>
