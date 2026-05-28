@@ -1668,7 +1668,7 @@ async function logAppointmentEvent(data: {
 type AuditAction =
     | 'appointment.create' | 'appointment.update' | 'appointment.cancel' | 'appointment.delete'
     | 'appointment.deliver' | 'appointment.undeliver'
-    | 'contact.assign' | 'contact.unassign' | 'contact.status_change' | 'contact.update'
+    | 'contact.assign' | 'contact.unassign' | 'contact.status_change' | 'contact.update' | 'contact.create'
     | 'bot.toggle' | 'bot.config_update'
     | 'template.create' | 'template.delete'
     | 'campaign.create' | 'campaign.update' | 'campaign.delete' | 'campaign.send'
@@ -9235,6 +9235,79 @@ app.post('/api/contacts/bulk-opt-out', async (req, res) => {
         res.json({ success: true, updated: updates.length });
     } catch (e: any) {
         console.error('[BulkOptOut] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
+// Alta manual de contacto desde el panel (botón "Nuevo Contacto" del Sidebar).
+// Antes el frontend llamaba a POST /api/contacts pero esta ruta no existía, así
+// que el botón nunca funcionaba (404). Crea el contacto en Airtable y, si se
+// pasa matrícula, registra también el vehículo (clave para la postventa).
+app.post('/api/contacts', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const body = req.body || {};
+    const clean = cleanNumber(body.phone);
+    if (!clean || clean.length < 9 || clean.length > 15) {
+        return res.status(400).json({ error: 'Teléfono inválido (debe tener entre 9 y 15 dígitos).' });
+    }
+    const name = String(body.name || '').trim();
+    if (!name) return res.status(400).json({ error: 'El nombre es obligatorio.' });
+
+    try {
+        // Comprobar duplicado tolerante al prefijo de país (compara últimos 9 dígitos)
+        const last9 = clean.slice(-9);
+        const dupFormula = `OR({phone}='${clean}', RIGHT({phone},9)='${last9}')`;
+        const existing = await base('Contacts')
+            .select({ filterByFormula: dupFormula, maxRecords: 1, fields: ['phone', 'name'] })
+            .firstPage();
+        if (existing.length > 0) {
+            const exName = (existing[0].get('name') as string) || clean;
+            return res.status(409).json({ error: `Ya existe un contacto con ese teléfono (${exName}).` });
+        }
+
+        // Resolver origin_phone_id (qué línea/WABA) sólo si es una cuenta conocida
+        const rawOrigin = String(body.originPhoneId || '').trim();
+        const origin_phone_id = (rawOrigin && BUSINESS_ACCOUNTS[rawOrigin]) ? rawOrigin : '';
+
+        const fields: any = { phone: clean, name, status: 'Nuevo', origin_phone_id };
+        if (body.email && String(body.email).trim()) fields.email = String(body.email).trim();
+        if (body.address && String(body.address).trim()) fields.address = String(body.address).trim();
+        if (body.department && String(body.department).trim()) fields.department = String(body.department).trim();
+        if (Array.isArray(body.tags) && body.tags.length > 0) {
+            fields.tags = body.tags.map((t: any) => String(t).trim()).filter(Boolean);
+        }
+
+        const created = await base('Contacts').create([{ fields }]);
+        const rec = created[0];
+
+        // Vehículo opcional — la matrícula es la clave. Reutiliza upsertVehicle.
+        let vehicleSaved = false;
+        const matricula = String(body.matricula || '').trim();
+        if (matricula) {
+            try {
+                await upsertVehicle(clean, matricula, String(body.marca || ''), String(body.modelo || ''), '', '');
+                vehicleSaved = true;
+            } catch (ve: any) {
+                console.error('[Contacts] Contacto creado pero el vehículo falló:', ve.message);
+            }
+        }
+
+        const actor = String(body.actorUsername || 'admin').trim() || 'admin';
+        logAudit({
+            action: 'contact.create', user: actor, targetType: 'contact', targetId: rec.id, targetName: name,
+            summary: `Contacto creado manualmente: ${name} (${clean})${vehicleSaved ? ` + vehículo ${matricula}` : ''}`,
+            origin: 'web'
+        }).catch(() => {});
+
+        // Avisar al frontend para que refresque la lista de contactos
+        io.emit('contact_updated_notification');
+
+        res.json({ success: true, vehicleSaved, contact: { id: rec.id, phone: clean, name, status: 'Nuevo' } });
+    } catch (e: any) {
+        console.error('[Contacts] Error creando contacto:', e.message);
+        if (/unknown.*field|could not find field|insufficient permissions/i.test(e.message || '')) {
+            return res.status(503).json({ error: 'Algún campo no existe en la tabla Contacts de Airtable: ' + e.message });
+        }
         res.status(500).json({ error: e.message });
     }
 });

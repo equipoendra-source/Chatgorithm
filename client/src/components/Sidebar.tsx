@@ -121,6 +121,12 @@ export function Sidebar({
     const [newContactPhone, setNewContactPhone] = useState('');
     const [newContactName, setNewContactName] = useState('');
     const [newContactEmail, setNewContactEmail] = useState('');
+    const [newContactAddress, setNewContactAddress] = useState('');
+    const [newContactDepartment, setNewContactDepartment] = useState('');
+    const [newContactTags, setNewContactTags] = useState('');
+    const [newContactMatricula, setNewContactMatricula] = useState('');
+    const [newContactMarca, setNewContactMarca] = useState('');
+    const [newContactModelo, setNewContactModelo] = useState('');
     const [isCreating, setIsCreating] = useState(false);
 
     // Importación
@@ -368,13 +374,21 @@ export function Sidebar({
         });
     }, [currentView, teamChannel]);
 
+    const resetNewContactForm = () => {
+        setNewContactPhone(''); setNewContactName(''); setNewContactEmail('');
+        setNewContactAddress(''); setNewContactDepartment(''); setNewContactTags('');
+        setNewContactMatricula(''); setNewContactMarca(''); setNewContactModelo('');
+    };
+
     const handleCreateContact = async (e: React.FormEvent) => {
         e.preventDefault();
         const cleanInput = newContactPhone.replace(/\D/g, '');
-        if (cleanInput.length < 10 || cleanInput.length > 15) {
-            alert("El número debe tener entre 10 y 15 dígitos numéricos.");
+        // 9 dígitos = número español sin prefijo (ej. 600123456). Lo aceptamos.
+        if (cleanInput.length < 9 || cleanInput.length > 15) {
+            alert("El número debe tener entre 9 y 15 dígitos numéricos.");
             return;
         }
+        const tagsArr = newContactTags.split(',').map(t => t.trim()).filter(Boolean);
         setIsCreating(true);
         try {
             const res = await fetch(`${API_URL}/contacts`, {
@@ -384,15 +398,21 @@ export function Sidebar({
                     phone: cleanInput,
                     name: newContactName,
                     email: newContactEmail,
+                    address: newContactAddress,
+                    department: newContactDepartment,
+                    tags: tagsArr,
+                    matricula: newContactMatricula,
+                    marca: newContactMarca,
+                    modelo: newContactModelo,
                     originPhoneId: selectedAccountId || (accounts.length > 0 ? accounts[0].id : undefined)
                 })
             });
             const data = await res.json();
             if (res.ok) {
                 setShowAddContact(false);
-                setNewContactPhone(''); setNewContactName(''); setNewContactEmail('');
+                resetNewContactForm();
                 socket.emit('request_contacts');
-                alert("Contacto guardado correctamente.");
+                alert(data.vehicleSaved ? "Contacto y vehículo guardados correctamente." : "Contacto guardado correctamente.");
             } else {
                 alert("❌ Error: " + (data.error || "No se pudo crear."));
             }
@@ -849,14 +869,30 @@ export function Sidebar({
             {/* MODALES */}
             {showAddContact && (
                 <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
-                    <div className={`p-6 rounded-2xl w-full max-w-sm shadow-2xl ${isDark ? 'bg-slate-800' : 'bg-white'}`}>
-                        <h3 className={`font-bold mb-4 text-lg ${isDark ? 'text-white' : 'text-slate-800'}`}>Nuevo Contacto</h3>
-                        <form onSubmit={handleCreateContact} className="space-y-4">
-                            <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Teléfono</label><input required placeholder="Ej: 34600123456" value={newContactPhone} onChange={e => setNewContactPhone(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
-                            <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Nombre</label><input required placeholder="Ej: Juan Pérez" value={newContactName} onChange={e => setNewContactName(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
-                            <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Email (Opcional)</label><input placeholder="juan@email.com" value={newContactEmail} onChange={e => setNewContactEmail(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
-                            <div className="flex gap-2 pt-2">
-                                <button type="button" onClick={() => setShowAddContact(false)} className={`flex-1 py-3 font-bold rounded-xl transition ${isDark ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-slate-600 hover:bg-gray-200'}`}>Cancelar</button>
+                    <div className={`rounded-2xl w-full max-w-sm shadow-2xl flex flex-col max-h-[90vh] ${isDark ? 'bg-slate-800' : 'bg-white'}`}>
+                        <h3 className={`font-bold text-lg p-6 pb-3 flex-shrink-0 ${isDark ? 'text-white' : 'text-slate-800'}`}>Nuevo Contacto</h3>
+                        <form onSubmit={handleCreateContact} className="flex flex-col flex-1 min-h-0">
+                            <div className="space-y-4 px-6 overflow-y-auto flex-1">
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Teléfono *</label><input required placeholder="Ej: 34600123456" value={newContactPhone} onChange={e => setNewContactPhone(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Nombre *</label><input required placeholder="Ej: Juan Pérez" value={newContactName} onChange={e => setNewContactName(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Email</label><input placeholder="juan@email.com" value={newContactEmail} onChange={e => setNewContactEmail(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Dirección</label><input placeholder="Calle, nº, ciudad" value={newContactAddress} onChange={e => setNewContactAddress(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+
+                                {/* Vehículo — alimenta toda la postventa (recordatorios personalizados) */}
+                                <div className={`rounded-xl border p-3 space-y-3 ${isDark ? 'bg-slate-900/40 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
+                                    <p className="text-xs font-bold text-slate-400 uppercase">🚗 Vehículo (opcional)</p>
+                                    <div><label className="text-[11px] font-semibold text-slate-400 block mb-1">Matrícula</label><input placeholder="Ej: 1234ABC" value={newContactMatricula} onChange={e => setNewContactMatricula(e.target.value)} className={`w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none uppercase ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                        <div><label className="text-[11px] font-semibold text-slate-400 block mb-1">Marca</label><input placeholder="Seat" value={newContactMarca} onChange={e => setNewContactMarca(e.target.value)} className={`w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                        <div><label className="text-[11px] font-semibold text-slate-400 block mb-1">Modelo</label><input placeholder="Ibiza" value={newContactModelo} onChange={e => setNewContactModelo(e.target.value)} className={`w-full p-2.5 border rounded-lg text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                    </div>
+                                </div>
+
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Departamento</label><input placeholder="Ej: Taller, Ventas..." value={newContactDepartment} onChange={e => setNewContactDepartment(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                                <div><label className="text-xs font-bold text-slate-400 uppercase block mb-1">Etiquetas</label><input placeholder="Separadas por comas: VIP, flota..." value={newContactTags} onChange={e => setNewContactTags(e.target.value)} className={`w-full p-3 border rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'border-slate-200'}`} /></div>
+                            </div>
+                            <div className="flex gap-2 p-6 pt-4 flex-shrink-0">
+                                <button type="button" onClick={() => { setShowAddContact(false); resetNewContactForm(); }} className={`flex-1 py-3 font-bold rounded-xl transition ${isDark ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-gray-100 text-slate-600 hover:bg-gray-200'}`}>Cancelar</button>
                                 <button type="submit" disabled={isCreating} className="flex-1 py-3 bg-blue-600 text-white font-bold rounded-xl hover:bg-blue-700 shadow-lg transition disabled:opacity-50">{isCreating ? 'Guardando...' : 'Crear'}</button>
                             </div>
                         </form>
