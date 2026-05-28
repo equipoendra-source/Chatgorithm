@@ -30,6 +30,7 @@ const WhatsAppTemplatesManager = () => {
 
   const [templates, setTemplates] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [isSyncing, setIsSyncing] = useState(false);
 
   // Pestaña activa: 'reminders' (UTILITY+AUTH) o 'campaigns' (MARKETING)
   const [activeTab, setActiveTab] = useState('reminders');
@@ -73,6 +74,29 @@ const WhatsAppTemplatesManager = () => {
       console.error("No se pudo conectar al backend:", err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  // Sincroniza el estado real de las plantillas con Meta (por si el webhook de
+  // cambio de estado no llegó y siguen marcadas como "Revisión" estando ya
+  // aprobadas).
+  const syncStatuses = async () => {
+    setIsSyncing(true);
+    try {
+      const res = await fetch(`${API_URL_BASE}/templates/sync-status`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        await fetchTemplates();
+        alert(data.updated > 0
+          ? `✅ ${data.updated} plantilla(s) actualizada(s) con el estado real de Meta.`
+          : 'Todo al día: los estados ya coincidían con Meta.');
+      } else {
+        alert(`❌ ${data.error || 'No se pudo sincronizar.'}`);
+      }
+    } catch (e) {
+      alert('Error de conexión al sincronizar estados.');
+    } finally {
+      setIsSyncing(false);
     }
   };
 
@@ -263,6 +287,9 @@ const WhatsAppTemplatesManager = () => {
           <p className={`text-sm mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>Define y envía mensajes automáticos para iniciar conversaciones.</p>
         </div>
         <div className="flex gap-3">
+          <button onClick={syncStatuses} disabled={isSyncing} className={`flex items-center gap-2 border px-4 py-2.5 rounded-xl font-bold transition-all shadow-sm active:scale-95 disabled:opacity-50 ${isDark ? 'bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700' : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'}`} title="Consultar a Meta el estado real de las plantillas">
+            <RefreshCw size={18} className={`text-green-500 ${isSyncing ? 'animate-spin' : ''}`} /> {isSyncing ? 'Sincronizando...' : 'Sincronizar'}
+          </button>
           <button onClick={() => setIsHelpOpen(true)} className={`flex items-center gap-2 border px-4 py-2.5 rounded-xl font-bold transition-all shadow-sm active:scale-95 ${isDark ? 'bg-slate-800 border-slate-600 text-slate-300 hover:bg-slate-700' : 'bg-white border-slate-200 hover:bg-slate-50 text-slate-700'}`}>
             <BookOpen size={18} className="text-blue-500" /> Guía de Uso
           </button>

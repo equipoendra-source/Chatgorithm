@@ -6475,6 +6475,68 @@ app.post('/api/create-template', async (req, res) => {
 
 app.delete('/api/delete-template/:id', async (req, res) => { if (!base) return res.status(500).json({ error: "DB" }); try { await base(TABLE_TEMPLATES).destroy([req.params.id]); res.json({ success: true }); } catch (error: any) { res.status(500).json({ error: "Error" }); } });
 
+// Sincroniza el estado de las plantillas con Meta. El webhook
+// message_template_status_update puede no estar suscrito o no haber llegado,
+// dejando plantillas como "PENDING" en Airtable aunque Meta ya las aprobó. Este
+// endpoint consulta el estado real en cada WABA y actualiza Airtable. Empareja
+// por nombre+idioma (más robusto que por MetaId en multi-WABA).
+app.post('/api/templates/sync-status', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        // 1. Reunir WABAs (mismo patrón que create-template)
+        const wabaTargets: { businessId: string, token: string }[] = [];
+        const seen = new Set<string>();
+        if (waBusinessId && waToken) { wabaTargets.push({ businessId: waBusinessId, token: waToken }); seen.add(waBusinessId); }
+        for (const [phoneId, meta] of Object.entries(ACCOUNT_META)) {
+            const bId = meta.businessId;
+            if (!bId || seen.has(bId)) continue;
+            const tok = BUSINESS_ACCOUNTS[phoneId];
+            if (!tok) continue;
+            wabaTargets.push({ businessId: bId, token: tok });
+            seen.add(bId);
+        }
+        if (wabaTargets.length === 0) return res.status(400).json({ error: 'No hay WABAs configuradas.' });
+
+        // 2. Mapa nombre(+idioma) -> status real desde Meta
+        const metaStatus = new Map<string, string>();
+        for (const t of wabaTargets) {
+            try {
+                const r = await axios.get(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
+                    params: { fields: 'name,status,language,id', limit: 200 },
+                    headers: { Authorization: `Bearer ${t.token}` }
+                });
+                for (const tpl of (r.data?.data || [])) {
+                    const nm = String(tpl.name || '').toLowerCase();
+                    metaStatus.set(`${nm}|${tpl.language || ''}`, tpl.status);
+                    if (!metaStatus.has(nm)) metaStatus.set(nm, tpl.status); // fallback sin idioma
+                }
+            } catch (e: any) {
+                console.warn('[TemplateSync] WABA fallo:', e.response?.data?.error?.message || e.message);
+            }
+        }
+
+        // 3. Actualizar Airtable donde el estado difiera
+        const records = await base(TABLE_TEMPLATES).select().all();
+        const updates: { id: string, fields: any }[] = [];
+        for (const rec of records) {
+            const nm = String(rec.get('Name') || '').toLowerCase();
+            const lang = String(rec.get('Language') || '');
+            const current = String(rec.get('Status') || '');
+            const real = metaStatus.get(`${nm}|${lang}`) || metaStatus.get(nm);
+            if (real && real !== current) updates.push({ id: rec.id, fields: { Status: real } });
+        }
+        let updated = 0;
+        for (let i = 0; i < updates.length; i += 10) {
+            await base(TABLE_TEMPLATES).update(updates.slice(i, i + 10));
+            updated += Math.min(10, updates.length - i);
+        }
+        res.json({ success: true, updated, checked: records.length });
+    } catch (e: any) {
+        console.error('[TemplateSync] Error:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 app.post('/api/send-template', async (req, res) => {
     const { templateName, language, phone, variables, senderName, originPhoneId } = req.body;
     const token = getToken(originPhoneId);
