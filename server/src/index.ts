@@ -5957,10 +5957,15 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
                     const contactRec = contacts[0];
                     const oldStatus = (contactRec.get('status') as string) || '';
                     if (oldStatus !== 'Vehículo Entregado') {
+                        // typecast: true igual que en PUT /contacts/:phone/status —
+                        // el campo status es single-select; sin typecast, si la
+                        // opción "Vehículo Entregado" no existe aún, Airtable
+                        // rechaza el write, el catch lo traga y el contacto se
+                        // quedaba en "Cerrado" (estado que pone el bot al reservar).
                         await base('Contacts').update([{
                             id: contactRec.id,
                             fields: { status: 'Vehículo Entregado' }
-                        }]);
+                        }], { typecast: true });
                         // Dispara delivery_date + secuencia postventa
                         await handleContactStatusChange(contactRec, oldStatus, 'Vehículo Entregado', clientPhone);
                         io.emit('contact_updated_notification');
