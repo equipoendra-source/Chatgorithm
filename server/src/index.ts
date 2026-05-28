@@ -5489,33 +5489,57 @@ app.get('/api/appointments', async (req, res) => {
             base('Contacts').select().all()
         ]);
         const phoneToAccount: Record<string, string> = {};
-        // phoneToStatus: estado ACTUAL del contacto (status field). Lo usa el
-        // calendario para pintar la cita en verde cuando el cliente está en
-        // "Vehículo Entregado". Antes mirábamos appointment.deliveredAt, pero
-        // ese campo es un marcador histórico que no se actualiza si el
-        // compañero cambia luego el estado del cliente a "Cerrado" desde el
-        // modal — y el slot se quedaba verde indebidamente.
-        const phoneToStatus: Record<string, string> = {};
+        // Estado ACTUAL del contacto (status field) para colorear la cita en el
+        // calendario (verde si "Vehículo Entregado", amarillo el resto). Usamos
+        // el estado vigente del contacto, no appointment.deliveredAt (marcador
+        // histórico que no se actualiza si luego se cambia el estado a "Cerrado").
+        //
+        // Resolución robusta para NO heredar el estado de un contacto vecino:
+        //   · fullPhoneStatus / fullPhoneSeen → índice por teléfono COMPLETO.
+        //     Registramos TODOS los contactos (incluido estado vacío) para saber
+        //     que el contacto de la cita existe aunque no tenga estado.
+        //   · last9Status → respaldo por los últimos 9 dígitos, SOLO para estados
+        //     no vacíos, y solo se usa cuando no hay match exacto por teléfono
+        //     completo.
+        // Antes el mapa mezclaba teléfono completo y últimos 9 dígitos con "gana
+        // el primero" y NO guardaba estados vacíos: si dos contactos compartían
+        // los últimos 9 dígitos (o había un duplicado entregado), una cita de un
+        // cliente Abierto/Nuevo/sin estado heredaba el "Vehículo Entregado" del
+        // otro contacto y salía verde por error.
+        const fullPhoneStatus: Record<string, string> = {};
+        const fullPhoneSeen = new Set<string>();
+        const last9Status: Record<string, string> = {};
         contactRecords.forEach(c => {
             const phone = cleanNumber((c.get('phone') as string) || '');
             const oid = (c.get('origin_phone_id') as string) || '';
             const st = (c.get('status') as string) || '';
-            if (phone) {
-                if (oid) {
-                    if (!phoneToAccount[phone]) phoneToAccount[phone] = oid;
-                    if (phone.length >= 9 && !phoneToAccount[phone.slice(-9)]) phoneToAccount[phone.slice(-9)] = oid;
-                }
-                if (st) {
-                    if (!phoneToStatus[phone]) phoneToStatus[phone] = st;
-                    if (phone.length >= 9 && !phoneToStatus[phone.slice(-9)]) phoneToStatus[phone.slice(-9)] = st;
-                }
+            if (!phone) return;
+            if (oid) {
+                if (!phoneToAccount[phone]) phoneToAccount[phone] = oid;
+                if (phone.length >= 9 && !phoneToAccount[phone.slice(-9)]) phoneToAccount[phone.slice(-9)] = oid;
+            }
+            // Índice por teléfono completo: el primero gana (determinista).
+            // Guardamos también estados vacíos para registrar que el contacto
+            // existe y así NO caer al respaldo de 9 dígitos en la resolución.
+            if (!fullPhoneSeen.has(phone)) {
+                fullPhoneStatus[phone] = st;
+                fullPhoneSeen.add(phone);
+            }
+            // Respaldo por últimos 9 dígitos: solo estados no vacíos, primero gana.
+            if (st && phone.length >= 9 && !last9Status[phone.slice(-9)]) {
+                last9Status[phone.slice(-9)] = st;
             }
         });
         res.json(records.map(r => {
             const cp = cleanNumber((r.get('ClientPhone') as string) || '');
             const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
             const oid = cp ? (phoneToAccount[cp] || phoneToAccount[last9] || '') : '';
-            const cst = cp ? (phoneToStatus[cp] || phoneToStatus[last9] || '') : '';
+            // Si existe un contacto con el teléfono EXACTO, usamos SU estado
+            // (aunque sea vacío) y NO caemos al respaldo de 9 dígitos, para que
+            // un contacto vecino entregado no tiña esta cita de verde por error.
+            const cst = cp
+                ? (fullPhoneSeen.has(cp) ? (fullPhoneStatus[cp] || '') : (last9Status[last9] || ''))
+                : '';
             return {
                 id: r.id,
                 date: r.get('Date'),
