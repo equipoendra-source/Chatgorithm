@@ -89,6 +89,7 @@ interface MetaTemplate {
     language?: string;
     category?: string;
     status?: string;
+    body?: string;
     components?: any[];
 }
 
@@ -938,9 +939,9 @@ const CampaignWizard: React.FC<{
     // Variables detectadas en la plantilla seleccionada
     const selectedTemplate = useMemo(() => templates.find(t => t.name === templateName), [templates, templateName]);
     const templateBodyText = useMemo(() => {
-        if (!selectedTemplate?.components) return '';
-        const body = selectedTemplate.components.find((c: any) => c.type === 'BODY' || c.type === 'body');
-        return body?.text || '';
+        if (!selectedTemplate) return '';
+        const body = selectedTemplate.components?.find((c: any) => c.type === 'BODY' || c.type === 'body');
+        return body?.text || selectedTemplate.body || '';
     }, [selectedTemplate]);
     const templateVarCount = useMemo(() => {
         const matches = templateBodyText.match(/\{\{\d+\}\}/g);
@@ -1246,9 +1247,9 @@ const Step1Template: React.FC<any> = ({ isDark, name, setName, templateName, set
                                     </span>
                                 )}
                             </div>
-                            {t.components?.find((c: any) => c.type === 'BODY' || c.type === 'body') && (
+                            {(t.components?.find((c: any) => c.type === 'BODY' || c.type === 'body')?.text || t.body) && (
                                 <p className={`text-xs line-clamp-2 ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>
-                                    {t.components.find((c: any) => c.type === 'BODY' || c.type === 'body').text}
+                                    {t.components?.find((c: any) => c.type === 'BODY' || c.type === 'body')?.text || t.body}
                                 </p>
                             )}
                         </button>
