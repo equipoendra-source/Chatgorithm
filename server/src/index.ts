@@ -6034,7 +6034,7 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
         // esté cerrada. Fire-and-forget: no bloquea ni revierte la entrega.
         if (invoiceUrl && clientPhone) {
             const originId = contactOrigin || waPhoneId || 'default';
-            sendTemplateWithDocument(clientPhone, INVOICE_TEMPLATE, [clientName || 'cliente'], invoiceUrl, 'Factura.pdf', originId)
+            sendTemplateWithDocument(clientPhone, INVOICE_TEMPLATE, [], invoiceUrl, 'Factura.pdf', originId)
                 .then(r => { if (r !== true) console.warn(`[Deliver] No se pudo enviar la factura a ${clientPhone}: ${r}`); })
                 .catch(e => console.warn('[Deliver] Error enviando factura:', e?.message));
         }
@@ -6582,7 +6582,66 @@ app.post('/api/create-template', async (req, res) => {
     } catch (error: any) { res.status(400).json({ success: false, error: error.message }); }
 });
 
-app.delete('/api/delete-template/:id', async (req, res) => { if (!base) return res.status(500).json({ error: "DB" }); try { await base(TABLE_TEMPLATES).destroy([req.params.id]); res.json({ success: true }); } catch (error: any) { res.status(500).json({ error: "Error" }); } });
+// Borra una plantilla. Antes solo eliminaba la copia local en Airtable, dejando
+// la plantilla viva en Meta (y bloqueando recrearla con el mismo nombre). Ahora
+// también la borra en Meta en todas las WABAs configuradas (mismo patrón que
+// create/sync). Tolerante: si en Meta ya no existe, lo trata como éxito; pase lo
+// que pase, limpia la copia local de Airtable.
+app.delete('/api/delete-template/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB no disponible" });
+    try {
+        // 1. Leer el nombre de la plantilla (necesario para borrarla en Meta).
+        let templateName = '';
+        try {
+            const rec = await base(TABLE_TEMPLATES).find(req.params.id);
+            templateName = String(rec.get('Name') || '').trim();
+        } catch { /* ya no existe en Airtable; seguimos para limpiar de todos modos */ }
+
+        // 2. Borrar en Meta en todas las WABAs (mismo patrón que create/sync).
+        const metaResults: { businessId: string, ok: boolean, error?: string }[] = [];
+        if (templateName) {
+            const wabaTargets: { businessId: string, token: string }[] = [];
+            const seen = new Set<string>();
+            if (waBusinessId && waToken) { wabaTargets.push({ businessId: waBusinessId, token: waToken }); seen.add(waBusinessId); }
+            for (const [phoneId, meta] of Object.entries(ACCOUNT_META)) {
+                const bId = meta.businessId;
+                if (!bId || seen.has(bId)) continue;
+                const tok = BUSINESS_ACCOUNTS[phoneId];
+                if (!tok) continue;
+                wabaTargets.push({ businessId: bId, token: tok });
+                seen.add(bId);
+            }
+            for (const t of wabaTargets) {
+                try {
+                    await axios.delete(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
+                        params: { name: templateName },
+                        headers: { Authorization: `Bearer ${t.token}` }
+                    });
+                    metaResults.push({ businessId: t.businessId, ok: true });
+                } catch (e: any) {
+                    const msg = e.response?.data?.error?.message || e.message || 'error';
+                    // Si Meta dice que no existe, lo damos por borrada (éxito silencioso).
+                    const notFound = e.response?.status === 404 || /does not exist|not found|no.*exist/i.test(msg);
+                    metaResults.push({ businessId: t.businessId, ok: notFound, error: notFound ? undefined : msg });
+                    if (!notFound) console.warn(`[DeleteTemplate] Meta WABA ${t.businessId} falló: ${msg}`);
+                }
+            }
+        }
+
+        // 3. Borrar la copia local en Airtable.
+        try { await base(TABLE_TEMPLATES).destroy([req.params.id]); } catch { /* ya no existía */ }
+
+        const metaWarnings = metaResults.filter(r => !r.ok).map(r => r.error).filter(Boolean);
+        res.json({
+            success: true,
+            deletedFromMeta: metaResults.some(r => r.ok),
+            metaWarnings
+        });
+    } catch (error: any) {
+        console.error('[DeleteTemplate] Error:', error.message);
+        res.status(500).json({ error: "Error borrando la plantilla." });
+    }
+});
 
 // Sincroniza el estado de las plantillas con Meta. El webhook
 // message_template_status_update puede no estar suscrito o no haber llegado,
