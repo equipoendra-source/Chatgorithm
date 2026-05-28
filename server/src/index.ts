@@ -5444,18 +5444,33 @@ app.get('/api/appointments', async (req, res) => {
             base('Contacts').select().all()
         ]);
         const phoneToAccount: Record<string, string> = {};
+        // phoneToStatus: estado ACTUAL del contacto (status field). Lo usa el
+        // calendario para pintar la cita en verde cuando el cliente está en
+        // "Vehículo Entregado". Antes mirábamos appointment.deliveredAt, pero
+        // ese campo es un marcador histórico que no se actualiza si el
+        // compañero cambia luego el estado del cliente a "Cerrado" desde el
+        // modal — y el slot se quedaba verde indebidamente.
+        const phoneToStatus: Record<string, string> = {};
         contactRecords.forEach(c => {
             const phone = cleanNumber((c.get('phone') as string) || '');
             const oid = (c.get('origin_phone_id') as string) || '';
-            if (phone && oid) {
-                if (!phoneToAccount[phone]) phoneToAccount[phone] = oid;
-                if (phone.length >= 9 && !phoneToAccount[phone.slice(-9)]) phoneToAccount[phone.slice(-9)] = oid;
+            const st = (c.get('status') as string) || '';
+            if (phone) {
+                if (oid) {
+                    if (!phoneToAccount[phone]) phoneToAccount[phone] = oid;
+                    if (phone.length >= 9 && !phoneToAccount[phone.slice(-9)]) phoneToAccount[phone.slice(-9)] = oid;
+                }
+                if (st) {
+                    if (!phoneToStatus[phone]) phoneToStatus[phone] = st;
+                    if (phone.length >= 9 && !phoneToStatus[phone.slice(-9)]) phoneToStatus[phone.slice(-9)] = st;
+                }
             }
         });
         res.json(records.map(r => {
             const cp = cleanNumber((r.get('ClientPhone') as string) || '');
             const last9 = cp.length >= 9 ? cp.slice(-9) : cp;
             const oid = cp ? (phoneToAccount[cp] || phoneToAccount[last9] || '') : '';
+            const cst = cp ? (phoneToStatus[cp] || phoneToStatus[last9] || '') : '';
             return {
                 id: r.id,
                 date: r.get('Date'),
@@ -5496,7 +5511,14 @@ app.get('/api/appointments', async (req, res) => {
                 // días"). Tolerante: si el campo no existe en Airtable, queda
                 // null y nada se rompe.
                 deliveredAt: (r.get('DeliveredAt') as string) || null,
-                deliveredBy: (r.get('DeliveredBy') as string) || ''
+                deliveredBy: (r.get('DeliveredBy') as string) || '',
+                // Estado actual del cliente (Contacts.status). Lo usa el
+                // calendario para colorear la cita según el estado vigente
+                // (verde si "Vehículo Entregado"). Si el contacto aún no
+                // existe en la tabla Contacts (cita walk-in recién creada
+                // sin chat previo), queda vacío y la cita se pinta como
+                // "Reservada" normal.
+                clientStatus: cst
             };
         }));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }

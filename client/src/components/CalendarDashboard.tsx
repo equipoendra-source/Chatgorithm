@@ -46,6 +46,12 @@ interface Appointment {
     deliveredAt?: string | null;
     // Username del trabajador que marcó la entrega. Solo informativo.
     deliveredBy?: string;
+    // Estado actual del contacto (Contacts.status). Lo manda el backend al
+    // cargar /api/appointments. Lo usamos para colorear el slot en el
+    // calendario: si vale "Vehículo Entregado", la cita se pinta en verde
+    // aunque deliveredAt esté vacío. Y viceversa: si está en "Cerrado", la
+    // cita NO sale verde aunque deliveredAt tenga fecha histórica.
+    clientStatus?: string;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -1015,7 +1021,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // El delivered tiene prioridad sobre booked porque una cita entregada
         // técnicamente sigue siendo Booked en el modelo, pero queremos que el
         // equipo la distinga de un vistazo en el calendario.
-        const isDelivered = !!s.deliveredAt;
+        //
+        // OJO: el criterio es el ESTADO ACTUAL del cliente, no la fecha histórica
+        // deliveredAt. Así si después de entregar el coche el compañero cambia el
+        // status a "Cerrado", la cita deja de mostrarse en verde.
+        const isDelivered = s.clientStatus === 'Vehículo Entregado';
         const isBooked = s.status === 'Booked';
         return (
             <div
@@ -1265,7 +1275,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             <div
                                                 key={s.id}
                                                 onClick={() => handleOpenEdit(s)}
-                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${s.deliveredAt
+                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${s.clientStatus === 'Vehículo Entregado'
                                                     ? (isDark
                                                         ? 'bg-emerald-900/40 border-emerald-800 text-emerald-300 hover:bg-emerald-900/60'
                                                         : 'bg-emerald-50 border-emerald-100 text-emerald-700 hover:bg-emerald-100')
@@ -1298,7 +1308,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     )}
                                                     {/* En móvil mostramos el nombre del cliente si está reservado */}
                                                     {s.status === 'Booked' && (
-                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${s.deliveredAt
+                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${s.clientStatus === 'Vehículo Entregado'
                                                             ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
                                                             : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
                                                             • {s.clientName || 'Cliente'}
@@ -1450,7 +1460,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
                                     const end = new Date(start.getTime() + dur * 60000);
                                     const isBooked = s.status === 'Booked';
-                                    const isDelivered = !!s.deliveredAt;
+                                    const isDelivered = s.clientStatus === 'Vehículo Entregado';
                                     return (
                                         <div
                                             key={s.id}
@@ -1572,16 +1582,27 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     entregada (desde el panel de Entregas o aquí mismo), se muestra
                                     en verde con la hora y quién lo hizo. Indica que la secuencia
                                     postventa ya está en marcha. */}
-                                {selectedAppt.deliveredAt && (
+                                {/* Badge "Vehículo entregado" solo si el estado ACTUAL del
+                                    cliente es ese. Antes nos basábamos solo en
+                                    selectedAppt.deliveredAt (fecha histórica) y el badge
+                                    seguía apareciendo aunque el compañero hubiera cambiado
+                                    el estado del cliente a "Cerrado" después de entregar.
+                                    Mostramos el badge si: o bien el estado actual lo
+                                    indica, o (si aún no se ha cargado el estado del
+                                    contacto vía fetch) hay deliveredAt — para no perder la
+                                    señal el primer momento al abrir el modal. */}
+                                {(editContactStatus === 'Vehículo Entregado' || (originalContactStatus === 'Vehículo Entregado' && selectedAppt.deliveredAt)) && (
                                     <div className="mt-3 flex flex-col items-center gap-1">
                                         <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold uppercase tracking-wide border ${isDark ? 'bg-emerald-900/30 text-emerald-300 border-emerald-700' : 'bg-emerald-100 text-emerald-800 border-emerald-300'}`}>
                                             <PackageCheck size={12} />
                                             Vehículo entregado
                                         </span>
-                                        <span className="text-[11px] text-slate-400">
-                                            {new Date(selectedAppt.deliveredAt).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
-                                            {selectedAppt.deliveredBy ? ` · ${selectedAppt.deliveredBy}` : ''}
-                                        </span>
+                                        {selectedAppt.deliveredAt && (
+                                            <span className="text-[11px] text-slate-400">
+                                                {new Date(selectedAppt.deliveredAt).toLocaleString('es-ES', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })}
+                                                {selectedAppt.deliveredBy ? ` · ${selectedAppt.deliveredBy}` : ''}
+                                            </span>
+                                        )}
                                     </div>
                                 )}
                             </div>
