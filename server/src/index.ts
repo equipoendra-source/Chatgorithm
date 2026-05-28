@@ -2019,6 +2019,34 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
 //   - Cuerpo: ej. "Hola {{1}}, te adjuntamos la factura de tu visita. ¡Gracias!"
 const INVOICE_TEMPLATE = 'factura_entrega';
 
+// Cache nombre de plantilla → código de idioma real en Meta. Una plantilla puede
+// estar aprobada en "es", "es_ES", "es_MX"… y enviar con el código equivocado da
+// el error #132001 ("Template name does not exist in es_ES"). Preguntamos a Meta
+// el idioma real una vez y lo cacheamos para no repetir la llamada.
+const templateLangCache = new Map<string, string>();
+async function resolveTemplateLanguage(templateName: string, originPhoneId: string): Promise<string | null> {
+    if (templateLangCache.has(templateName)) return templateLangCache.get(templateName)!;
+    const token = getToken(originPhoneId);
+    const businessId = (ACCOUNT_META[originPhoneId] && ACCOUNT_META[originPhoneId].businessId) || waBusinessId;
+    if (!token || !businessId) return null;
+    try {
+        const r = await axios.get(`https://graph.facebook.com/v18.0/${businessId}/message_templates`, {
+            params: { name: templateName, fields: 'name,language,status', limit: 50 },
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        const tpls = (r.data?.data || []).filter((t: any) => t.name === templateName);
+        const chosen = tpls.find((t: any) => t.status === 'APPROVED') || tpls[0];
+        if (chosen?.language) {
+            templateLangCache.set(templateName, chosen.language);
+            console.log(`🌐 [Factura] Idioma real de "${templateName}" en Meta: ${chosen.language}`);
+            return chosen.language;
+        }
+    } catch (e: any) {
+        console.warn(`[Factura] No se pudo resolver idioma de ${templateName}:`, e.response?.data?.error?.message || e.message);
+    }
+    return null;
+}
+
 // Igual que sendTemplateMessage pero con cabecera de DOCUMENTO — para adjuntar la
 // factura (PDF) a una plantilla aprobada con header de tipo document. Funciona
 // aunque la ventana de 24h del cliente esté cerrada (es una plantilla).
@@ -2033,9 +2061,12 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
         if (bodyVars.length > 0) {
             components.push({ type: "body", parameters: bodyVars.map(v => ({ type: "text", text: v })) });
         }
+        // El idioma de la plantilla puede ser "es", "es_ES", "es_MX"… Enviar con el
+        // código equivocado da el error #132001. Resolvemos el idioma real en Meta.
+        const langCode = (await resolveTemplateLanguage(templateName, originPhoneId)) || 'es_ES';
         await axios.post(
             `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
-            { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: "es_ES" }, components } },
+            { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: langCode }, components } },
             { headers: { Authorization: `Bearer ${token}` } }
         );
         await saveAndEmitMessage({
