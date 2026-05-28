@@ -133,6 +133,10 @@ export function Sidebar({
 
     // Filtros
     const [activeFilters, setActiveFilters] = useState({ department: '', status: '', tag: '', agent: '' });
+    // Filtro especial "sin conversación": surface a los contactos creados a mano
+    // (alta manual, sin ningún mensaje todavía) que de otro modo quedan hundidos
+    // al fondo de la bandeja porque se ordena por last_message_time.
+    const [onlyNoConv, setOnlyNoConv] = useState(false);
     const [availableAgents, setAvailableAgents] = useState<Agent[]>([]);
     const [availableDepts, setAvailableDepts] = useState<string[]>([]);
     const [availableStatuses, setAvailableStatuses] = useState<string[]>([]);
@@ -452,14 +456,27 @@ export function Sidebar({
         if (activeFilters.status && c.status !== activeFilters.status) return false;
         if (activeFilters.agent && c.assigned_to !== activeFilters.agent) return false;
         if (activeFilters.tag && (!c.tags || !c.tags.includes(activeFilters.tag))) return false;
+        // "Sin conversación": contactos sin ningún mensaje (alta manual). Un
+        // contacto con conversación siempre tiene last_message_time.
+        if (onlyNoConv && c.last_message_time) return false;
         return true;
     });
+
+    // Al filtrar "sin conversación" no hay last_message_time para ordenar, así
+    // que los ordenamos alfabéticamente por nombre para que sean fáciles de
+    // localizar (en el resto de vistas mantenemos el orden del servidor por
+    // recencia de mensaje).
+    if (onlyNoConv) {
+        filteredContacts.sort((a, b) =>
+            normalizeForSearch(a.name).localeCompare(normalizeForSearch(b.name))
+        );
+    }
 
     const updateFilter = (key: keyof typeof activeFilters, value: string) => {
         setActiveFilters(prev => ({ ...prev, [key]: value }));
     };
 
-    const hasActiveFilters = Object.values(activeFilters).some(v => v !== '');
+    const hasActiveFilters = Object.values(activeFilters).some(v => v !== '') || onlyNoConv;
 
     const handleLineChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const val = e.target.value;
@@ -597,7 +614,7 @@ export function Sidebar({
                                 }`}>
                                 <div className="flex justify-between items-center mb-1">
                                     <span className={`text-[10px] font-bold uppercase ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Filtrar por:</span>
-                                    {hasActiveFilters && <button onClick={() => setActiveFilters({ department: '', status: '', tag: '', agent: '' })} className="text-[10px] text-red-500 hover:underline">Borrar filtros</button>}
+                                    {hasActiveFilters && <button onClick={() => { setActiveFilters({ department: '', status: '', tag: '', agent: '' }); setOnlyNoConv(false); }} className="text-[10px] text-red-500 hover:underline">Borrar filtros</button>}
                                 </div>
                                 <div className="grid grid-cols-2 gap-2">
                                     <div className="relative">
@@ -641,6 +658,23 @@ export function Sidebar({
                                         <User className={`w-3 h-3 absolute left-2 top-2 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} />
                                     </div>
                                 </div>
+                                {/* Toggle "Sin conversación": muestra solo contactos creados a
+                                    mano que aún no tienen ningún mensaje (alta manual). */}
+                                <button
+                                    type="button"
+                                    onClick={() => setOnlyNoConv(v => !v)}
+                                    className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs font-medium transition ${onlyNoConv
+                                        ? (isDark ? 'bg-blue-900/40 border-blue-700 text-blue-300' : 'bg-blue-50 border-blue-300 text-blue-700')
+                                        : (isDark ? 'bg-slate-700 border-slate-600 text-slate-300' : 'bg-white border-slate-200 text-slate-700')}`}
+                                >
+                                    <span className="flex items-center gap-1.5">
+                                        <UserPlus className="w-3 h-3" />
+                                        Sin conversación
+                                    </span>
+                                    <span className={`w-8 h-4 rounded-full flex items-center transition ${onlyNoConv ? 'bg-blue-500 justify-end' : (isDark ? 'bg-slate-600 justify-start' : 'bg-slate-300 justify-start')}`}>
+                                        <span className="w-3 h-3 bg-white rounded-full mx-0.5" />
+                                    </span>
+                                </button>
                             </div>
                         )}
                     </>
