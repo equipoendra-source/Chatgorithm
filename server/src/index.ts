@@ -2054,38 +2054,60 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
     const token = getToken(originPhoneId);
     if (!token) { const msg = `Token no encontrado para ${originPhoneId}`; console.error(`❌ [Factura] ${msg}`); return msg; }
     const cleanTo = cleanNumber(phone);
-    try {
-        const components: any[] = [
-            { type: "header", parameters: [{ type: "document", document: { link: documentUrl, filename: filename || 'Factura.pdf' } }] }
-        ];
-        if (bodyVars.length > 0) {
-            components.push({ type: "body", parameters: bodyVars.map(v => ({ type: "text", text: v })) });
-        }
-        // El idioma de la plantilla puede ser "es", "es_ES", "es_MX"… Enviar con el
-        // código equivocado da el error #132001. Resolvemos el idioma real en Meta.
-        const langCode = (await resolveTemplateLanguage(templateName, originPhoneId)) || 'es_ES';
-        await axios.post(
-            `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
-            { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: langCode }, components } },
-            { headers: { Authorization: `Bearer ${token}` } }
-        );
-        await saveAndEmitMessage({
-            text: `[Factura] ${templateName}`,
-            sender: "Sistema",
-            recipient: cleanTo,
-            timestamp: new Date().toISOString(),
-            type: "template",
-            origin_phone_id: originPhoneId
-        });
-        return true;
-    } catch (e: any) {
-        const metaErr = e.response?.data?.error;
-        const errorMsg = metaErr
-            ? `Meta ${metaErr.code || ''} ${metaErr.error_subcode || ''}: ${metaErr.message || ''} ${metaErr.error_data?.details || ''}`.trim()
-            : (e.message || 'unknown');
-        console.error(`❌ [Factura] Error enviando plantilla ${templateName} a ${cleanTo}:`, errorMsg);
-        return errorMsg;
+    const components: any[] = [
+        { type: "header", parameters: [{ type: "document", document: { link: documentUrl, filename: filename || 'Factura.pdf' } }] }
+    ];
+    if (bodyVars.length > 0) {
+        components.push({ type: "body", parameters: bodyVars.map(v => ({ type: "text", text: v })) });
     }
+    // El idioma de la plantilla puede ser "es", "es_ES", "es_MX"… Enviar con el
+    // código equivocado da el error #132001 ("does not exist in es_ES").
+    // 1) Intentamos resolver el idioma REAL preguntando a Meta.
+    // 2) Si falla o da #132001, reintentamos con la lista de candidatos hasta
+    //    que uno funcione. Así nunca dependemos de un código fijo.
+    const resolved = await resolveTemplateLanguage(templateName, originPhoneId);
+    const candidates = [resolved, 'es', 'es_ES', 'es_MX', 'es_AR']
+        .filter((c): c is string => !!c)
+        .filter((c, i, arr) => arr.indexOf(c) === i); // únicos, en orden
+    let lastErr = '';
+    for (const langCode of candidates) {
+        try {
+            await axios.post(
+                `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
+                { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: langCode }, components } },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+            // Funcionó: cacheamos el idioma bueno para no reintentar la próxima vez.
+            templateLangCache.set(templateName, langCode);
+            console.log(`✅ [Factura] Plantilla ${templateName} enviada a ${cleanTo} en idioma ${langCode}`);
+            await saveAndEmitMessage({
+                text: `[Factura] ${templateName}`,
+                sender: "Sistema",
+                recipient: cleanTo,
+                timestamp: new Date().toISOString(),
+                type: "template",
+                origin_phone_id: originPhoneId
+            });
+            return true;
+        } catch (e: any) {
+            const metaErr = e.response?.data?.error;
+            const errorMsg = metaErr
+                ? `Meta ${metaErr.code || ''} ${metaErr.error_subcode || ''}: ${metaErr.message || ''} ${metaErr.error_data?.details || ''}`.trim()
+                : (e.message || 'unknown');
+            lastErr = errorMsg;
+            // #132001 = idioma equivocado → probar el siguiente candidato.
+            if (metaErr?.code === 132001) {
+                console.warn(`⚠️ [Factura] ${templateName} no existe en idioma ${langCode}, probando siguiente…`);
+                continue;
+            }
+            // Cualquier otro error (documento, ventana, token…) no se arregla
+            // cambiando de idioma: abortamos y devolvemos el error real.
+            console.error(`❌ [Factura] Error enviando plantilla ${templateName} a ${cleanTo}:`, errorMsg);
+            return errorMsg;
+        }
+    }
+    console.error(`❌ [Factura] No se encontró idioma válido para ${templateName} a ${cleanTo}. Último error:`, lastErr);
+    return lastErr || 'No se pudo enviar la factura';
 }
 
 // --- Programar notificación con idempotencia ---
