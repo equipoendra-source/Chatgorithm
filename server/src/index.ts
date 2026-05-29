@@ -4251,6 +4251,32 @@ function detectCancellationIntent(text: string): CancellationIntent {
         .trim();
     if (!norm) return 'none';
 
+    // GUARDA ANTI-FALSO-POSITIVO (#2): la palabra "cancelar/anular" puede aparecer
+    // en mensajes que NO son una orden de cancelar. Antes, un simple includes()
+    // borraba la cita en estos casos. Si detectamos uno, NO cortamos el flujo:
+    // que lo gestione Laura con contexto.
+    //   - Cambio:    "no quiero cancelar, prefiero cambiar la cita / moverla a otro día"
+    //   - Negación:  "no quiero cancelar", "mejor no cancelo", "no hace falta anular"
+    //   - Pregunta:  "¿puedo cancelar si me surge algo?", "¿cómo cancelo una cita?"
+    const mentionsCancel = /(cancel|anul)/.test(norm);
+    if (mentionsCancel) {
+        const wantsChange = /\b(cambi|mover|muev|movi|repro|reagend|reprogram|adelant|retras|pospon|aplaz)\b/.test(norm)
+            || /\b(otra fecha|otro dia|otra hora|otro horario|otro momento)\b/.test(norm);
+        const negPhrases = [
+            'no quiero cancelar', 'no deseo cancelar', 'no hace falta cancelar', 'no necesito cancelar',
+            'no voy a cancelar', 'no pienso cancelar', 'no quiero anular', 'no deseo anular',
+            'no hace falta anular', 'mejor no cancelar', 'mejor no cancelo', 'mejor no anular',
+            'no la canceles', 'no lo canceles', 'no me la cancele', 'no cancelo nada'
+        ];
+        const negated = negPhrases.some(p => norm.includes(p));
+        // ¿Es una pregunta?: signo de interrogación en el texto original.
+        const isQuestion = /[?¿]/.test(text || '');
+        // ¿Hay una orden clara de cancelar pese a ser pregunta? ("¿me cancelas la cita por favor?")
+        const wantsCancel = /\b(quiero|deseo|necesito|quisiera|me gustaria|porfa|por favor)\b/.test(norm);
+        if (wantsChange || negated) return 'none';
+        if (isQuestion && !wantsCancel) return 'none';
+    }
+
     // EXPLÍCITO: el cliente dice claramente "cancelar" / "anular". La intención
     // es 100% de cancelar — si no hay cita activa, lo informamos.
     const explicitPhrases = [
@@ -4500,9 +4526,13 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
         }).all();
         const history = [...records].reverse().map((r: any) => {
             const sender = r.get('sender') as string;
-            // Remitentes de clientes son siempre dígitos puros (número de teléfono limpio)
-            // Cualquier otro valor (Bot IA, Agente, nombre de agente...) es el lado "model"
-            const isBot = !/^\d+$/.test(sender);
+            // El cliente (lado "user") es quien tiene como `sender` su propio número.
+            // Cualquier otro valor (Bot IA, nombre de agente, vacío...) es el lado
+            // "model". Comparamos con cleanNumber por AMBOS lados para no fallar si
+            // el número viene con "+", espacios o prefijo distinto. Antes se usaba
+            // /^\d+$/ y un sender tipo "+34..." se tomaba por error como mensaje del
+            // bot, descolocando todo el historial que ve Gemini.
+            const isBot = cleanNumber(sender) !== clean;
             return { role: isBot ? "model" : "user", parts: [{ text: r.get('text') as string || "" }], _ts: r.get('timestamp') as string };
         });
 
@@ -4529,6 +4559,15 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
             if (validHistory.length === 0 || validHistory[validHistory.length - 1].role !== msg.role) {
                 validHistory.push(msg);
             }
+        }
+
+        // El turno ACTUAL del cliente (o la RÁFAGA de mensajes ya agrupada por el
+        // debounce) se envía aparte vía chat.sendMessage(currentText). Si el
+        // historial terminara en 'user', al mandar otro 'user' Gemini falla con
+        // "must alternate". Quitamos los 'user' finales: ese contenido ya viaja en
+        // el mensaje que se envía ahora, así que no se pierde nada.
+        while (validHistory.length > 0 && validHistory[validHistory.length - 1].role === 'user') {
+            validHistory.pop();
         }
 
         return validHistory;
@@ -4574,6 +4613,22 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
     } catch (e) {
         console.error('[Laura] Error parseando respuesta JSON (intento 3 regex):', e, '| Texto recibido:', jsonText);
     }
+
+    // Intento 4: Gemini a veces responde en lenguaje natural (sin JSON). Si el
+    // texto NO parece JSON (sin llaves ni claves de la estructura) ni contiene
+    // IDs internos (rec...), lo enviamos tal cual en vez del mensaje de error
+    // genérico — así el cliente recibe la respuesta real en lugar de "no puedo
+    // procesar tu solicitud".
+    try {
+        const plain = jsonText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        const looksJson = /[{}]/.test(plain) || /"?(customer_message|internal_control|intent|status)"?\s*:/i.test(plain);
+        const hasInternalId = /\brec[A-Za-z0-9]{8,}\b/.test(plain);
+        if (plain && !looksJson && !hasInternalId && plain.length <= 1500) {
+            console.warn('[Laura] Respuesta no-JSON tolerada: enviando texto plano al cliente.');
+            await sendWhatsAppText(phone, plain, originId);
+            return;
+        }
+    } catch (_) { /* continuar al fallback */ }
 
     // Todos los intentos fallaron: NUNCA enviar el texto crudo
     console.error('[Laura] Error parseando respuesta JSON: todos los intentos fallaron. Texto recibido:', jsonText);
@@ -5134,6 +5189,72 @@ Cuando el cliente indique qué tipo de servicio necesita:
     }
     metrics.pushLatency(Date.now() - iaStartedAt);
     io.emit('ai_status', { phone: clean, status: 'idle' });
+}
+
+// =========================================================================
+// AGRUPADOR DE MENSAJES EN RÁFAGA (debounce por teléfono)  [Fix #1]
+// =========================================================================
+// En WhatsApp el cliente suele escribir en varios mensajes seguidos ("Hola",
+// "quería una cita", "para el lunes"). Si lanzáramos processAI con cada uno,
+// Laura respondería 3 veces a fragmentos sueltos y daría la sensación de que
+// "no se entera". Aquí acumulamos los mensajes de TEXTO unos segundos, los
+// unimos y procesamos UN solo turno de Gemini con todo el contexto.
+//   - El mensaje YA se guardó en Airtable y se emitió al panel ANTES de llegar
+//     aquí, así que el equipo lo sigue viendo en tiempo real.
+//   - Los mensajes con MEDIA (audio/imagen/vídeo/doc) NO se agrupan: vaciamos
+//     primero el texto pendiente y procesamos el media en su propio turno.
+//   - withPhoneLock dentro de processAI serializa los turnos de un mismo número.
+const AI_DEBOUNCE_MS = 6000;        // espera tras el último mensaje del cliente
+const AI_DEBOUNCE_MAX_MS = 15000;   // tope total desde el primer mensaje del lote
+interface AIBufferEntry { texts: string[]; name: string; originPhoneId: string; timer: ReturnType<typeof setTimeout>; firstAt: number; }
+const aiInboundBuffer = new Map<string, AIBufferEntry>();
+
+function flushAIBuffer(phone: string): void {
+    const entry = aiInboundBuffer.get(phone);
+    if (!entry) return;
+    clearTimeout(entry.timer);
+    aiInboundBuffer.delete(phone);
+    const combined = entry.texts.join('\n').trim();
+    if (!combined) return;
+    // No await (esto corre dentro de un setTimeout): capturamos el rechazo para
+    // que un fallo de processAIInner no se convierta en unhandledRejection.
+    processAI(combined, phone, entry.name, entry.originPhoneId)
+        .catch(err => console.error('[Laura] Error procesando lote agrupado:', err));
+}
+
+function enqueueForAI(
+    phone: string,
+    text: string,
+    name: string,
+    originPhoneId: string,
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
+): void {
+    // Media: no se agrupa. Vaciamos el texto pendiente (si lo hay) y procesamos
+    // el media de inmediato en su propio turno.
+    if (inboundMedia) {
+        flushAIBuffer(phone);
+        processAI(text, phone, name, originPhoneId, inboundMedia)
+            .catch(err => console.error('[Laura] Error procesando media:', err));
+        return;
+    }
+    const now = Date.now();
+    const existing = aiInboundBuffer.get(phone);
+    if (existing) {
+        existing.texts.push(text);
+        existing.name = name;
+        existing.originPhoneId = originPhoneId;
+        clearTimeout(existing.timer);
+        // Reiniciamos el contador, pero sin pasarnos del tope total del lote.
+        const elapsed = now - existing.firstAt;
+        const wait = Math.max(0, Math.min(AI_DEBOUNCE_MS, AI_DEBOUNCE_MAX_MS - elapsed));
+        existing.timer = setTimeout(() => flushAIBuffer(phone), wait);
+    } else {
+        const entry: AIBufferEntry = {
+            texts: [text], name, originPhoneId, firstAt: now,
+            timer: setTimeout(() => flushAIBuffer(phone), AI_DEBOUNCE_MS)
+        };
+        aiInboundBuffer.set(phone, entry);
+    }
 }
 
 // ==========================================
@@ -7792,7 +7913,7 @@ app.post('/webhook', async (req, res) => {
                         : `agente inactivo (${idleMin}min ≥ ${HUMAN_IDLE_MINUTES}min)`;
                     console.log(`🤖 [Bot] Chat ${from} asignado a "${assignedTo}" pero ${reason}. Laura responde sin tocar la asignación.`);
                     if (hasPendingBooking && !activeAiChats.has(from)) activeAiChats.add(from);
-                    processAI(text, from, name, originPhoneId, inboundMediaPkg);
+                    enqueueForAI(from, text, name, originPhoneId, inboundMediaPkg);
                 }
             } else {
                 const reason = activeAiChats.has(from) ? 'sesión activa'
@@ -7800,7 +7921,7 @@ app.post('/webhook', async (req, res) => {
                     : 'chat sin asignar';
                 console.log(`🤖 [Bot] Laura responde a ${from} (${reason}).`);
                 if (hasPendingBooking && !activeAiChats.has(from)) activeAiChats.add(from);
-                processAI(text, from, name, originPhoneId, inboundMediaPkg);
+                enqueueForAI(from, text, name, originPhoneId, inboundMediaPkg);
             }
         } else if (body.object && body.entry?.[0]?.changes?.[0]?.value?.statuses) {
             // Status updates (delivered, read, etc.) - ignorar silenciosamente
