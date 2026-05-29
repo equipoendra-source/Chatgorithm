@@ -2026,23 +2026,64 @@ const INVOICE_TEMPLATE = 'factura_entrega';
 const templateLangCache = new Map<string, string>();
 async function resolveTemplateLanguage(templateName: string, originPhoneId: string): Promise<string | null> {
     if (templateLangCache.has(templateName)) return templateLangCache.get(templateName)!;
-    const token = getToken(originPhoneId);
-    const businessId = (ACCOUNT_META[originPhoneId] && ACCOUNT_META[originPhoneId].businessId) || waBusinessId;
-    if (!token || !businessId) return null;
-    try {
-        const r = await axios.get(`https://graph.facebook.com/v18.0/${businessId}/message_templates`, {
-            params: { name: templateName, fields: 'name,language,status', limit: 50 },
-            headers: { Authorization: `Bearer ${token}` }
-        });
-        const tpls = (r.data?.data || []).filter((t: any) => t.name === templateName);
-        const chosen = tpls.find((t: any) => t.status === 'APPROVED') || tpls[0];
-        if (chosen?.language) {
-            templateLangCache.set(templateName, chosen.language);
-            console.log(`🌐 [Factura] Idioma real de "${templateName}" en Meta: ${chosen.language}`);
-            return chosen.language;
+
+    // Reunir TODAS las WABAs configuradas (mismo patrón que create-template y
+    // sync-status). Clave: una plantilla SOLO se puede ENVIAR desde un número
+    // cuya WABA la tenga aprobada. Si factura_entrega vive en otra WABA, Meta
+    // responde #132001 en CUALQUIER idioma. Por eso buscamos en todas y avisamos.
+    const wabaTargets: { businessId: string, token: string, label: string }[] = [];
+    const seen = new Set<string>();
+    if (waBusinessId && waToken) { wabaTargets.push({ businessId: waBusinessId, token: waToken, label: 'Principal (env)' }); seen.add(waBusinessId); }
+    for (const [phoneId, meta] of Object.entries(ACCOUNT_META)) {
+        const bId = meta.businessId;
+        if (!bId || seen.has(bId)) continue;
+        const tok = BUSINESS_ACCOUNTS[phoneId];
+        if (!tok) continue;
+        wabaTargets.push({ businessId: bId, token: tok, label: meta.name || `Línea ${phoneId.slice(-4)}` });
+        seen.add(bId);
+    }
+    if (wabaTargets.length === 0) { console.warn(`[Factura] No hay WABAs configuradas para resolver "${templateName}".`); return null; }
+
+    // WABA que posee el número de origen (desde el que se enviará la factura).
+    const senderBusinessId = (ACCOUNT_META[originPhoneId] && ACCOUNT_META[originPhoneId].businessId) || waBusinessId || '';
+
+    // Consultar cada WABA por la plantilla: dónde existe y en qué idioma/estado.
+    const found: { businessId: string, label: string, language: string, status: string }[] = [];
+    for (const t of wabaTargets) {
+        try {
+            const r = await axios.get(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
+                params: { name: templateName, fields: 'name,language,status', limit: 50 },
+                headers: { Authorization: `Bearer ${t.token}` }
+            });
+            for (const tpl of (r.data?.data || [])) {
+                if (tpl.name === templateName && tpl.language) {
+                    found.push({ businessId: t.businessId, label: t.label, language: tpl.language, status: tpl.status || '' });
+                }
+            }
+        } catch (e: any) {
+            console.warn(`[Factura] No se pudo consultar plantillas en WABA ${t.label} (${t.businessId}):`, e.response?.data?.error?.message || e.message);
         }
-    } catch (e: any) {
-        console.warn(`[Factura] No se pudo resolver idioma de ${templateName}:`, e.response?.data?.error?.message || e.message);
+    }
+
+    if (found.length === 0) {
+        console.error(`❌ [Factura] La plantilla "${templateName}" NO existe en NINGUNA WABA configurada (${wabaTargets.map(t => t.label).join(', ')}). Créala y apruébala en Meta dentro de la WABA del número emisor.`);
+        return null;
+    }
+    console.log(`🌐 [Factura] "${templateName}" encontrada en: ${found.map(f => `${f.label}[${f.businessId}] ${f.language}/${f.status}`).join(' | ')}`);
+
+    // Preferimos la copia en la WABA emisora (la única que sirve para enviar).
+    const inSender = found.filter(f => f.businessId === senderBusinessId);
+    if (inSender.length === 0) {
+        console.warn(`⚠️ [Factura] La WABA emisora (${senderBusinessId}, número ${originPhoneId}) NO tiene "${templateName}" → Meta dará #132001. La plantilla existe en otra WABA. Apruébala en la WABA del número que envía la factura.`);
+    }
+    const pool = inSender.length > 0 ? inSender : found;
+    const chosen = pool.find(f => (f.status || '').toUpperCase() === 'APPROVED') || pool[0];
+    if (chosen?.language) {
+        // Solo cacheamos si está en la WABA emisora (si no, el envío fallará y
+        // conviene re-resolver por si se corrige en Meta más tarde).
+        if (inSender.length > 0) templateLangCache.set(templateName, chosen.language);
+        console.log(`🌐 [Factura] Idioma elegido para "${templateName}": ${chosen.language} (status ${chosen.status})`);
+        return chosen.language;
     }
     return null;
 }
