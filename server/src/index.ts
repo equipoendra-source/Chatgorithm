@@ -2047,15 +2047,19 @@ async function resolveTemplateLanguage(templateName: string, originPhoneId: stri
     // WABA que posee el número de origen (desde el que se enviará la factura).
     const senderBusinessId = (ACCOUNT_META[originPhoneId] && ACCOUNT_META[originPhoneId].businessId) || waBusinessId || '';
 
-    // Consultar cada WABA por la plantilla: dónde existe y en qué idioma/estado.
+    // Consultar cada WABA por la plantilla. NO filtramos por ?name= (Meta a veces
+    // lo ignora): traemos TODAS y filtramos aquí. Guardamos también todos los
+    // nombres para diagnosticar si la plantilla está con otro nombre.
     const found: { businessId: string, label: string, language: string, status: string }[] = [];
+    const allNames: string[] = [];
     for (const t of wabaTargets) {
         try {
             const r = await axios.get(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
-                params: { name: templateName, fields: 'name,language,status', limit: 50 },
+                params: { fields: 'name,language,status', limit: 200 },
                 headers: { Authorization: `Bearer ${t.token}` }
             });
             for (const tpl of (r.data?.data || [])) {
+                if (tpl.name) allNames.push(`${tpl.name}(${tpl.language || '?'}/${tpl.status || '?'})`);
                 if (tpl.name === templateName && tpl.language) {
                     found.push({ businessId: t.businessId, label: t.label, language: tpl.language, status: tpl.status || '' });
                 }
@@ -2067,6 +2071,7 @@ async function resolveTemplateLanguage(templateName: string, originPhoneId: stri
 
     if (found.length === 0) {
         console.error(`❌ [Factura] La plantilla "${templateName}" NO existe en NINGUNA WABA configurada (${wabaTargets.map(t => t.label).join(', ')}). Créala y apruébala en Meta dentro de la WABA del número emisor.`);
+        console.error(`📋 [Factura] Plantillas que SÍ existen en tu WABA (${allNames.length}): ${allNames.join(', ') || '(ninguna)'}`);
         return null;
     }
     console.log(`🌐 [Factura] "${templateName}" encontrada en: ${found.map(f => `${f.label}[${f.businessId}] ${f.language}/${f.status}`).join(' | ')}`);
