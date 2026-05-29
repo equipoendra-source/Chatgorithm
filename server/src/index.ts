@@ -2017,7 +2017,9 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
 //   - Categoría: UTILITY
 //   - Cabecera: Documento (Document)
 //   - Cuerpo: ej. "Hola {{1}}, te adjuntamos la factura de tu visita. ¡Gracias!"
-const INVOICE_TEMPLATE = 'factura_entrega';
+// OJO: el nombre real en Meta lleva un guion bajo al final (factura_entrega_),
+// confirmado al listar las plantillas APPROVED de la WABA. Sin él, Meta da #132001.
+const INVOICE_TEMPLATE = 'factura_entrega_';
 
 // Cache nombre de plantilla → código de idioma real en Meta. Una plantilla puede
 // estar aprobada en "es", "es_ES", "es_MX"… y enviar con el código equivocado da
