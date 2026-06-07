@@ -1835,6 +1835,20 @@ interface Agenda {
 
 // Lee las agendas configuradas. Soporta el formato antiguo (un único horario sin
 // nombre) convirtiéndolo a una sola agenda "General" para no romper instalaciones previas.
+// Sanea una duración/granularidad en minutos a un entero seguro > 0.
+// El patrón antiguo `Number(x) || 60` corregía 0/NaN/'' pero dejaba pasar
+// NEGATIVOS (un número negativo es truthy), y un duration <= 0 provoca un
+// BUCLE INFINITO en la generación de huecos (runScheduleMaintenance) y rangos
+// invertidos al reservar bloques. MIN_SLOT_MIN coincide con el min={5} del
+// formulario de agendas del frontend. Aplica en lectura y escritura.
+const MIN_SLOT_MIN = 5;
+function sanitizeMinutes(value: any, fallback: number = 60): number {
+    const n = Math.round(Number(value));
+    if (Number.isFinite(n) && n >= MIN_SLOT_MIN) return n;
+    const fb = Math.round(Number(fallback));
+    return (Number.isFinite(fb) && fb >= MIN_SLOT_MIN) ? fb : 60;
+}
+
 async function getAgendas(): Promise<Agenda[]> {
     if (!base) return [];
     try {
@@ -1851,19 +1865,19 @@ async function getAgendas(): Promise<Agenda[]> {
                     days: a.days,
                     startTime: a.startTime || '09:00',
                     endTime: a.endTime || '18:00',
-                    duration: Number(a.duration) || 60,
+                    duration: sanitizeMinutes(a.duration, 60),
                     services: Array.isArray(a.services)
                         ? a.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any) => ({
                             id: String(s.id || s.name),
                             name: String(s.name).trim(),
-                            durationMin: Number(s.durationMin) || Number(a.duration) || 60
+                            durationMin: sanitizeMinutes(s.durationMin, sanitizeMinutes(a.duration, 60))
                         }))
                         : []
                 }));
         }
         // Formato antiguo: { days, startTime, endTime, duration } → una agenda "General"
         if (parsed && Array.isArray(parsed.days)) {
-            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: Number(parsed.duration) || 60, services: [] }];
+            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: sanitizeMinutes(parsed.duration, 60), services: [] }];
         }
         return [];
     } catch (e) {
@@ -1936,20 +1950,25 @@ async function runScheduleMaintenance() {
         // 4. Generar huecos nuevos para cada agenda
         const newSlotsToCreate: any[] = [];
         for (const ag of agendas) {
+            // step saneado: garantiza > 0 SIEMPRE, incluso si la agenda tiene un
+            // duration corrupto en Airtable. Sin esto, un duration <= 0 haría que
+            // `start` no avanzara y el while fuera un bucle infinito que cuelga el
+            // servidor. getAgendas ya lo sanea, pero blindamos también el punto de uso.
+            const step = sanitizeMinutes(ag.duration, 60);
             for (let d = new Date(now); d <= endDate; d.setDate(d.getDate() + 1)) {
                 if (!ag.days.includes(d.getDay())) continue;
                 const [startH, startM] = ag.startTime.split(':').map(Number);
                 const [endH, endM] = ag.endTime.split(':').map(Number);
                 let start = setMadridTime(d, startH, startM);
                 const end = setMadridTime(d, endH, endM);
-                while (start.getTime() + ag.duration * 60000 <= end.getTime()) {
+                while (start.getTime() + step * 60000 <= end.getTime()) {
                     if (start > now) {
                         const iso = start.toISOString();
                         if (!existing.has(`${ag.name}|${iso}`)) {
                             newSlotsToCreate.push({ fields: { "Date": iso, "Status": "Available", "Agenda": ag.name } });
                         }
                     }
-                    start = new Date(start.getTime() + ag.duration * 60000);
+                    start = new Date(start.getTime() + step * 60000);
                 }
             }
         }
@@ -5927,6 +5946,7 @@ app.put('/api/appointments/:id', async (req, res) => {
         let preUpdateClientPhone = '';
         let preUpdateDate = '';
         let preUpdateAgenda = '';
+        let preUpdateDurationMin = 0;   // para liberar los secundarios del bloque al cancelar
         try {
             const before = await base('Appointments').find(req.params.id);
             preUpdateStatus = (before.get('Status') as string) || '';
@@ -5934,6 +5954,7 @@ app.put('/api/appointments/:id', async (req, res) => {
             preUpdateClientPhone = (before.get('ClientPhone') as string) || '';
             preUpdateDate = (before.get('Date') as string) || '';
             preUpdateAgenda = (before.get('Agenda') as string) || '';
+            preUpdateDurationMin = Number(before.get('DurationMin') || 0);
         } catch (_) { /* no bloqueamos si no se puede leer */ }
 
         // RESERVA CON BLOQUE DE SLOTS (tipo de servicio).
@@ -6154,6 +6175,41 @@ app.put('/api/appointments/:id', async (req, res) => {
         // Y cancelar también los recordatorios pendientes (cita_24h, cita_1h)
         // para que el cliente NO reciba avisos de una cita que ya está cancelada.
         if (req.body.status === 'Available' && preUpdateStatus === 'Booked') {
+            // FIX bloque multi-hueco: el reset de arriba (con `f`) solo afectó al
+            // LÍDER (su :id). Si era una avería de varias horas, sus N secundarios
+            // (Status=Booked, mismo ClientPhone, en (leadDate, leadDate+DurationMin))
+            // seguirían reservados como huecos fantasma "Cliente" bloqueando esas
+            // horas. Aquí los liberamos a Available. Lógica calcada de
+            // cancelAppointment (la que usa el bot). Para citas de 1 hueco
+            // (DurationMin 0 o 1 slot) no hay secundarios → sin efecto.
+            try {
+                if (preUpdateDurationMin > 0) {
+                    // El `f` del frontend no incluye DurationMin: forzamos 0 en el
+                    // líder para que no conserve la duración del bloque cancelado.
+                    await updateAppointmentFields(req.params.id, { DurationMin: 0 });
+                    const leadDate = new Date(preUpdateDate);
+                    if (!isNaN(leadDate.getTime())) {
+                        const leadISO = leadDate.toISOString();
+                        const endISO = new Date(leadDate.getTime() + preUpdateDurationMin * 60000).toISOString();
+                        const secCandidates = await base('Appointments').select({
+                            filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(preUpdateAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
+                        }).all();
+                        // Solo los del MISMO cliente (no liberar citas de otro que
+                        // solape en esa agenda/horario). Si el líder no tuviera
+                        // teléfono (caso anómalo), phoneMatch da false → no se
+                        // libera nada, igual que hace cancelAppointment (el bot).
+                        const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, preUpdateClientPhone));
+                        for (const r of secondaries) {
+                            await updateAppointmentFields(r.id, { Status: 'Available', ClientPhone: '', DurationMin: 0 });
+                        }
+                        if (secondaries.length > 0) {
+                            console.log(`📅 [PUT-Cancel] ${secondaries.length} hueco(s) secundario(s) liberados del bloque ${req.params.id}.`);
+                        }
+                    }
+                }
+            } catch (secErr: any) {
+                console.warn('[PUT-Cancel] Error liberando secundarios del bloque:', secErr?.message);
+            }
             notifyCancelledAppointment({
                 appointmentId: req.params.id,
                 dateISO: preUpdateDate,
@@ -6440,6 +6496,7 @@ app.delete('/api/appointments/:id', async (req, res) => {
         let preClientName = '';
         let preDate = '';
         let preAgenda = '';
+        let preDurationMin = 0;   // para liberar los secundarios del bloque al borrar el líder
         try {
             const rec = await base('Appointments').find(req.params.id);
             preClientPhone = (rec.get('ClientPhone') as string) || '';
@@ -6447,9 +6504,40 @@ app.delete('/api/appointments/:id', async (req, res) => {
             preClientName = (rec.get('ClientName') as string) || '';
             preDate = (rec.get('Date') as string) || '';
             preAgenda = (rec.get('Agenda') as string) || '';
+            preDurationMin = Number(rec.get('DurationMin') || 0);
         } catch { /* el record puede no existir o haber sido borrado en paralelo */ }
 
         await base('Appointments').destroy([req.params.id]);
+
+        // FIX bloque multi-hueco: al borrar el LÍDER de un bloque (avería de varias
+        // horas), sus N secundarios (Status=Booked, mismo ClientPhone, en
+        // (leadDate, leadDate+DurationMin)) quedarían como huecos fantasma "Cliente".
+        // Los LIBERAMOS a Available (no los borramos): son huecos auto-generados
+        // que runScheduleMaintenance recrearía igualmente como Available si están
+        // en horario de agenda — liberarlos los deja en el estado final correcto
+        // sin esperar al cron. Mismo patrón de búsqueda que cancelAppointment.
+        if (preStatus === 'Booked' && preDurationMin > 0) {
+            try {
+                const leadDate = new Date(preDate);
+                if (!isNaN(leadDate.getTime())) {
+                    const leadISO = leadDate.toISOString();
+                    const endISO = new Date(leadDate.getTime() + preDurationMin * 60000).toISOString();
+                    const secCandidates = await base('Appointments').select({
+                        filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(preAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
+                    }).all();
+                    // Solo del mismo cliente; sin teléfono (anómalo) no libera nada.
+                    const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, preClientPhone));
+                    for (const r of secondaries) {
+                        await updateAppointmentFields(r.id, { Status: 'Available', ClientPhone: '', DurationMin: 0 });
+                    }
+                    if (secondaries.length > 0) {
+                        console.log(`📅 [DELETE] ${secondaries.length} hueco(s) secundario(s) del bloque liberados a Available tras borrar líder ${req.params.id}.`);
+                    }
+                }
+            } catch (secErr: any) {
+                console.warn('[DELETE] Error liberando secundarios del bloque:', secErr?.message);
+            }
+        }
 
         // Solo cancelamos recordatorios si la cita estaba reservada (Booked).
         // Si era un slot Available no había recordatorios programados.
@@ -6681,12 +6769,14 @@ app.post('/api/schedule', async (req, res) => {
             days: a.days.map((d: any) => Number(d)),
             startTime: a.startTime || '09:00',
             endTime: a.endTime || '18:00',
-            duration: Number(a.duration) || 60,
+            // Saneamos a entero >= 5 para no persistir granularidades 0/negativas
+            // que colgarían runScheduleMaintenance (bucle infinito).
+            duration: sanitizeMinutes(a.duration, 60),
             services: Array.isArray(a.services)
                 ? a.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any) => ({
                     id: String(s.id || s.name),
                     name: String(s.name).trim(),
-                    durationMin: Number(s.durationMin) || Number(a.duration) || 60
+                    durationMin: sanitizeMinutes(s.durationMin, sanitizeMinutes(a.duration, 60))
                 }))
                 : []
         }));
