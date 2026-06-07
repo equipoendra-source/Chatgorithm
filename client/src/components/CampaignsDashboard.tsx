@@ -864,8 +864,15 @@ const CampaignWizard: React.FC<{
     // Rango "vehículo entregado hace entre MIN y MAX días". '' = sin filtro.
     // Casos típicos: 3-7 días (encuesta satisfacción), 350-380 días (revisión
     // anual), 170-190 días (cambio neumáticos cada 6 meses).
-    const [contactFilterDeliveredMinDays, setContactFilterDeliveredMinDays] = useState<string>('');
-    const [contactFilterDeliveredMaxDays, setContactFilterDeliveredMaxDays] = useState<string>('');
+    // Rehidratamos desde la config recurrente guardada al EDITAR, para no perder el
+    // rango al reabrir el asistente (las recurrentes nuevas o antiguas sin estos
+    // campos arrancan en '' = sin filtro).
+    const [contactFilterDeliveredMinDays, setContactFilterDeliveredMinDays] = useState<string>(
+        initRecurring.filters?.deliveredMinDays != null ? String(initRecurring.filters.deliveredMinDays) : ''
+    );
+    const [contactFilterDeliveredMaxDays, setContactFilterDeliveredMaxDays] = useState<string>(
+        initRecurring.filters?.deliveredMaxDays != null ? String(initRecurring.filters.deliveredMaxDays) : ''
+    );
 
     // Cargar plantillas + cuentas WhatsApp al iniciar
     useEffect(() => {
@@ -999,7 +1006,13 @@ const CampaignWizard: React.FC<{
                 filters: {
                     department: contactFilterDept || '',
                     tags: contactFilterTag ? [contactFilterTag] : [],
-                    onlyOptedIn: contactFilterOptIn
+                    onlyOptedIn: contactFilterOptIn,
+                    // Rango "entregado hace entre MIN y MAX días" (null = sin filtro en
+                    // ese extremo). Lo aplica expandRecipientsFromFilters en cada ciclo,
+                    // igual que el envío único. Sin esto, la postventa recurrente
+                    // (encuesta a los 3-7 días, revisión anual…) ignoraba los días.
+                    deliveredMinDays: contactFilterDeliveredMinDays !== '' ? Number(contactFilterDeliveredMinDays) : null,
+                    deliveredMaxDays: contactFilterDeliveredMaxDays !== '' ? Number(contactFilterDeliveredMaxDays) : null
                 }
             };
         }

@@ -2003,38 +2003,68 @@ async function runScheduleMaintenance() {
 
 // --- Enviar plantilla WhatsApp (reutilizable) ---
 // Devuelve true si OK, o un string con el mensaje de error si falla.
-async function sendTemplateMessage(phone: string, templateName: string, variables: string[], originPhoneId: string): Promise<true | string> {
+async function sendTemplateMessage(phone: string, templateName: string, variables: string[], originPhoneId: string, language?: string): Promise<true | string> {
     const token = getToken(originPhoneId);
     if (!token) { const msg = `Token no encontrado para ${originPhoneId}`; console.error(`❌ [Notif] ${msg}`); return msg; }
     const cleanTo = cleanNumber(phone);
-    try {
-        const parameters = variables.map(val => ({ type: "text", text: val }));
-        const templateObj: any = { name: templateName, language: { code: "es_ES" } };
-        if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
 
-        await axios.post(
-            `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
-            { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj },
-            { headers: { Authorization: `Bearer ${token}` } }
-        );
+    const parameters = variables.map(val => ({ type: "text", text: val }));
+    const components: any[] = parameters.length > 0 ? [{ type: "body", parameters }] : [];
 
-        await saveAndEmitMessage({
-            text: `[Notificación] ${templateName}`,
-            sender: "Sistema",
-            recipient: cleanTo,
-            timestamp: new Date().toISOString(),
-            type: "template",
-            origin_phone_id: originPhoneId
-        });
-        return true;
-    } catch (e: any) {
-        const metaErr = e.response?.data?.error;
-        const errorMsg = metaErr
-            ? `Meta ${metaErr.code || ''} ${metaErr.error_subcode || ''}: ${metaErr.message || ''} ${metaErr.error_data?.details || ''}`.trim()
-            : (e.message || 'unknown');
-        console.error(`❌ [Notif] Error enviando plantilla ${templateName} a ${cleanTo}:`, errorMsg);
-        return errorMsg;
+    // Resolución de idioma (evita el error #132001 "la plantilla no existe en es_ES").
+    // Orden de candidatos:
+    //   1) el idioma que nos pasen (p.ej. el guardado en la campaña),
+    //   2) el cacheado de un envío anterior de esta plantilla,
+    //   3) el real según Meta (resolveTemplateLanguage: 1 llamada por plantilla,
+    //      queda cacheada para el resto de destinatarios → en una campaña de 1.000
+    //      NO se llama 1.000 veces),
+    //   y como red de seguridad, los códigos de español habituales.
+    // Solo pasamos al siguiente candidato si el error es #132001 (idioma
+    // equivocado); cualquier otro error aborta. Mismo patrón que sendTemplateWithDocument.
+    const cached = templateLangCache.get(templateName);
+    const resolved = (language || cached) || await resolveTemplateLanguage(templateName, originPhoneId);
+    const candidates = [resolved, 'es', 'es_ES', 'es_MX', 'es_AR']
+        .filter((c): c is string => !!c)
+        .filter((c, i, arr) => arr.indexOf(c) === i);
+
+    let lastErr = '';
+    for (const langCode of candidates) {
+        try {
+            const templateObj: any = { name: templateName, language: { code: langCode } };
+            if (components.length > 0) templateObj.components = components;
+
+            await axios.post(
+                `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
+                { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj },
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            templateLangCache.set(templateName, langCode); // aprende el idioma que funcionó
+            await saveAndEmitMessage({
+                text: `[Notificación] ${templateName}`,
+                sender: "Sistema",
+                recipient: cleanTo,
+                timestamp: new Date().toISOString(),
+                type: "template",
+                origin_phone_id: originPhoneId
+            });
+            return true;
+        } catch (e: any) {
+            const metaErr = e.response?.data?.error;
+            const errorMsg = metaErr
+                ? `Meta ${metaErr.code || ''} ${metaErr.error_subcode || ''}: ${metaErr.message || ''} ${metaErr.error_data?.details || ''}`.trim()
+                : (e.message || 'unknown');
+            lastErr = errorMsg;
+            if (metaErr?.code === 132001) { // idioma equivocado → probar el siguiente candidato
+                console.warn(`⚠️ [Notif] ${templateName} no existe en idioma ${langCode}, probando siguiente…`);
+                continue;
+            }
+            console.error(`❌ [Notif] Error enviando plantilla ${templateName} a ${cleanTo}:`, errorMsg);
+            return errorMsg; // otros errores no se arreglan cambiando el idioma
+        }
     }
+    console.error(`❌ [Notif] No se encontró idioma válido para ${templateName} a ${cleanTo}. Último error:`, lastErr);
+    return lastErr || 'No se pudo enviar la plantilla';
 }
 
 // Nombre de la plantilla (aprobada en Meta con CABECERA DE DOCUMENTO) que se usa
@@ -9109,6 +9139,10 @@ async function executeCampaign(campaignId: string): Promise<void> {
     const recipients = safeJsonParse<string[]>(campaign.get('recipients'), []);
     const variables = safeJsonParse<string[]>(campaign.get('variables'), []);
     const templateName = (campaign.get('templateName') as string) || '';
+    // Idioma guardado de la campaña. Si está vacío, sendTemplateMessage lo
+    // resuelve con Meta (1 vez, cacheado). Antes el envío fijaba "es_ES" y
+    // cualquier plantilla aprobada en otro código fallaba con #132001.
+    const templateLanguage = (campaign.get('templateLanguage') as string) || '';
     const originPhoneId = (campaign.get('originPhoneId') as string) || waPhoneId || 'default';
     const respectOptIn = campaign.get('respectOptIn') !== false; // por defecto true
 
@@ -9163,8 +9197,8 @@ async function executeCampaign(campaignId: string): Promise<void> {
         const contactData = await getContactDataForPersonalization(cleanPhone);
         const personalizedVars = expandCampaignVariables(variables, contactData);
 
-        // Enviar
-        const result = await sendTemplateMessage(cleanPhone, templateName, personalizedVars, originPhoneId);
+        // Enviar (pasamos el idioma guardado; si va vacío, se resuelve y cachea)
+        const result = await sendTemplateMessage(cleanPhone, templateName, personalizedVars, originPhoneId, templateLanguage || undefined);
 
         if (result === true) {
             sentCount++;
@@ -9258,57 +9292,74 @@ async function runCampaignScheduler(): Promise<void> {
 // dayOfWeek: 0=domingo ... 6=sábado (sólo weekly)
 // dayOfMonth: 1-28 (sólo monthly)
 // intervalDays: número (sólo custom, "cada X días")
+// Día de la semana (0=Dom..6=Sáb) de un instante, EN HORA DE MADRID (no UTC).
+function madridWeekdayOf(d: Date): number {
+    const name = new Intl.DateTimeFormat('en-US', { timeZone: 'Europe/Madrid', weekday: 'short' }).format(d);
+    const map: Record<string, number> = { Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6 };
+    return map[name] ?? 0;
+}
+
 function computeNextRun(config: any, fromDate?: Date): Date | null {
     if (!config || !config.frequency) return null;
-    const base = fromDate ? new Date(fromDate) : new Date();
+    const from = fromDate ? new Date(fromDate) : new Date();
     const hour = Math.max(0, Math.min(23, Number(config.hour ?? 10)));
 
+    // Candidata = "el día de `cursor` a las HH:00 HORA DE MADRID", como instante UTC.
+    // setMadridTime recalcula el offset real (+1 invierno / +2 verano) para CADA día,
+    // así que las recurrencias que cruzan el cambio de hora se ajustan solas (DST-safe).
+    // Antes se usaba setHours/getDay (hora local del servidor = UTC en Render), lo que
+    // disparaba las campañas 1-2 h tarde.
+    const makeCandidate = (cursor: Date) => setMadridTime(cursor, hour, 0);
+
     if (config.frequency === 'daily') {
-        // Próximo día con esa hora (después de "base")
-        const next = new Date(base);
-        next.setHours(hour, 0, 0, 0);
-        if (next <= base) next.setDate(next.getDate() + 1);
-        return next;
+        const cursor = new Date(from);
+        let cand = makeCandidate(cursor);
+        while (cand.getTime() <= from.getTime()) {
+            cursor.setUTCDate(cursor.getUTCDate() + 1);
+            cand = makeCandidate(cursor);
+        }
+        return cand;
     }
 
     if (config.frequency === 'weekly') {
         const dow = Math.max(0, Math.min(6, Number(config.dayOfWeek ?? 1)));
-        const next = new Date(base);
-        next.setHours(hour, 0, 0, 0);
-        // avanzar día hasta encontrar el dayOfWeek
+        const cursor = new Date(from);
+        let cand = makeCandidate(cursor);
         let attempts = 0;
-        while ((next.getDay() !== dow || next <= base) && attempts < 14) {
-            next.setDate(next.getDate() + 1);
+        // avanzar día a día hasta que el weekday EN MADRID coincida y sea futuro
+        while ((madridWeekdayOf(cand) !== dow || cand.getTime() <= from.getTime()) && attempts < 21) {
+            cursor.setUTCDate(cursor.getUTCDate() + 1);
+            cand = makeCandidate(cursor);
             attempts++;
         }
-        return next;
+        return cand;
     }
 
     if (config.frequency === 'monthly') {
         const dom = Math.max(1, Math.min(28, Number(config.dayOfMonth ?? 1)));
-        const next = new Date(base);
-        next.setDate(dom);
-        next.setHours(hour, 0, 0, 0);
-        // si la fecha resultante es <= base, salta al mes siguiente
-        if (next <= base) {
-            next.setMonth(next.getMonth() + 1);
-            next.setDate(dom);
-            next.setHours(hour, 0, 0, 0);
+        const cursor = new Date(from);
+        cursor.setUTCDate(dom);
+        let cand = makeCandidate(cursor);
+        if (cand.getTime() <= from.getTime()) {
+            // saltar al mes siguiente sin desbordar (día 1 antes de sumar el mes)
+            cursor.setUTCDate(1);
+            cursor.setUTCMonth(cursor.getUTCMonth() + 1);
+            cursor.setUTCDate(dom);
+            cand = makeCandidate(cursor);
         }
-        return next;
+        return cand;
     }
 
     if (config.frequency === 'custom') {
         const days = Math.max(1, Math.min(365, Number(config.intervalDays ?? 7)));
-        const next = new Date(base);
-        next.setHours(hour, 0, 0, 0);
-        if (next <= base) next.setDate(next.getDate() + days);
-        else {
-            // Si la hora del día actual aún no llegó, no sumar días, salta a hoy a esa hora
-            // pero solo si es la primera ejecución (no hay lastRun). En recurrente normal, sumamos days.
-            next.setDate(next.getDate() + days);
+        const cursor = new Date(from);
+        let cand = makeCandidate(cursor);
+        // Si la hora de hoy aún no pasó, esa es la próxima; si ya pasó, suma el intervalo.
+        if (cand.getTime() <= from.getTime()) {
+            cursor.setUTCDate(cursor.getUTCDate() + days);
+            cand = makeCandidate(cursor);
         }
-        return next;
+        return cand;
     }
 
     return null;
@@ -9322,6 +9373,15 @@ async function expandRecipientsFromFilters(filters: any): Promise<string[]> {
         const tagsFilter: string[] = Array.isArray(filters?.tags) ? filters.tags : [];
         const dept: string = filters?.department || '';
         const onlyOptedIn: boolean = !!filters?.onlyOptedIn;
+        // Rango "entregado hace entre MIN y MAX días" (null = extremo abierto).
+        // MISMO criterio que el envío único (filteredContacts del frontend): cálculo
+        // epoch/86400000 con Math.floor, límites inclusivos, y exclusión del contacto
+        // sin fecha de entrega cuando hay algún extremo activo. Las recurrentes
+        // antiguas no traen estos campos → minD=maxD=null → sin filtro (como antes).
+        const dmin = filters?.deliveredMinDays;
+        const dmax = filters?.deliveredMaxDays;
+        const minD: number | null = (dmin === null || dmin === undefined || dmin === '') ? null : Number(dmin);
+        const maxD: number | null = (dmax === null || dmax === undefined || dmax === '') ? null : Number(dmax);
 
         const matched = records.filter(r => {
             const phone = (r.get('phone') as string) || '';
@@ -9334,6 +9394,15 @@ async function expandRecipientsFromFilters(filters: any): Promise<string[]> {
             if (onlyOptedIn && (!optInMarketing || optedOut)) return false;
             if (dept && contactDept !== dept) return false;
             if (tagsFilter.length > 0 && !tagsFilter.some(t => contactTags.includes(t))) return false;
+
+            // Filtro días desde la entrega (idéntico al envío único)
+            if (minD !== null || maxD !== null) {
+                const deliveryDate = (r.get('delivery_date') as string) || '';
+                if (!deliveryDate) return false;
+                const ageDays = Math.floor((Date.now() - new Date(deliveryDate).getTime()) / 86400000);
+                if (minD !== null && ageDays < minD) return false;
+                if (maxD !== null && ageDays > maxD) return false;
+            }
             return true;
         });
         return matched.map(r => cleanNumber((r.get('phone') as string) || '')).filter(Boolean);
@@ -9379,8 +9448,12 @@ async function executeRecurringCampaign(motherId: string): Promise<void> {
 
     if (expandedPhones.length === 0) {
         console.log(`🔁 [Recurring] "${motherName}" sin destinatarios este ciclo, avanzo nextRun`);
-        // Avanzar nextRun de todas formas
-        const nextRun = computeNextRun(config);
+        // Avanzar nextRun partiendo del nextRun previo o de ahora (lo que sea más
+        // tarde): mantiene la hora de Madrid, evita el drift del cron y no acumula
+        // ciclos atrasados si el servidor estuvo caído.
+        const prevNext = (mother.get('recurringNextRun') as string) || '';
+        const baseForNext = new Date(Math.max(Date.parse(prevNext) || 0, Date.now()));
+        const nextRun = computeNextRun(config, baseForNext);
         if (nextRun) {
             await base(TABLE_CAMPAIGNS).update([{
                 id: motherId,
@@ -9430,8 +9503,11 @@ async function executeRecurringCampaign(motherId: string): Promise<void> {
     // Ejecutar la hija (no esperamos, sigue en background)
     executeCampaign(childId).catch(e => console.error('[Recurring] Error ejecutando hija:', e.message));
 
-    // Avanzar nextRun de la madre
-    const nextRun = computeNextRun(config);
+    // Avanzar nextRun de la madre partiendo del nextRun previo o de ahora (lo que
+    // sea más tarde): mantiene la hora de Madrid y evita el drift del cron.
+    const prevNext = (mother.get('recurringNextRun') as string) || '';
+    const baseForNext = new Date(Math.max(Date.parse(prevNext) || 0, Date.now()));
+    const nextRun = computeNextRun(config, baseForNext);
     try {
         await base(TABLE_CAMPAIGNS).update([{
             id: motherId,
