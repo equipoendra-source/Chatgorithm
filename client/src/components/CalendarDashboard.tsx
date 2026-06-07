@@ -773,11 +773,19 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setIsCreating(true);
         try {
             const isoDate = new Date(`${newDate}T${newTime}`).toISOString();
-            await fetch(`${API_URL}/appointments`, {
+            const res = await fetch(`${API_URL}/appointments`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ date: isoDate, status: 'Available', agenda: agendas.length > 0 ? newAgenda : '' })
             });
+            // Antes no se comprobaba res.ok: si el backend devolvía un error, el
+            // hueco no se creaba pero el usuario no veía nada. Ahora mostramos el
+            // mensaje real del servidor.
+            if (!res.ok) {
+                const err = await res.json().catch(() => ({}));
+                alert(err.error || 'Error creando hueco');
+                return;
+            }
             await fetchData();
             setNewDate('');
             setNewTime('');

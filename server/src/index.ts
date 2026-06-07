@@ -1899,8 +1899,14 @@ async function runScheduleMaintenance() {
         const now = new Date();
         const nowISO = now.toISOString();
 
-        // 1. Borrar huecos DISPONIBLES ya pasados
-        const pastSlots = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} < '${nowISO}')`, fields: [] }).all();
+        // 1. Borrar huecos DISPONIBLES ya pasados (excepto los creados a mano).
+        // Los huecos con Manual=true los creó un agente desde el calendario para
+        // registrar una cita en una fecha (a veces pasada) y NO deben borrarse,
+        // o desaparecerían antes de poder reservarlos. Filtramos en JS: si el
+        // campo Manual no existe en Airtable, get() devuelve undefined y el
+        // comportamiento es idéntico al de antes (se borran todos los pasados).
+        const pastSlotsRaw = await base('Appointments').select({ filterByFormula: `AND({Status} = 'Available', {Date} < '${nowISO}')`, fields: ['Manual'] }).all();
+        const pastSlots = pastSlotsRaw.filter(r => !r.get('Manual'));
         for (let i = 0; i < pastSlots.length; i += 10) {
             await base('Appointments').destroy(pastSlots.slice(i, i + 10).map(r => r.id));
             await delay(200);
@@ -5826,6 +5832,14 @@ app.post('/api/appointments', async (req, res) => {
     try {
         const apptFields: any = { "Date": req.body.date, "Status": "Available" };
         if (req.body.agenda) apptFields["Agenda"] = String(req.body.agenda);
+        // MANUAL: este endpoint solo lo llama el calendario para crear huecos a
+        // mano. Los marcamos como Manual=true para que runScheduleMaintenance NO
+        // los borre aunque la fecha sea pasada (permitir registrar citas
+        // retroactivas). Los huecos auto-generados (creados dentro del propio
+        // mantenimiento, sin pasar por aquí) NO llevan esta marca y se siguen
+        // limpiando como hasta ahora. Tolerante: si el campo no existe en
+        // Airtable, el bucle de creación de abajo lo quita y reintenta.
+        apptFields["Manual"] = true;
         // INCIDENTE: una cita creada a mano para el MISMO día es una cita
         // inesperada (incidente). Se detecta comparando el día de la cita con
         // el día de hoy (zona horaria de España). El frontend también puede
@@ -5837,16 +5851,29 @@ app.post('/api/appointments', async (req, res) => {
         if (req.body.incident === true) isIncident = true;
         if (req.body.incident === false) isIncident = false;
         if (isIncident) apptFields["Incident"] = true;
-        try {
-            await base('Appointments').create([{ fields: apptFields }]);
-        } catch (e: any) {
-            // Tolerancia: si el campo "Incident" aún no existe en Airtable, crear sin él.
-            if (apptFields.Incident !== undefined && /incident/i.test(e.message || '')) {
-                console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
-                delete apptFields.Incident;
-                isIncident = false;
+        // Creación tolerante: si algún campo OPCIONAL (Manual / Incident) aún no
+        // existe en Airtable, Airtable rechaza el create mencionando ese campo.
+        // Lo quitamos y reintentamos (hasta cubrir ambos). Cualquier otro error
+        // se propaga. Sin esto, añadir Manual rompería la creación en bases que
+        // no tengan ese campo todavía.
+        let created = false;
+        for (let attempt = 0; attempt < 3 && !created; attempt++) {
+            try {
                 await base('Appointments').create([{ fields: apptFields }]);
-            } else throw e;
+                created = true;
+            } catch (e: any) {
+                const msg = e.message || '';
+                if (apptFields.Manual !== undefined && /manual/i.test(msg)) {
+                    console.warn('[API] El campo "Manual" no existe en la tabla Appointments. Créalo como casilla (checkbox) para conservar citas en fechas pasadas.');
+                    delete apptFields.Manual;
+                } else if (apptFields.Incident !== undefined && /incident/i.test(msg)) {
+                    console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                    delete apptFields.Incident;
+                    isIncident = false;
+                } else {
+                    throw e;
+                }
+            }
         }
         res.json({ success: true, incident: isIncident });
     } catch (e: any) { console.error('[API] Error POST /appointments:', e.message); res.status(400).json({ error: "Error creating" }); }
@@ -5992,7 +6019,7 @@ app.put('/api/appointments/:id', async (req, res) => {
                         }).all();
                         const expected = slotsNeeded - 1;
                         if (candidates.length < expected) {
-                            throw { httpStatus: 409, message: `No hay slots consecutivos suficientes para "${serviceName}" (${svc.durationMin}min). Faltan ${expected - candidates.length} hueco(s) libre(s) a continuación del seleccionado.` };
+                            throw { httpStatus: 409, message: `No hay huecos consecutivos suficientes para "${serviceName}" (${svc.durationMin}min): faltan ${expected - candidates.length} hueco(s) libre(s) seguidos. Suele pasar cuando el hueco está a una hora no alineada con la agenda (ej. 10:30 en una agenda de tramos de ${granularity}min): crea el hueco en una hora del tramo (cada ${granularity}min desde la apertura) o crea los huecos contiguos que faltan.` };
                         }
                         // Validar consecutividad estricta
                         let prevMs = leadDate.getTime();
@@ -6002,7 +6029,7 @@ app.put('/api/appointments/:id', async (req, res) => {
                             const cMs = new Date(c.get('Date') as string).getTime();
                             const diffMin = Math.round((cMs - prevMs) / 60000);
                             if (diffMin !== granularity) {
-                                throw { httpStatus: 409, message: `Los huecos no son consecutivos (gap de ${diffMin}min cuando se esperan ${granularity}min). Probablemente falta algún slot creado en medio.` };
+                                throw { httpStatus: 409, message: `Los huecos no son consecutivos (hay un salto de ${diffMin}min cuando se esperan ${granularity}min). Suele pasar cuando el hueco está a una hora no alineada con la agenda (ej. 10:30 en tramos de ${granularity}min) o falta algún hueco en medio. Crea el hueco en una hora del tramo (cada ${granularity}min desde la apertura).` };
                             }
                             secondaries.push(c.id);
                             prevMs = cMs;
