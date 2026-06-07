@@ -1185,7 +1185,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             <button onClick={goToday} className={`ml-1 px-3 py-1.5 rounded-xl text-xs font-bold transition ${isDark ? 'bg-slate-700 text-slate-200 hover:bg-slate-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>Hoy</button>
                         </div>
 
-                        <div className="flex gap-2 w-full md:w-auto justify-end items-center">
+                        <div className="flex flex-wrap gap-2 w-full md:w-auto justify-end items-center">
                             {/* Filtro por agenda */}
                             {agendas.length > 1 && (
                                 <select
@@ -1219,7 +1219,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 title="Marcar como entregadas las citas cuyos vehículos ya se han devuelto al cliente"
                             >
                                 <PackageCheck size={18} />
-                                <span className="hidden md:inline">Entregas</span>
+                                <span className="hidden md:inline">Vehículo entregado</span>
                                 {pendingDeliveryAppointments.length > 0 && (
                                     <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-emerald-500 text-emerald-950' : 'bg-emerald-600 text-white'}`}>
                                         {pendingDeliveryAppointments.length}
