@@ -1216,10 +1216,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             <button
                                 onClick={() => setShowPendingDeliveryModal(true)}
                                 className={`relative px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-emerald-300 bg-emerald-900/30 hover:bg-emerald-900/50' : 'text-emerald-700 bg-emerald-50 hover:bg-emerald-100'}`}
-                                title="Marcar como entregadas las citas cuyos vehículos ya se han devuelto al cliente"
+                                title="Buscar"
                             >
-                                <PackageCheck size={18} />
-                                <span className="hidden md:inline">Vehículo entregado</span>
+                                <Search size={18} />
+                                <span className="hidden md:inline">Buscar</span>
                                 {pendingDeliveryAppointments.length > 0 && (
                                     <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-emerald-500 text-emerald-950' : 'bg-emerald-600 text-white'}`}>
                                         {pendingDeliveryAppointments.length}
