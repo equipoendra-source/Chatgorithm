@@ -4449,6 +4449,111 @@ async function handleAppointmentCancelReply(phone: string, originPhoneId: string
     }
 }
 
+// Detecta si el mensaje del cliente es una CONFIRMACIÓN de cita ("sí", "vale",
+// "ok", "confirmo", "allí estaré"...). Devuelve 'confirm' | 'none'. La decisión
+// final de tratarlo como confirmación la toma handleAppointmentConfirmReply, que
+// solo actúa si hay un recordatorio de cita reciente (<30h); por eso aquí no hace
+// falta 'ambiguous'. Misma normalización (NFD, sin acentos) que la cancelación.
+type ConfirmationIntent = 'confirm' | 'none';
+function detectConfirmationIntent(text: string): ConfirmationIntent {
+    const norm = (text || '')
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .toLowerCase()
+        .replace(/[.,;:!¡¿?()"'\-]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!norm) return 'none';
+
+    // No solapar con opt-in marketing ("SI PROMOCIONES"...): si menciona promo,
+    // no es confirmación de cita.
+    if (/(promo|marketing|publicidad|oferta)/.test(norm)) return 'none';
+    // Las preguntas no confirman.
+    if (/[?¿]/.test(text || '')) return 'none';
+    // Si hay marca de cancelación/negación, que lo gestione detectCancellationIntent.
+    if (/(cancel|anul|no puedo|no podre|no ire|no voy)/.test(norm)) return 'none';
+
+    // Id de botón quick-reply de la plantilla (si lo lleva).
+    if (/^(confirmar(_cita)?|confirmo|si_confirmo|btn_confirm|asistire)$/.test(norm)) return 'confirm';
+
+    // Palabras de confirmación inequívocas (match exacto).
+    const confirmExact = new Set(['si','sii','siii','sip','vale','ok','oka','okay','okey','dale','perfecto','genial','confirmo','confirmado','confirmada','correcto','exacto','claro','entendido','recibido']);
+    if (confirmExact.has(norm)) return 'confirm';
+
+    // Frases cortas de confirmación (solo en mensajes cortos para evitar falsos positivos).
+    const confirmPhrases = ['de acuerdo','alli estare','alli estaremos','ahi estare','cuenta conmigo','asi es','si confirmo','confirmo la cita','si alli estare','si gracias','perfecto gracias','vale gracias','ok gracias','si claro','por supuesto','si por supuesto','si asistire','asistire','nos vemos','si nos vemos'];
+    const wordCount = norm.split(' ').length;
+    if (wordCount <= 6 && confirmPhrases.some(p => norm.includes(p))) return 'confirm';
+
+    // Arranque por afirmación en mensaje corto.
+    if (wordCount <= 6 && /^(si|sii|vale|ok|okay|okey|dale|perfecto|genial|claro)\b/.test(norm)) return 'confirm';
+
+    return 'none';
+}
+
+// Gestiona la respuesta de CONFIRMACIÓN del cliente a un recordatorio de cita.
+// Solo actúa si hay un recordatorio de cita reciente (<30h): así un "sí" casual
+// (sin recordatorio) NO se trata como confirmación y sigue al flujo normal.
+// Mismo lookup que handleAppointmentCancelReply. Idempotente. El campo Confirmed
+// se marca de forma TOLERANTE (updateAppointmentFields lo ignora si no existe).
+async function handleAppointmentConfirmReply(phone: string, originPhoneId: string): Promise<boolean> {
+    if (!base) return false;
+    const clean = cleanNumber(phone);
+    try {
+        const last9 = clean.slice(-9);
+        const phoneClause = last9.length === 9
+            ? `RIGHT({phone}, 9)='${last9}'`
+            : `{phone}='${clean}'`;
+        const recentReminders = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND(${phoneClause}, {status}='sent', FIND('cita', {type})>0)`,
+            sort: [{ field: 'sentAt', direction: 'desc' }],
+            maxRecords: 5
+        }).firstPage();
+
+        const cutoffMs = Date.now() - 30 * 60 * 60 * 1000;
+        const recentReminder = recentReminders.find(r => {
+            const sentAt = r.get('sentAt') as string;
+            const t = sentAt ? new Date(sentAt).getTime() : NaN;
+            return !isNaN(t) && t >= cutoffMs;
+        });
+
+        // Gatekeeper: sin recordatorio reciente, NO es confirmación de cita →
+        // dejamos seguir el flujo normal (la IA u otra rama lo gestiona).
+        if (!recentReminder) return false;
+
+        const targetAppointmentId = (recentReminder.get('appointmentId') as string) || undefined;
+
+        let clientName = '';
+        let stillBooked = true;
+        if (targetAppointmentId) {
+            try {
+                const appt = await base('Appointments').find(targetAppointmentId);
+                clientName = (appt.get('ClientName') as string) || '';
+                stillBooked = (appt.get('Status') as string) === 'Booked';
+            } catch { /* cita borrada físicamente: acuse genérico */ }
+        }
+
+        // El cliente confirma una cita que ya no está activa (la canceló antes).
+        if (targetAppointmentId && !stillBooked) {
+            await sendWhatsAppText(clean, 'Gracias por avisar. No vemos una cita activa a tu nombre ahora mismo; si quieres reservar de nuevo, dinos cuándo te viene bien.', originPhoneId);
+            return true;
+        }
+
+        // Marcar confirmada de forma tolerante e idempotente.
+        if (targetAppointmentId) {
+            try { await updateAppointmentFields(targetAppointmentId, { Confirmed: true }); }
+            catch (e: any) { console.warn('[ConfirmReply] No se pudo marcar Confirmed:', e?.message); }
+        }
+
+        const nombre = clientName ? `, ${clientName}` : '';
+        await sendWhatsAppText(clean, `¡Perfecto${nombre}! Tu cita queda confirmada. Te esperamos. Si necesitas cambiarla o cancelarla, escríbenos.`, originPhoneId);
+        console.log(`📅 [ConfirmReply] Cita confirmada por el cliente ${clean}${targetAppointmentId ? ` (appointmentId=${targetAppointmentId})` : ''}`);
+        return true;
+    } catch (e: any) {
+        console.error('[ConfirmReply] Error gestionando confirmación:', e.message);
+        return false;
+    }
+}
+
 async function assignDepartment(clientPhone: string, department: string) {
     if (!base) return "Error BD";
     try {
@@ -4557,6 +4662,41 @@ async function stopConversation(phone: string) {
 // Esto evita que olvide la matrícula que le diste hace 12 turnos.
 // originPhoneId opcional: si se pasa, filtra también por la WABA — protección multi-tenant
 // para que dos empresas en la misma instancia nunca se mezclen conversaciones.
+// Las plantillas de WhatsApp salientes se persisten en Messages como texto inútil
+// para la IA: "[Notificación] <name>", "📝 [Plantilla] <name>" o "[Factura] <name>"
+// (sin el cuerpo ni las variables que vio el cliente). Para que Laura entienda el
+// contexto (p.ej. interpretar un "Sí" como confirmación de cita), traducimos esos
+// nombres a una frase legible SOLO en el historial que recibe Gemini. NO se toca la
+// persistencia ni lo que muestra el panel del frontend.
+const TEMPLATE_HUMAN_MAP: Record<string, string> = {
+    cita_recordatorio_24h:  '(recordatorio automático enviado al cliente: tiene una cita programada para mañana; se le pide que confirme su asistencia)',
+    cita_recordatorio_1h:   '(recordatorio automático enviado al cliente: su cita es dentro de aproximadamente 1 hora)',
+    recordatorio_cita:      '(recordatorio automático enviado al cliente sobre una cita programada)',
+    coche_listo_recogida:   '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller)',
+    postventa_dia7_v2:      '(seguimiento posventa enviado al cliente unos días después de la entrega del vehículo)',
+    postventa_dia30_v2:     '(seguimiento posventa enviado al cliente ~30 días después de la entrega del vehículo)',
+    postventa_revision_6m:  '(recordatorio enviado al cliente: le toca la revisión de los 6 meses)',
+    postventa_revision_12m: '(recordatorio enviado al cliente: le toca la revisión de los 12 meses)',
+    solicitud_resena:       '(mensaje enviado al cliente pidiéndole que deje una reseña sobre su experiencia)',
+    factura_entrega_:       '(envío al cliente de la factura de su visita como documento adjunto, al entregar el vehículo)',
+};
+
+// Pura: si el texto es un mensaje de plantilla (por prefijo o type='template'),
+// devuelve una frase legible; si no, devuelve el texto tal cual.
+function humanizeTemplateText(rawText: string, type?: string): string {
+    const text = rawText || '';
+    const PREFIXES = ['[Notificación] ', '📝 [Plantilla] ', '[Plantilla] ', '[Factura] '];
+    const matchedPrefix = PREFIXES.find(p => text.startsWith(p));
+    if (!matchedPrefix && type !== 'template') return text;
+    const name = (matchedPrefix ? text.slice(matchedPrefix.length) : text).trim();
+    if (!name) return text;
+    if (name === '__team_internal') return '(aviso interno para el equipo sobre una cita inminente)';
+    const mapped = TEMPLATE_HUMAN_MAP[name];
+    if (mapped) return `[Plantilla automática enviada al cliente] ${mapped}`;
+    const readable = name.replace(/_/g, ' ').trim();
+    return `[Plantilla automática enviada al cliente: "${readable}"]`;
+}
+
 async function getChatHistory(phone: string, currentText?: string, limit = 25, originPhoneId?: string) {
     if (!base) return [];
     try {
@@ -4588,7 +4728,9 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
             // /^\d+$/ y un sender tipo "+34..." se tomaba por error como mensaje del
             // bot, descolocando todo el historial que ve Gemini.
             const isBot = cleanNumber(sender) !== clean;
-            return { role: isBot ? "model" : "user", parts: [{ text: r.get('text') as string || "" }], _ts: r.get('timestamp') as string };
+            // FIX: traducir plantillas a texto legible solo para Gemini (ver humanizeTemplateText).
+            const text = humanizeTemplateText((r.get('text') as string) || "", (r.get('type') as string) || "");
+            return { role: isBot ? "model" : "user", parts: [{ text }], _ts: r.get('timestamp') as string };
         });
 
         // FIX CRÍTICO GEMINI: Asegurar que el primer mensaje es 'user'
@@ -7993,6 +8135,22 @@ app.post('/webhook', async (req, res) => {
                         console.log(`📅 [WEBHOOK] Cancelación gestionada (intent=${cancelIntent}) por "${text}" (${from})`);
                         return res.sendStatus(200);
                     }
+                }
+            }
+
+            // --- Confirmación de cita por respuesta del cliente ("Sí", "vale"...) ---
+            // Va DESPUÉS de la cancelación (un "no" debe soltar la cita, no
+            // confirmarla) y ANTES del opt-out/opt-in (para que un "sí" a un
+            // recordatorio se trate como confirmación de cita, no como alta de
+            // marketing). handleAppointmentConfirmReply SOLO actúa si hay un
+            // recordatorio de cita reciente (<30h); si no, devuelve false y sigue
+            // el flujo normal. Sin el guard msg.type==='text' para cubrir también
+            // respuestas por BOTÓN (el id del botón llega en `text`).
+            if (text && detectConfirmationIntent(text) === 'confirm') {
+                const confirmed = await handleAppointmentConfirmReply(from, originPhoneId);
+                if (confirmed) {
+                    console.log(`📅 [WEBHOOK] Confirmación de cita gestionada por "${text}" (${from})`);
+                    return res.sendStatus(200);
                 }
             }
 
