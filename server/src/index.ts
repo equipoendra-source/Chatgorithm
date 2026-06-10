@@ -1936,18 +1936,12 @@ async function runScheduleMaintenance() {
         // Clave de deduplicación: agenda + fecha ISO (cubre tanto Available como Booked)
         const existing = new Set(futureSlots.map(r => `${(r.get('Agenda') as string) || ''}|${new Date(r.get('Date') as string).toISOString()}`));
 
-        // 3. Limpiar huecos DISPONIBLES de agendas que ya no existen
-        // (Los Booked se dejan intactos — son reservas reales que no deben borrarse aunque se elimine la agenda)
-        const agendaNames = new Set(agendas.map(a => a.name));
-        const orphans = futureSlots
-            .filter(r => { const ag = (r.get('Agenda') as string) || ''; return (!ag || !agendaNames.has(ag)) && r.get('Status') === 'Available'; })
-            .map(r => r.id);
-        for (let i = 0; i < orphans.length; i += 10) {
-            await base('Appointments').destroy(orphans.slice(i, i + 10));
-            await delay(200);
-        }
-
-        // 4. Generar huecos nuevos para cada agenda
+        // 3. Calcular el conjunto de slots VÁLIDOS (clave `agenda|iso`) según el
+        //    horario actual de cada agenda. Lo usamos para dos cosas: detectar
+        //    huecos Available que han quedado fuera del horario (p. ej. al
+        //    cambiar endTime de 18:00 a 17:00, los slots de 17:00 ya guardados)
+        //    y generar los huecos nuevos que falten.
+        const validKeys = new Set<string>();
         const newSlotsToCreate: any[] = [];
         for (const ag of agendas) {
             // step saneado: garantiza > 0 SIEMPRE, incluso si la agenda tiene un
@@ -1964,7 +1958,9 @@ async function runScheduleMaintenance() {
                 while (start.getTime() + step * 60000 <= end.getTime()) {
                     if (start > now) {
                         const iso = start.toISOString();
-                        if (!existing.has(`${ag.name}|${iso}`)) {
+                        const key = `${ag.name}|${iso}`;
+                        validKeys.add(key);
+                        if (!existing.has(key)) {
                             newSlotsToCreate.push({ fields: { "Date": iso, "Status": "Available", "Agenda": ag.name } });
                         }
                     }
@@ -1973,21 +1969,44 @@ async function runScheduleMaintenance() {
             }
         }
 
+        // 4. Limpiar huecos DISPONIBLES que sobran:
+        //    - de agendas que ya no existen (huérfanos), o
+        //    - de agendas que sí existen pero cuya fecha/hora ha quedado fuera
+        //      del horario actual de esa agenda (cambio de startTime/endTime/
+        //      días/duración → los slots ya creados a futuro deben desaparecer).
+        //    Los Booked NO se tocan: son reservas reales que persisten aunque
+        //    cambie la config.
+        const agendaNames = new Set(agendas.map(a => a.name));
+        const toDeleteIds = futureSlots
+            .filter(r => {
+                if (r.get('Status') !== 'Available') return false;
+                const ag = (r.get('Agenda') as string) || '';
+                if (!ag || !agendaNames.has(ag)) return true;           // huérfano
+                const iso = new Date(r.get('Date') as string).toISOString();
+                return !validKeys.has(`${ag}|${iso}`);                  // fuera de horario
+            })
+            .map(r => r.id);
+        for (let i = 0; i < toDeleteIds.length; i += 10) {
+            await base('Appointments').destroy(toDeleteIds.slice(i, i + 10));
+            await delay(200);
+        }
+
+        // 5. Crear los huecos nuevos que falten
         for (let i = 0; i < newSlotsToCreate.length; i += 10) {
             await base('Appointments').create(newSlotsToCreate.slice(i, i + 10));
             await delay(200);
         }
-        console.log(`📅 [Agendas] Mantenimiento OK. ${agendas.length} agenda(s), ${newSlotsToCreate.length} huecos nuevos.`);
+        console.log(`📅 [Agendas] Mantenimiento OK. ${agendas.length} agenda(s), ${toDeleteIds.length} hueco(s) limpiados, ${newSlotsToCreate.length} hueco(s) nuevo(s).`);
 
         // Si hubo cambios reales (borrados o creados), avisar a los calendarios
         // abiertos para que se refresquen. Antes los slots fantasma se quedaban
         // visibles hasta recargar manualmente.
-        const totalChanges = pastSlots.length + orphans.length + newSlotsToCreate.length;
+        const totalChanges = pastSlots.length + toDeleteIds.length + newSlotsToCreate.length;
         if (totalChanges > 0) {
             try {
                 io.emit('appointment_changed', {
                     action: 'maintenance',
-                    removed: pastSlots.length + orphans.length,
+                    removed: pastSlots.length + toDeleteIds.length,
                     created: newSlotsToCreate.length
                 });
             } catch (emitErr: any) {
