@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
     Calendar as CalendarIcon, Clock, Plus, Trash2, User, CheckCircle,
-    RefreshCw, Phone, ChevronLeft, ChevronRight, Zap, X, Save, Eye, Loader2, Layers, History, Wrench,
+    RefreshCw, Phone, ChevronLeft, ChevronRight, ChevronDown, Zap, X, Save, Eye, Loader2, Layers, History, Wrench,
     PackageCheck, Search, RotateCcw, FileText, Upload
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
@@ -179,6 +179,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [slotDuration, setSlotDuration] = useState(60);
     // Vista activa del calendario: día / semana / mes
     const [viewMode, setViewMode] = useState<'month' | 'week' | 'day'>('month');
+    // Vista de día agrupada por hora: qué horas están desplegadas (clave = timestamp de la hora en punto).
+    const [expandedHours, setExpandedHours] = useState<Set<number>>(new Set());
+    const toggleHour = (key: number) => setExpandedHours(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
 
     // Si nos pasan initialDate (desde el toast de nueva cita), saltamos al día y abrimos vista día
     useEffect(() => {
@@ -1086,6 +1089,106 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         return result;
     };
 
+    // Agrupa los huecos de un día por HORA EN PUNTO para la vista de día.
+    // Conteo (ocupadas/total) sobre los slots ORIGINALES (sin colapsar): así un
+    // secundario de avería cuenta como plaza ocupada en su hora. Las ENTRADAS
+    // clicables salen de collapseBookedBlocks (el líder de la avería aparece una
+    // sola vez, en su hora de inicio, con su rango).
+    const groupSlotsByHour = (daySlots: Appointment[]) => {
+        const hourKey = (iso: string) => { const d = new Date(iso); d.setMinutes(0, 0, 0); return d.getTime(); };
+        const totalByHour = new Map<number, number>();
+        const bookedByHour = new Map<number, number>();
+        for (const s of daySlots) {
+            const k = hourKey(s.date);
+            totalByHour.set(k, (totalByHour.get(k) || 0) + 1);
+            if (s.status === 'Booked') bookedByHour.set(k, (bookedByHour.get(k) || 0) + 1);
+        }
+        const entriesByHour = new Map<number, Appointment[]>();
+        for (const s of collapseBookedBlocks(daySlots)) {
+            const k = hourKey(s.date);
+            if (!entriesByHour.has(k)) entriesByHour.set(k, []);
+            entriesByHour.get(k)!.push(s);
+        }
+        return Array.from(totalByHour.keys()).sort((a, b) => a - b).map(k => {
+            const total = totalByHour.get(k) || 0;
+            const booked = bookedByHour.get(k) || 0;
+            const entries = (entriesByHour.get(k) || []).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+            return {
+                key: k,
+                label: new Date(k).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+                bookedCount: booked,
+                totalCount: total,
+                freeCount: Math.max(0, total - booked),
+                entries,
+                availableEntries: entries.filter(e => e.status === 'Available'),
+            };
+        });
+    };
+
+    // Fila individual de cita/hueco (idéntica a la vista de día previa). Se usa
+    // dentro del panel desplegado de cada hora.
+    const renderDaySlotRow = (s: Appointment) => {
+        const start = new Date(s.date);
+        const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
+        const end = new Date(start.getTime() + dur * 60000);
+        const isBooked = s.status === 'Booked';
+        const isDelivered = shouldPaintDelivered(s);
+        return (
+            <div
+                key={s.id}
+                onClick={() => handleOpenEdit(s)}
+                className={`flex items-stretch gap-3 p-3 rounded-2xl border-2 cursor-pointer transition ${isDelivered
+                    ? (isDark ? 'bg-emerald-700/70 border-emerald-400 hover:bg-emerald-600/80' : 'bg-emerald-300 border-emerald-600 hover:bg-emerald-400')
+                    : isBooked
+                        ? (isDark ? 'bg-amber-700/70 border-amber-400 hover:bg-amber-600/80' : 'bg-amber-300 border-amber-600 hover:bg-amber-400')
+                        : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
+                    }`}
+            >
+                <div className="flex flex-col items-center justify-center min-w-[64px]">
+                    <span className={`text-lg font-bold font-mono leading-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                        {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    <span className="text-[11px] font-mono text-slate-400">
+                        {end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                </div>
+                <div className="w-1.5 rounded-full self-stretch flex-shrink-0" style={{ backgroundColor: isBooked ? agendaColor(s.agenda) : (isDark ? '#334155' : '#e2e8f0') }} />
+                <div className="flex-1 min-w-0 flex flex-col justify-center">
+                    {isBooked ? (
+                        <>
+                            <span className={`font-bold text-sm truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                {s.clientName || 'Cliente'}
+                            </span>
+                            <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5 flex-wrap">
+                                {s.clientPhone && <span className="flex items-center gap-1"><Phone size={11} />{s.clientPhone}</span>}
+                                {agendas.length > 1 && s.agenda && (
+                                    <span className="flex items-center gap-1">
+                                        <span className="w-2 h-2 rounded-full" style={{ backgroundColor: agendaColor(s.agenda) }} />
+                                        {s.agenda}
+                                    </span>
+                                )}
+                            </div>
+                        </>
+                    ) : (
+                        <span className={`text-sm font-semibold ${isDark ? 'text-sky-400' : 'text-sky-600'}`}>
+                            Hueco libre{agendas.length > 1 && s.agenda ? ` · ${s.agenda}` : ''}
+                        </span>
+                    )}
+                </div>
+                <div className="flex flex-col items-end justify-center gap-1 flex-shrink-0">
+                    {s.incident && (
+                        <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/80 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><Zap size={11} />Sin Cita</span>
+                    )}
+                    {isDelivered
+                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-emerald-600/90 text-white border-emerald-300' : 'bg-emerald-600 text-white border-emerald-800'}`}><PackageCheck size={11} />Entregado</span>
+                        : isBooked
+                            ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/90 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><User size={11} />Reservada</span>
+                            : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-600/90 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700'}`}>Libre</span>}
+                </div>
+            </div>
+        );
+    };
+
     // Citas de una fecha concreta (objeto Date), aplicando el filtro de agenda
     const getSlotsForDate = (dateObj: Date) =>
         appointments
@@ -1121,7 +1224,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const goToday = () => setCurrentDate(new Date());
 
     // Abrir la vista de día concreto al pulsar un día en mes/semana
-    const openDayView = (d: Date) => { setCurrentDate(new Date(d)); setViewMode('day'); };
+    const openDayView = (d: Date) => { setCurrentDate(new Date(d)); setViewMode('day'); setExpandedHours(new Set()); };
 
     // Título de la cabecera según la vista activa
     const headerTitle: string = (() => {
@@ -1575,73 +1678,54 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 </div>
                             )}
 
-                            {/* Lista de citas del día — secundarios ocultos para que un bloque multi-slot
-                                aparezca como UNA sola entrada con su rango horario completo. */}
+                            {/* Lista AGRUPADA POR HORA: una fila por hora con barra de ocupación
+                                y contador; al hacer clic se despliega para ver/gestionar cada
+                                cita o plaza de esa hora y añadir en una plaza libre. */}
                             <div className="space-y-2">
-                                {collapseBookedBlocks(slots).map(s => {
-                                    const start = new Date(s.date);
-                                    // Si el slot es líder de un bloque multi-slot (durationMin > slotDuration),
-                                    // usamos esa duración real para calcular el fin. Si no, slotDuration normal.
-                                    const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
-                                    const end = new Date(start.getTime() + dur * 60000);
-                                    const isBooked = s.status === 'Booked';
-                                    const isDelivered = shouldPaintDelivered(s);
+                                {groupSlotsByHour(slots).map(hora => {
+                                    const isOpen = expandedHours.has(hora.key);
+                                    const full = hora.totalCount > 0 && hora.bookedCount >= hora.totalCount;
+                                    const pct = hora.totalCount > 0 ? Math.round((hora.bookedCount / hora.totalCount) * 100) : 0;
+                                    const bookedNames = hora.entries.filter(e => e.status === 'Booked').map(e => e.clientName || 'Cliente');
+                                    const resumen = bookedNames.slice(0, 2).join(', ') + (bookedNames.length > 2 ? `, +${bookedNames.length - 2}` : '');
                                     return (
-                                        <div
-                                            key={s.id}
-                                            onClick={() => handleOpenEdit(s)}
-                                            className={`flex items-stretch gap-3 p-3 rounded-2xl border-2 cursor-pointer transition ${isDelivered
-                                                ? (isDark ? 'bg-emerald-700/70 border-emerald-400 hover:bg-emerald-600/80' : 'bg-emerald-300 border-emerald-600 hover:bg-emerald-400')
-                                                : isBooked
-                                                    ? (isDark ? 'bg-amber-700/70 border-amber-400 hover:bg-amber-600/80' : 'bg-amber-300 border-amber-600 hover:bg-amber-400')
-                                                    : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
-                                                }`}
-                                        >
-                                            {/* Bloque horario */}
-                                            <div className="flex flex-col items-center justify-center min-w-[64px]">
-                                                <span className={`text-lg font-bold font-mono leading-tight ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                                                    {start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                </span>
-                                                <span className="text-[11px] font-mono text-slate-400">
-                                                    {end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                                                </span>
-                                            </div>
-                                            {/* Barra de color de la agenda */}
-                                            <div className="w-1.5 rounded-full self-stretch flex-shrink-0" style={{ backgroundColor: isBooked ? agendaColor(s.agenda) : (isDark ? '#334155' : '#e2e8f0') }} />
-                                            {/* Contenido */}
-                                            <div className="flex-1 min-w-0 flex flex-col justify-center">
-                                                {isBooked ? (
-                                                    <>
-                                                        <span className={`font-bold text-sm truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                                                            {s.clientName || 'Cliente'}
-                                                        </span>
-                                                        <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5 flex-wrap">
-                                                            {s.clientPhone && <span className="flex items-center gap-1"><Phone size={11} />{s.clientPhone}</span>}
-                                                            {agendas.length > 1 && s.agenda && (
-                                                                <span className="flex items-center gap-1">
-                                                                    <span className="w-2 h-2 rounded-full" style={{ backgroundColor: agendaColor(s.agenda) }} />
-                                                                    {s.agenda}
-                                                                </span>
-                                                            )}
+                                        <div key={hora.key} className={`rounded-2xl border-2 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+                                            {/* Fila de la hora (colapsable) */}
+                                            <div onClick={() => toggleHour(hora.key)} className={`flex items-center gap-3 p-3 cursor-pointer rounded-2xl transition ${isDark ? 'hover:bg-slate-700/50' : 'hover:bg-slate-50'}`}>
+                                                <span className={`text-lg font-bold font-mono leading-tight min-w-[56px] ${isDark ? 'text-white' : 'text-slate-800'}`}>{hora.label}</span>
+                                                <div className="flex-1 min-w-0">
+                                                    <div className="flex items-center gap-2">
+                                                        <div className={`flex-1 h-2 rounded-full overflow-hidden ${isDark ? 'bg-slate-600' : 'bg-slate-200'}`}>
+                                                            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: full ? '#dc2626' : (hora.bookedCount > 0 ? '#d97706' : '#cbd5e1') }} />
                                                         </div>
-                                                    </>
-                                                ) : (
-                                                    <span className={`text-sm font-semibold ${isDark ? 'text-sky-400' : 'text-sky-600'}`}>
-                                                        Hueco libre{agendas.length > 1 && s.agenda ? ` · ${s.agenda}` : ''}
-                                                    </span>
-                                                )}
+                                                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap ${full ? (isDark ? 'bg-red-600/80 text-white border-red-300' : 'bg-red-500 text-white border-red-700') : (isDark ? 'bg-sky-600/80 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700')}`}>{hora.bookedCount}/{hora.totalCount}</span>
+                                                    </div>
+                                                    {(resumen || hora.freeCount > 0) && (
+                                                        <div className="text-xs text-slate-400 mt-1 truncate">
+                                                            {resumen}{resumen && hora.freeCount > 0 ? ' · ' : ''}{hora.freeCount > 0 ? `${hora.freeCount} libres` : ''}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                                {isOpen
+                                                    ? <ChevronDown size={18} className="text-slate-400 flex-shrink-0" />
+                                                    : <ChevronRight size={18} className="text-slate-400 flex-shrink-0" />}
                                             </div>
-                                            {/* Etiqueta de estado + incidente */}
-                                            <div className="flex flex-col items-end justify-center gap-1 flex-shrink-0">
-                                                {s.incident && (
-                                                    <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/80 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><Zap size={11} />Sin Cita</span>
-                                                )}
-                                                {isDelivered
-                                                    ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-emerald-600/90 text-white border-emerald-300' : 'bg-emerald-600 text-white border-emerald-800'}`}><PackageCheck size={11} />Entregado</span>
-                                                    : isBooked
-                                                        ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/90 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><User size={11} />Reservada</span>
-                                                        : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-600/90 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700'}`}>Libre</span>}
-                                            </div>
+                                            {/* Panel desplegado: citas/plazas de esa hora + añadir */}
+                                            {isOpen && (
+                                                <div className="px-3 pb-3 space-y-2">
+                                                    {hora.entries.map(s => renderDaySlotRow(s))}
+                                                    {!readOnly && hora.availableEntries.length > 0 && (
+                                                        <button
+                                                            onClick={() => handleOpenEdit(hora.availableEntries[0])}
+                                                            className={`w-full py-2 rounded-xl border-2 border-dashed font-semibold text-xs flex items-center justify-center gap-2 transition ${isDark
+                                                                ? 'border-slate-600 text-slate-400 hover:border-purple-500 hover:text-purple-300'
+                                                                : 'border-slate-300 text-slate-500 hover:border-purple-400 hover:text-purple-600'}`}
+                                                        >
+                                                            <Plus size={14} /> Añadir cita ({hora.freeCount} libre{hora.freeCount !== 1 ? 's' : ''})
+                                                        </button>
+                                                    )}
+                                                </div>
+                                            )}
                                         </div>
                                     );
                                 })}
