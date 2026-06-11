@@ -6138,6 +6138,7 @@ app.put('/api/appointments/:id', async (req, res) => {
         let preUpdateDate = '';
         let preUpdateAgenda = '';
         let preUpdateDurationMin = 0;   // para liberar los secundarios del bloque al cancelar
+        let preUpdateServiceType = '';  // para detectar cambio de tipo de servicio en edición
         try {
             const before = await base('Appointments').find(req.params.id);
             preUpdateStatus = (before.get('Status') as string) || '';
@@ -6146,6 +6147,7 @@ app.put('/api/appointments/:id', async (req, res) => {
             preUpdateDate = (before.get('Date') as string) || '';
             preUpdateAgenda = (before.get('Agenda') as string) || '';
             preUpdateDurationMin = Number(before.get('DurationMin') || 0);
+            preUpdateServiceType = (before.get('ServiceType') as string) || '';
         } catch (_) { /* no bloqueamos si no se puede leer */ }
 
         // RESERVA CON BLOQUE DE SLOTS (tipo de servicio).
@@ -6291,6 +6293,184 @@ app.put('/api/appointments/:id', async (req, res) => {
                 }
                 console.error('[API] Error procesando bloque de servicio:', svcErr?.message || svcErr);
                 return res.status(500).json({ error: 'Error procesando el tipo de servicio.' });
+            }
+        }
+
+        // CAMBIO DE TIPO DE SERVICIO EN UNA CITA YA BOOKED (edición).
+        // El agente humano abre "Gestionar Cita" sobre una cita ya reservada,
+        // cambia el dropdown de "Tipo de servicio" (de "Avería" 240min a
+        // "Revisión" 120min, o pone "Sin servicio") y guarda. Necesitamos:
+        //   - Si el bloque CRECE → validar y bloquear los huecos extra
+        //     consecutivos al final del bloque actual.
+        //   - Si el bloque MENGUA → liberar los secundarios sobrantes desde
+        //     el final del bloque actual.
+        //   - Si el bloque tiene el mismo tamaño pero distinto nombre → solo
+        //     cambiar ServiceType (re-etiquetar).
+        //   - Si no cambia el servicio → no hacer nada.
+        // El líder y los ajustes de secundarios van DENTRO del lock para
+        // cerrar la ventana de race con bookAppointment de Laura.
+        const isEditingBookedService =
+            !blockWasApplied
+            && preUpdateStatus === 'Booked'
+            && req.body.status !== 'Available'   // no es una cancelación
+            && req.body.service !== undefined;   // el frontend mandó el campo
+        if (isEditingBookedService) {
+            const incomingServiceRaw = req.body.service === null ? '' : String(req.body.service || '').trim();
+            const agendaName = preUpdateAgenda || (f['Agenda'] as string) || '';
+            try {
+                const allAgendas = await getAgendas();
+                if (!allAgendas || allAgendas.length === 0) {
+                    return res.status(503).json({ error: 'No se pudo leer la configuración de agendas. Intenta de nuevo.' });
+                }
+                const matchedAgenda = agendaName ? allAgendas.find(a => a.name === agendaName) : allAgendas[0];
+                if (!matchedAgenda) {
+                    return res.status(400).json({ error: `Agenda "${agendaName}" no encontrada — no se puede ajustar el bloque del servicio.` });
+                }
+                const granularity = matchedAgenda.duration || 60;
+                // Resolver el servicio destino. Vacío = "sin servicio" (1 hueco).
+                let desiredService: AgendaService | null = null;
+                if (incomingServiceRaw) {
+                    desiredService = findServiceLoose(matchedAgenda.services, incomingServiceRaw);
+                    if (!desiredService) {
+                        const available = (matchedAgenda.services || []).map(s => `"${s.name}"`).join(', ');
+                        return res.status(400).json({ error: `Servicio "${incomingServiceRaw}" no existe en la agenda "${matchedAgenda.name}". Disponibles: ${available || '(ninguno)'}.` });
+                    }
+                }
+                const desiredSlotsNeeded = desiredService ? Math.max(1, Math.ceil(desiredService.durationMin / granularity)) : 1;
+                const desiredBlockDuration = desiredSlotsNeeded * granularity;
+                const desiredServiceName = desiredService?.name || '';
+                // Si el servicio no cambia (mismo nombre canónico y misma
+                // duración) salimos y dejamos que el flujo clásico aplique
+                // los demás campos (nombre, matrícula, etc.).
+                const currentSlotsCount = Math.max(1, Math.round(preUpdateDurationMin / granularity) || 1);
+                const sameService = desiredServiceName === preUpdateServiceType && desiredSlotsNeeded === currentSlotsCount;
+                if (!sameService) {
+                    await withAppointmentLock(req.params.id, async () => {
+                        // Releer dentro del lock para asegurar que nadie ha
+                        // tocado el líder entre la captura y este punto.
+                        const currentLead = await base!('Appointments').find(req.params.id);
+                        const currentStatus = currentLead.get('Status') as string;
+                        const currentDurationMinLive = Number(currentLead.get('DurationMin') || 0);
+                        const liveCurrentSlots = Math.max(1, Math.round(currentDurationMinLive / granularity) || 1);
+                        if (currentStatus !== 'Booked') {
+                            throw { httpStatus: 409, message: `La cita ya no está reservada (estado actual: ${currentStatus}). Recarga el calendario.` };
+                        }
+                        const leadDate = new Date(currentLead.get('Date') as string);
+                        if (isNaN(leadDate.getTime())) {
+                            throw { httpStatus: 400, message: 'Fecha del slot líder inválida.' };
+                        }
+                        const currentBlockEndMs = leadDate.getTime() + liveCurrentSlots * granularity * 60000;
+                        const leaderClientPhone = (currentLead.get('ClientPhone') as string) || preUpdateClientPhone || '';
+
+                        if (desiredSlotsNeeded > liveCurrentSlots) {
+                            // CRECER: validar huecos Available consecutivos
+                            // justo al final del bloque actual y reservarlos.
+                            const extraNeeded = desiredSlotsNeeded - liveCurrentSlots;
+                            const newBlockEndMs = leadDate.getTime() + desiredBlockDuration * 60000;
+                            const currentEndISO = new Date(currentBlockEndMs).toISOString();
+                            const newEndISO = new Date(newBlockEndMs).toISOString();
+                            const candidates = await base!('Appointments').select({
+                                filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Available', {Date}>='${escAt(currentEndISO)}', {Date}<'${escAt(newEndISO)}')`,
+                                sort: [{ field: 'Date', direction: 'asc' }]
+                            }).all();
+                            if (candidates.length < extraNeeded) {
+                                throw { httpStatus: 409, message: `No hay huecos consecutivos suficientes para ampliar a "${desiredServiceName}" (${desiredService!.durationMin}min): faltan ${extraNeeded - candidates.length} hueco(s) libre(s) seguidos tras la cita actual.` };
+                            }
+                            // Consecutividad estricta empezando justo al final del bloque actual.
+                            let prevMs = currentBlockEndMs - granularity * 60000;
+                            const extraIds: string[] = [];
+                            for (let i = 0; i < extraNeeded; i++) {
+                                const c = candidates[i];
+                                const cMs = new Date(c.get('Date') as string).getTime();
+                                const diffMin = Math.round((cMs - prevMs) / 60000);
+                                if (diffMin !== granularity) {
+                                    throw { httpStatus: 409, message: `Los huecos para ampliar no son consecutivos (hay un salto de ${diffMin}min cuando se esperan ${granularity}min).` };
+                                }
+                                extraIds.push(c.id);
+                                prevMs = cMs;
+                            }
+                            // Aplicar líder con nuevos DurationMin/ServiceType, y secundarios nuevos.
+                            f['DurationMin'] = desiredBlockDuration;
+                            f['ServiceType'] = desiredServiceName;
+                            try {
+                                await updateAppointmentFields(req.params.id, f);
+                            } catch (e: any) {
+                                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                                    const { Incident: _omitIncident, ...rest } = f;
+                                    await updateAppointmentFields(req.params.id, rest);
+                                } else throw e;
+                            }
+                            for (const sid of extraIds) {
+                                try {
+                                    await updateAppointmentFields(sid, { 'Status': 'Booked', 'ClientPhone': leaderClientPhone });
+                                } catch (secErr: any) {
+                                    console.warn(`[API] Error bloqueando slot secundario ${sid} al ampliar:`, secErr?.message);
+                                }
+                            }
+                            console.log(`📅 [PUT-Service-Edit] Bloque AMPLIADO en líder ${req.params.id}: ${liveCurrentSlots} → ${desiredSlotsNeeded} hueco(s) (servicio "${desiredServiceName || '(sin)'}", ${desiredBlockDuration}min).`);
+                        } else if (desiredSlotsNeeded < liveCurrentSlots) {
+                            // MENGUAR: liberar los secundarios sobrantes desde
+                            // el final del bloque actual hacia atrás.
+                            const toFreeCount = liveCurrentSlots - desiredSlotsNeeded;
+                            const newBlockEndMs = leadDate.getTime() + desiredBlockDuration * 60000;
+                            const newEndISO = new Date(newBlockEndMs).toISOString();
+                            const currentEndISO = new Date(currentBlockEndMs).toISOString();
+                            // Candidatos a liberar: misma agenda, Booked, en
+                            // rango (newEnd, currentEnd], y mismo ClientPhone
+                            // que el líder (para no tocar otras reservas).
+                            const secCandidates = await base!('Appointments').select({
+                                filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Booked', {Date}>='${escAt(newEndISO)}', {Date}<'${escAt(currentEndISO)}')`,
+                                sort: [{ field: 'Date', direction: 'asc' }]
+                            }).all();
+                            const secsToFree = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, leaderClientPhone));
+                            if (secsToFree.length < toFreeCount) {
+                                // Defensa: si por alguna razón no encontramos
+                                // suficientes secundarios para liberar (bloque
+                                // mal formado previamente), seguimos con los
+                                // que haya y avisamos. No bloqueamos al usuario.
+                                console.warn(`[API] PUT-Service-Edit: esperaba liberar ${toFreeCount} secundario(s) y encontré ${secsToFree.length} en ${matchedAgenda.name}.`);
+                            }
+                            f['DurationMin'] = desiredBlockDuration;
+                            f['ServiceType'] = desiredServiceName;
+                            try {
+                                await updateAppointmentFields(req.params.id, f);
+                            } catch (e: any) {
+                                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                                    const { Incident: _omitIncident, ...rest } = f;
+                                    await updateAppointmentFields(req.params.id, rest);
+                                } else throw e;
+                            }
+                            for (const r of secsToFree) {
+                                try {
+                                    await updateAppointmentFields(r.id, { 'Status': 'Available', 'ClientPhone': '', 'DurationMin': 0, 'ServiceType': '' });
+                                } catch (freeErr: any) {
+                                    console.warn(`[API] Error liberando slot secundario ${r.id} al mengar:`, freeErr?.message);
+                                }
+                            }
+                            console.log(`📅 [PUT-Service-Edit] Bloque REDUCIDO en líder ${req.params.id}: ${liveCurrentSlots} → ${desiredSlotsNeeded} hueco(s), ${secsToFree.length} secundario(s) liberado(s) (servicio "${desiredServiceName || '(sin)'}").`);
+                        } else {
+                            // MISMO TAMAÑO, distinto nombre → solo re-etiqueta.
+                            f['DurationMin'] = desiredBlockDuration;
+                            f['ServiceType'] = desiredServiceName;
+                            try {
+                                await updateAppointmentFields(req.params.id, f);
+                            } catch (e: any) {
+                                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                                    const { Incident: _omitIncident, ...rest } = f;
+                                    await updateAppointmentFields(req.params.id, rest);
+                                } else throw e;
+                            }
+                            console.log(`📅 [PUT-Service-Edit] Bloque RE-ETIQUETADO en líder ${req.params.id}: "${preUpdateServiceType}" → "${desiredServiceName || '(sin)'}" (${desiredBlockDuration}min, sin tocar huecos).`);
+                        }
+                        blockWasApplied = true;
+                    });
+                }
+            } catch (svcErr: any) {
+                if (svcErr && typeof svcErr.httpStatus === 'number') {
+                    return res.status(svcErr.httpStatus).json({ error: svcErr.message });
+                }
+                console.error('[API] Error ajustando bloque de servicio en edición:', svcErr?.message || svcErr);
+                return res.status(500).json({ error: 'Error ajustando el tipo de servicio.' });
             }
         }
 

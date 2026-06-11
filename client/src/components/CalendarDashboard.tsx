@@ -573,7 +573,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setContactLookup(null);
         setVehicles([]);
         setSelectedVehicleId('');
-        setEditService(''); // siempre sin servicio al abrir el modal
+        // Precargamos el servicio actual de la cita si la estamos editando ya
+        // Booked. Para slots Available recién abiertos viene vacío → "sin servicio".
+        setEditService(appt.serviceType || '');
         setSelectedAppt(appt);
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
@@ -655,11 +657,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
     const handleUpdateAppt = async () => {
         if (!selectedAppt) return;
-        // service solo se envía cuando se está CREANDO una cita (slot
-        // Available → Booked). En edición de una cita ya reservada se omite
-        // — cambiar el tamaño del bloque a posteriori requeriría liberar/
-        // reocupar secundarios, fuera de scope.
+        // service se envía siempre que la cita acabe en Booked: al CREAR
+        // (Available → Booked) para reservar el bloque desde cero, y al
+        // EDITAR (Booked → Booked) para que el backend ajuste el tamaño
+        // del bloque (crecer / mengar / re-etiquetar) según el servicio
+        // elegido. En cancelaciones (→ Available) no tiene sentido enviarlo.
         const isCreating = selectedAppt.status === 'Available' && editStatus === 'Booked';
+        const isEditingBooked = selectedAppt.status === 'Booked' && editStatus === 'Booked';
         try {
             const res = await fetch(`${API_URL}/appointments/${selectedAppt.id}`, {
                 method: 'PUT',
@@ -675,7 +679,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     extra: editExtra,
                     notas: editNotas,
                     incident: editIncident,
-                    service: (isCreating && editService) ? editService : undefined,
+                    service: isCreating
+                        ? (editService || undefined)
+                        : (isEditingBooked ? editService : undefined),
                     actorUsername: getCurrentUsername()
                 })
             });
@@ -1897,12 +1903,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </>
                                     )}
 
-                                    {/* Selector de TIPO DE SERVICIO — solo al CREAR cita (Available→Booked)
-                                        y si la agenda del slot tiene servicios configurados (Avería, Revisión...).
-                                        Al elegir uno, al guardar el backend ocupará automáticamente los slots
-                                        consecutivos necesarios (ej. Avería 240min con grid 60min = 4 slots).
+                                    {/* Selector de TIPO DE SERVICIO — visible al CREAR cita
+                                        (Available→Booked) Y al EDITAR una cita ya Booked, si la
+                                        agenda del slot tiene servicios configurados (Avería,
+                                        Revisión...). Al elegir uno y guardar, el backend ajusta el
+                                        bloque automáticamente: crear nuevo, ampliar (validando
+                                        huecos consecutivos libres tras la cita actual), reducir
+                                        (liberando los secundarios sobrantes) o solo re-etiquetar.
                                         Sin servicio = solo 1 hueco (comportamiento clásico). */}
-                                    {!readOnly && selectedAppt.status === 'Available' && editStatus === 'Booked' && (() => {
+                                    {!readOnly && editStatus === 'Booked' && (() => {
                                         const slotAgenda = agendas.find(a => a.name === (selectedAppt?.agenda || ''));
                                         const availableServices = (slotAgenda?.services || []).filter(s => s.name && s.name.trim() && s.durationMin > 0);
                                         if (availableServices.length === 0) return null;
