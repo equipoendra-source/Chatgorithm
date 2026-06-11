@@ -1903,6 +1903,88 @@ function findServiceLoose(services: AgendaService[] | undefined, name: string): 
     return services.find(s => norm(s.name) === target) || null;
 }
 
+// --- CONFIG DEL TALLER (capacidad de mecánicos + catálogo de servicios) ---
+// Vive en BotSettings → 'taller_config'. Es INDEPENDIENTE de las agendas de
+// recepción: la recepción solo reserva huecos de 30 min; las horas de taller
+// (carga de los mecánicos) se calculan aparte a partir del tipo de servicio.
+// DurationMin de cada cita guarda esas horas de taller (no nº de huecos).
+interface TallerConfig {
+    mechanics: number;          // nº de mecánicos
+    hoursPerDay: number;        // horas/día por mecánico (por defecto)
+    workingDays: number[];      // días laborables del taller (0=Dom..6=Sáb)
+    hoursByWeekday: Record<string, number>;  // override de horas por día de la semana (opcional)
+    holidays: string[];         // festivos 'YYYY-MM-DD' (capacidad 0)
+    services: AgendaService[];  // catálogo global de tipos con sus minutos de taller
+}
+
+const TALLER_DEFAULTS: Omit<TallerConfig, 'services'> = {
+    mechanics: 1,
+    hoursPerDay: 8,
+    workingDays: [1, 2, 3, 4, 5],
+    hoursByWeekday: {},
+    holidays: [],
+};
+
+// Une los servicios de todas las agendas (deduplicados por nombre canónico),
+// para sembrar el catálogo global la primera vez sin perder lo ya configurado.
+function unionAgendaServices(agendas: Agenda[]): AgendaService[] {
+    const seen = new Map<string, AgendaService>();
+    for (const a of agendas) {
+        for (const s of (a.services || [])) {
+            const key = s.name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+            if (!seen.has(key)) seen.set(key, { id: String(s.id || s.name), name: s.name, durationMin: sanitizeMinutes(s.durationMin, 60) });
+        }
+    }
+    return Array.from(seen.values());
+}
+
+// Lee la config del taller con defaults seguros. Si el catálogo de servicios
+// aún no se ha guardado nunca, lo SIEMBRA con la unión de servicios de las
+// agendas (migración perezosa) — así el bot y las reservas siguen resolviendo
+// el tipo de servicio aunque el usuario no haya abierto todavía el panel Taller.
+async function getTallerConfig(): Promise<TallerConfig> {
+    let raw: any = {};
+    if (base) {
+        try {
+            const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'taller_config'", maxRecords: 1 }).firstPage();
+            if (r.length > 0) raw = JSON.parse((r[0].get('Value') as string) || '{}') || {};
+        } catch (e) {
+            console.error('[Taller] Error leyendo taller_config:', e);
+        }
+    }
+    const cfg: TallerConfig = {
+        mechanics: (Number.isFinite(Number(raw.mechanics)) && Number(raw.mechanics) > 0) ? Math.round(Number(raw.mechanics)) : TALLER_DEFAULTS.mechanics,
+        hoursPerDay: (Number.isFinite(Number(raw.hoursPerDay)) && Number(raw.hoursPerDay) > 0) ? Number(raw.hoursPerDay) : TALLER_DEFAULTS.hoursPerDay,
+        workingDays: Array.isArray(raw.workingDays) ? raw.workingDays.map((d: any) => Number(d)).filter((d: number) => d >= 0 && d <= 6) : [...TALLER_DEFAULTS.workingDays],
+        hoursByWeekday: (raw.hoursByWeekday && typeof raw.hoursByWeekday === 'object' && !Array.isArray(raw.hoursByWeekday)) ? raw.hoursByWeekday : {},
+        holidays: Array.isArray(raw.holidays) ? raw.holidays.map((d: any) => String(d)).filter(Boolean) : [],
+        services: Array.isArray(raw.services)
+            ? raw.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any) => ({ id: String(s.id || s.name), name: String(s.name).trim(), durationMin: sanitizeMinutes(s.durationMin, 60) }))
+            : [],
+    };
+    if (cfg.services.length === 0) {
+        try { cfg.services = unionAgendaServices(await getAgendas()); } catch { /* sin agendas → catálogo vacío */ }
+    }
+    return cfg;
+}
+
+// Catálogo global de tipos de servicio (avería, revisión, …). Lo usan el bot y
+// las reservas para resolver el nombre canónico y los minutos de taller.
+async function getServiceCatalog(): Promise<AgendaService[]> {
+    return (await getTallerConfig()).services;
+}
+
+async function saveTallerConfig(cfg: TallerConfig): Promise<void> {
+    if (!base) throw new Error('DB no disponible');
+    const value = JSON.stringify(cfg);
+    const recs = await base('BotSettings').select({ filterByFormula: "{Setting} = 'taller_config'", maxRecords: 1 }).firstPage();
+    if (recs.length > 0) {
+        await base('BotSettings').update([{ id: recs[0].id, fields: { "Value": value } }]);
+    } else {
+        await base('BotSettings').create([{ fields: { "Setting": "taller_config", "Value": value } }]);
+    }
+}
+
 // --- MANTENIMIENTO AUTOMÁTICO AGENDA ---
 async function runScheduleMaintenance() {
     if (!base) return;
@@ -3556,27 +3638,25 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
 
         const matchedAgenda = agenda ? allAgendas.find(a => a.name === agenda) : allAgendas[0];
         const slotGranularity = matchedAgenda?.duration || 60;
-        let slotsNeeded = 1;
+        // MODELO 1 HUECO: toda cita ocupa SIEMPRE un único hueco de recepción.
+        // El tipo de servicio (avería/revisión) solo etiqueta la cita y fija sus
+        // horas de taller (DurationMin); ya NO multiplica huecos. Por eso slotsNeeded=1.
+        const slotsNeeded = 1;
         let serviceLabel = '';
-        if (serviceKey && matchedAgenda) {
-            // Matching tolerante: "Averia" sin tilde matchea "Avería" en config.
-            // Sin esto, antes caía silenciosamente a slotsNeeded=1 y la cita de
-            // 4h se reservaba como 1 slot suelto.
-            const svc = findServiceLoose(matchedAgenda.services, serviceKey);
+        if (serviceKey) {
+            // Matching tolerante contra el catálogo GLOBAL del taller (avería,
+            // revisión, …), independiente de la agenda de recepción. Si el bot
+            // pide un tipo que no existe, devolvemos error para que use uno válido.
+            const catalog = await getServiceCatalog();
+            const svc = findServiceLoose(catalog, serviceKey);
             if (svc) {
                 if (svc.name !== serviceKey.trim()) {
                     console.warn(`⚠️ [Slots] Laura pasó servicio "${serviceKey}" pero en config está "${svc.name}". Matcheado por normalización.`);
                 }
-                slotsNeeded = Math.max(1, Math.ceil(svc.durationMin / slotGranularity));
                 serviceLabel = svc.name;
-                console.log(`📅 [Slots] Servicio "${svc.name}" → ${svc.durationMin}min → ${slotsNeeded} slot(s) de ${slotGranularity}min`);
-            } else {
-                // No matchea ni siquiera con normalización: el bot pidió un
-                // servicio que no existe. Devolvemos error claro para que
-                // vuelva a pedir y use un nombre válido — en vez de mostrar
-                // huecos de 1 slot por error.
-                const available = (matchedAgenda.services || []).map(s => `"${s.name}"`).join(', ');
-                return `⚠️ El servicio "${serviceKey}" no está configurado en la agenda "${matchedAgenda.name}". Servicios disponibles: ${available || '(ninguno)'}. Pregúntale al cliente cuál de estos quiere y vuelve a llamar a get_available_appointments con el nombre EXACTO.`;
+            } else if (catalog.length > 0) {
+                const available = catalog.map(s => `"${s.name}"`).join(', ');
+                return `⚠️ El servicio "${serviceKey}" no está configurado. Servicios disponibles: ${available}. Pregúntale al cliente cuál de estos quiere y vuelve a llamar a get_available_appointments con el nombre EXACTO.`;
             }
         }
 
@@ -3822,49 +3902,34 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
             const dateVal = new Date(leadRecord.get('Date') as string);
             const humanDate = dateVal.toLocaleString('es-ES', { timeZone: 'Europe/Madrid', dateStyle: 'full', timeStyle: 'short' });
 
-            // Duración total = nº de slots × granularidad REAL del bloque.
-            // La granularidad se mide del hueco entre los dos primeros slots (fiable aunque
-            // la agenda se haya renombrado/borrado). Con 1 solo slot se usa la duración de la agenda.
-            // IMPORTANTE: se deriva SIEMPRE de los slots reales — nunca del servicio — para que
-            // DurationMin sea coherente con lo reservado y cancelAppointment libere el rango exacto.
-            let granularity: number;
-            if (slotRecords.length > 1) {
-                const t0 = dateVal.getTime();
-                const t1 = new Date(slotRecords[1]!.get('Date') as string).getTime();
-                granularity = Math.max(1, Math.round((t1 - t0) / 60000));
-            } else {
-                const allAgendas = await getAgendas();
-                const agName = (leadRecord.get('Agenda') as string) || '';
-                const ag = agName ? allAgendas.find(a => a.name === agName) : allAgendas[0];
-                granularity = ag?.duration || 60;
-            }
-            const durationMin = slotIds.length * granularity;
-
-            // Resolver nombre CANÓNICO del servicio (sin tildes mal escritas,
-            // mismo case que en la config) para guardar consistente en Airtable.
-            // Esto es lo que ve el panel humano de Averías — si cada reserva
-            // guarda una variante diferente, el filtro se vuelve frágil.
+            // MODELO 1 HUECO: la cita ocupa SIEMPRE un único hueco de recepción.
+            // DurationMin ya NO es "nº de slots × granularidad": ahora guarda las
+            // HORAS DE TALLER del servicio (carga de los mecánicos), tomadas del
+            // catálogo global. Una cita sin tipo de servicio = 0 (no carga el taller).
+            // Resolvemos también el nombre CANÓNICO del servicio (sin tildes mal
+            // escritas, mismo case que en la config) para guardarlo consistente.
             let canonicalService = service || '';
+            let tallerMin = 0;
             if (service && service.trim()) {
                 try {
-                    const allAgendasForSvc = await getAgendas();
-                    const agName = (leadRecord.get('Agenda') as string) || '';
-                    const agForSvc = agName ? allAgendasForSvc.find(a => a.name === agName) : allAgendasForSvc[0];
-                    const svc = findServiceLoose(agForSvc?.services, service);
+                    const catalog = await getServiceCatalog();
+                    const svc = findServiceLoose(catalog, service);
                     if (svc) {
                         canonicalService = svc.name;
+                        tallerMin = svc.durationMin;
                         if (svc.name !== service.trim()) {
-                            console.warn(`⚠️ [Book] Servicio "${service}" normalizado a "${svc.name}" (canónico de la agenda).`);
+                            console.warn(`⚠️ [Book] Servicio "${service}" normalizado a "${svc.name}" (canónico del catálogo).`);
                         }
                     } else {
-                        console.warn(`⚠️ [Book] Servicio "${service}" no existe en agenda "${agName}". Se guarda tal cual.`);
+                        console.warn(`⚠️ [Book] Servicio "${service}" no existe en el catálogo. Se guarda tal cual, sin horas de taller.`);
                     }
                 } catch (e: any) {
-                    console.warn(`⚠️ [Book] No se pudo resolver nombre canónico del servicio: ${e.message}`);
+                    console.warn(`⚠️ [Book] No se pudo resolver el servicio: ${e.message}`);
                 }
             }
+            const durationMin = tallerMin;  // horas de taller (minutos), NO nº de huecos
 
-            console.log(`📅 [Book] Bloque: ${slotIds.length} slot(s) × ${granularity}min = ${durationMin}min total${canonicalService ? ` (servicio: ${canonicalService})` : ''}`);
+            console.log(`📅 [Book] Cita en 1 hueco de recepción${canonicalService ? ` · servicio "${canonicalService}" → ${tallerMin}min de taller` : ''}`);
 
             console.log(`📅 [Book] Actualizando cita a Booked...`);
             // Mapeo: los 5 campos genéricos se guardan en las columnas existentes de Airtable.
@@ -3881,19 +3946,11 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                 "Modelo": field3,
                 "Extra": field4,
                 "Notas": field5,
-                "DurationMin": durationMin,   // duración total de la cita en minutos
+                "DurationMin": durationMin,   // horas de taller del servicio (no nº de huecos)
                 "ServiceType": canonicalService  // nombre canónico del servicio — visible en el panel humano
             });
 
-            // Si la cita ocupa múltiples slots, marcar los secundarios como Booked también.
-            // No guardan datos del cliente — solo Status=Booked + ClientPhone para bloquear el hueco.
-            if (slotIds.length > 1) {
-                const secondaryIds = slotIds.slice(1);
-                for (const id of secondaryIds) {
-                    await updateAppointmentFields(id, { "Status": "Booked", "ClientPhone": cleanedPhone });
-                }
-                console.log(`📅 [Book] ${secondaryIds.length} slot(s) secundario(s) bloqueados`);
-            }
+            // Modelo 1 hueco: la reserva nunca ocupa slots secundarios.
 
             // VERIFICACIÓN POST-UPDATE: re-leer y comprobar que somos el dueño.
             // Si otra instancia (o un timing extremo) sobreescribió, detectamos.
@@ -4204,13 +4261,17 @@ async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' |
             "DurationMin": 0
         });
 
-        // Si la cita ocupa múltiples slots, liberar también los secundarios.
-        // Filtramos por: mismo cliente, MISMA agenda (clave: evita liberar citas del cliente
-        // en OTRAS agendas que solapen en horario) y rango [leadDate, leadDate + durationMin).
+        // COMPATIBILIDAD con averías ANTIGUAS multi-hueco: si quedan secundarios
+        // (huecos Booked SIN nombre del mismo cliente dentro del rango), se liberan.
+        // CRÍTICO: filtramos por {ClientName}='' — los secundarios reales no tienen
+        // nombre, mientras que una cita real SÍ. En el modelo nuevo de 1 hueco,
+        // DurationMin son horas de taller (no un rango de huecos), así que este
+        // guard evita liberar por error otra cita real del mismo cliente que caiga
+        // en esa ventana. Para citas nuevas no hay secundarios → no libera nada.
         if (durationMin > 0) {
             const endDate = new Date(leadDate.getTime() + durationMin * 60000).toISOString();
             const secCandidates = await base('Appointments').select({
-                filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`
+                filterByFormula: `AND({Status}='Booked', {ClientName}='', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`
             }).all();
             const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, clientPhone));
             if (secondaries.length > 0) {
@@ -5002,21 +5063,19 @@ REGLAS:
 - Tras llamar a assign_department, llama también a stop_conversation.
 - NO escribas customer_message ni respuesta final tras llamar a assign_department: el sistema envía automáticamente un aviso al cliente ("Te he derivado al equipo de X..."). Si tú también escribes algo, el cliente recibiría dos mensajes redundantes.`;
 
-            // Instrucciones de agendas — se inyectan cuando hay >1 agenda O cuando alguna agenda tiene servicios.
+            // Instrucciones de agendas + catálogo GLOBAL de tipos de servicio.
+            // Los tipos (avería/revisión, …) son INDEPENDIENTES de la agenda de
+            // recepción: cada cita ocupa 1 hueco de 30 min y el tipo solo la
+            // etiqueta y fija sus horas de taller (uso interno; el cliente no las ve).
             let agendasInstr = '';
-            const anyHasServices = agendas.some(a => a.services && a.services.length > 0);
+            const serviceCatalog = await getServiceCatalog();
+            const anyHasServices = serviceCatalog.length > 0;
             if (agendas.length > 1 || anyHasServices) {
-                let agendaLines = '';
-                for (const a of agendas) {
-                    agendaLines += `- "${a.name}"${a.description ? `: ${a.description}` : ''}`;
-                    if (a.services && a.services.length > 0) {
-                        agendaLines += `\n  Tipos de servicio disponibles (usa el nombre EXACTO en el parámetro \`service\`):\n`;
-                        agendaLines += a.services.map(s => `  • "${s.name}" → ${s.durationMin} minutos`).join('\n');
-                    }
-                    agendaLines += '\n';
-                }
-
                 if (agendas.length > 1) {
+                    let agendaLines = '';
+                    for (const a of agendas) {
+                        agendaLines += `- "${a.name}"${a.description ? `: ${a.description}` : ''}\n`;
+                    }
                     agendasInstr = `\n\n## 🗂️ AGENDAS / LÍNEAS DE CITA
 Este negocio tiene VARIAS agendas de citas independientes, cada una con su propio horario.
 ${agendaLines}
@@ -5025,19 +5084,18 @@ Cuando un cliente quiera reservar una cita:
 2. Si NO lo tienes claro, PREGÚNTALE para cuál de las agendas quiere la cita, mencionándoselas por su nombre.
 3. Pasa SIEMPRE el nombre EXACTO de la agenda elegida (tal cual aparece arriba) en el parámetro \`agenda\` de get_available_days y get_available_appointments.
 NUNCA muestres huecos sin haber determinado primero la agenda.`;
-                } else {
-                    // Solo 1 agenda pero tiene servicios: inyectar solo las instrucciones de servicio
-                    agendasInstr = `\n\n## 🔧 TIPOS DE SERVICIO
-${agendaLines}`;
                 }
 
                 if (anyHasServices) {
-                    agendasInstr += `
+                    const svcLines = serviceCatalog.map(s => `  • "${s.name}"`).join('\n');
+                    agendasInstr += `\n\n## 🔧 TIPOS DE SERVICIO
+Tipos disponibles (usa el nombre EXACTO en el parámetro \`service\`):
+${svcLines}
 
-Cuando el cliente indique qué tipo de servicio necesita:
+Cuando el cliente indique qué necesita:
 1. PREGUNTA el tipo de servicio si el cliente no lo ha mencionado y hay más de uno disponible.
-2. Pasa el nombre EXACTO del servicio elegido en el parámetro \`service\` de get_available_appointments y book_appointment.
-3. Esto garantiza que solo se muestren huecos con disponibilidad suficiente para ese servicio.`;
+2. Pasa el nombre EXACTO del tipo elegido en el parámetro \`service\` de get_available_appointments y book_appointment.
+Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo sirve para clasificarla internamente.`;
                 }
             }
 
@@ -6121,6 +6179,10 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.field5 !== undefined) f["Notas"] = req.body.field5;
         // Marcar/desmarcar la cita como incidente manualmente desde el popup
         if (req.body.incident !== undefined) f["Incident"] = !!req.body.incident;
+        // Horas de TALLER editables (carga de mecánicos). NO es el tamaño del hueco
+        // de recepción (siempre 30 min): por defecto vienen del tipo de servicio,
+        // pero el agente puede ajustarlas a mano para ESTA cita concreta.
+        if (req.body.durationMin !== undefined) f["DurationMin"] = Math.max(0, Math.round(Number(req.body.durationMin) || 0));
         // Reprogramación: si el frontend envía una nueva fecha, la aceptamos.
         // Más abajo detectamos si cambió respecto a la anterior y cancelamos
         // los recordatorios cita_24h/cita_1h pendientes para que el cron los
@@ -6150,167 +6212,63 @@ app.put('/api/appointments/:id', async (req, res) => {
             preUpdateServiceType = (before.get('ServiceType') as string) || '';
         } catch (_) { /* no bloqueamos si no se puede leer */ }
 
-        // RESERVA CON BLOQUE DE SLOTS (tipo de servicio).
+        // RESERVA MANUAL CON TIPO DE SERVICIO (modelo 1 hueco).
         // Si el body lleva `service` Y es una creación real (Available→Booked),
-        // calculamos cuántos slots consecutivos consume el servicio y los
-        // reservamos en bloque — igual que hace Laura desde WhatsApp con
-        // bookAppointment. Sin esto, el agente humano solo podía reservar 1
-        // hueco a la vez y tenía que duplicar el trabajo para una avería de 4h.
-        //
-        // Lógica duplicada conscientemente desde bookAppointment (líneas 3500+)
-        // para no acoplar refactorizando código del bot bajo presión.
-        //
-        // IMPORTANTE: el update del líder Y los secundarios va DENTRO del lock.
-        // En la primera versión los updates iban fuera y abrían una ventana de
-        // race con bookAppointment (Laura) que podía reservar uno de los
-        // secundarios entre nuestra validación y nuestro update. Mover todo
-        // dentro del lock cierra la ventana.
+        // etiquetamos la cita con el tipo y fijamos sus horas de TALLER en
+        // DurationMin (por defecto las del tipo; el body puede mandar durationMin
+        // a mano). La cita ocupa SIEMPRE un único hueco de recepción — ya NO se
+        // buscan ni bloquean huecos secundarios. El catálogo de tipos es global
+        // (independiente de la agenda de recepción).
         const isCreatingBooking = req.body.status === 'Booked' && preUpdateStatus === 'Available';
         const wantsServiceBlock = isCreatingBooking && req.body.service && typeof req.body.service === 'string' && req.body.service.trim().length > 0;
         let blockWasApplied = false;
         if (wantsServiceBlock) {
             const serviceName = String(req.body.service).trim();
-            // Usamos preUpdateAgenda (la agenda real del slot) en lugar de
-            // f['Agenda'] (que el agente podría haber cambiado en el body).
-            // Los secundarios deben buscarse por la agenda actual del slot,
-            // que es donde están guardados los huecos consecutivos.
-            const agendaName = preUpdateAgenda || (f['Agenda'] as string) || '';
             try {
-                const allAgendas = await getAgendas();
-                if (!allAgendas || allAgendas.length === 0) {
-                    return res.status(503).json({ error: 'No se pudo leer la configuración de agendas. Intenta de nuevo.' });
-                }
-                const matchedAgenda = agendaName ? allAgendas.find(a => a.name === agendaName) : allAgendas[0];
-                if (!matchedAgenda) {
-                    return res.status(400).json({ error: `Agenda "${agendaName}" no encontrada — no se puede calcular el bloque del servicio.` });
-                }
-                // Matching tolerante (sin tildes/case) — mismo motivo que en
-                // getAvailableAppointments. Aquí afecta al flujo manual del
-                // calendario; el frontend pasa el nombre tal cual del <select>
-                // que ya debería coincidir, pero por si acaso futuras llamadas
-                // (API externa, scripts) lo pasen distinto.
-                const svc = findServiceLoose(matchedAgenda.services, serviceName);
+                const catalog = await getServiceCatalog();
+                const svc = findServiceLoose(catalog, serviceName);
                 if (!svc) {
-                    const available = (matchedAgenda.services || []).map(s => `"${s.name}"`).join(', ');
-                    return res.status(400).json({ error: `Servicio "${serviceName}" no existe en la agenda "${matchedAgenda.name}". Disponibles: ${available || '(ninguno)'}.` });
+                    const available = catalog.map(s => `"${s.name}"`).join(', ');
+                    return res.status(400).json({ error: `Servicio "${serviceName}" no existe. Disponibles: ${available || '(ninguno)'}.` });
                 }
-                const granularity = matchedAgenda.duration || 60;
-                const slotsNeeded = Math.max(1, Math.ceil(svc.durationMin / granularity));
-                const blockDuration = slotsNeeded * granularity;
-
-                // Todo el flujo (validación + escritura del líder + escritura
-                // de secundarios) ocurre bajo el mismo lock para que ningún
-                // otro proceso pueda colarse y reservar un slot intermedio.
+                // El update del líder va DENTRO del lock para cerrar la ventana de
+                // race con bookAppointment (Laura) sobre el mismo hueco.
                 await withAppointmentLock(req.params.id, async () => {
                     const currentLead = await base!('Appointments').find(req.params.id);
                     const currentStatus = currentLead.get('Status') as string;
-                    const currentDuration = Number(currentLead.get('DurationMin')) || 0;
-
-                    // Idempotencia parcial: si el bloque YA está reservado con
-                    // la duración correcta, no re-buscamos secundarios ni los
-                    // re-escribimos — pero SÍ aplicamos los campos no-status
-                    // (name, matrícula, etc.) para que el agente pueda corregir
-                    // datos del cliente reintentando el guardado.
-                    const alreadyBlocked = currentStatus === 'Booked' && currentDuration >= blockDuration;
-
-                    if (!alreadyBlocked) {
-                        if (currentStatus !== 'Available') {
-                            throw { httpStatus: 409, message: `El hueco ya no está disponible (estado actual: ${currentStatus}).` };
-                        }
-                        const leadDate = new Date(currentLead.get('Date') as string);
-                        if (isNaN(leadDate.getTime())) {
-                            throw { httpStatus: 400, message: 'Fecha del slot líder inválida.' };
-                        }
-                        const blockEndMs = leadDate.getTime() + blockDuration * 60000;
-                        const endISO = new Date(blockEndMs).toISOString();
-                        const leadISO = leadDate.toISOString();
-                        // Buscar los N-1 secundarios bajo el lock: misma
-                        // agenda, Available, entre leadDate (exclusivo) y
-                        // leadDate + bloque (exclusivo).
-                        const candidatesRaw = await base!('Appointments').select({
-                            filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Available', {Date}>'${escAt(leadISO)}', {Date}<'${escAt(endISO)}')`,
-                            sort: [{ field: 'Date', direction: 'asc' }]
-                        }).all();
-                        // CAPACIDAD: la avería ocupa la MISMA plaza en todas sus horas.
-                        const candidates = candidatesRaw;
-                        const expected = slotsNeeded - 1;
-                        if (candidates.length < expected) {
-                            throw { httpStatus: 409, message: `No hay huecos consecutivos suficientes para "${serviceName}" (${svc.durationMin}min): faltan ${expected - candidates.length} hueco(s) libre(s) seguidos. Suele pasar cuando el hueco está a una hora no alineada con la agenda (ej. 10:30 en una agenda de tramos de ${granularity}min): crea el hueco en una hora del tramo (cada ${granularity}min desde la apertura) o crea los huecos contiguos que faltan.` };
-                        }
-                        // Validar consecutividad estricta
-                        let prevMs = leadDate.getTime();
-                        const secondaries: string[] = [];
-                        for (let i = 0; i < expected; i++) {
-                            const c = candidates[i];
-                            const cMs = new Date(c.get('Date') as string).getTime();
-                            const diffMin = Math.round((cMs - prevMs) / 60000);
-                            if (diffMin !== granularity) {
-                                throw { httpStatus: 409, message: `Los huecos no son consecutivos (hay un salto de ${diffMin}min cuando se esperan ${granularity}min). Suele pasar cuando el hueco está a una hora no alineada con la agenda (ej. 10:30 en tramos de ${granularity}min) o falta algún hueco en medio. Crea el hueco en una hora del tramo (cada ${granularity}min desde la apertura).` };
-                            }
-                            secondaries.push(c.id);
-                            prevMs = cMs;
-                        }
-                        // Ahora sí: actualizar líder + secundarios DENTRO del lock.
-                        f['DurationMin'] = blockDuration;
-                        f['ServiceType'] = svc.name;  // nombre canónico (no el del body) para el panel de Averías
-                        try {
-                            await updateAppointmentFields(req.params.id, f);
-                        } catch (e: any) {
-                            if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
-                                console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
-                                const { Incident: _omitIncident, ...rest } = f;
-                                await updateAppointmentFields(req.params.id, rest);
-                            } else throw e;
-                        }
-                        const cleanedClientPhone = (f['ClientPhone'] as string) || '';
-                        for (const sid of secondaries) {
-                            try {
-                                await updateAppointmentFields(sid, { 'Status': 'Booked', 'ClientPhone': cleanedClientPhone });
-                            } catch (secErr: any) {
-                                console.warn(`[API] Error bloqueando slot secundario ${sid}:`, secErr?.message);
-                            }
-                        }
-                        console.log(`📅 [PUT-Service] Bloque manual aplicado: ${secondaries.length} secundario(s) tras líder ${req.params.id} (servicio "${serviceName}", ${blockDuration}min).`);
-                        blockWasApplied = true;
-                    } else {
-                        // Reintento: el bloque ya estaba. Aplicamos solo los
-                        // campos de datos del cliente — NO tocamos Status ni
-                        // DurationMin para no destruir el bloque existente.
-                        const { Status: _s, DurationMin: _d, ...dataOnly } = f;
-                        try {
-                            await updateAppointmentFields(req.params.id, dataOnly);
-                        } catch (e: any) {
-                            if (dataOnly.Incident !== undefined && /incident/i.test(e.message || '')) {
-                                const { Incident: _omit, ...rest } = dataOnly;
-                                await updateAppointmentFields(req.params.id, rest);
-                            } else throw e;
-                        }
-                        console.log(`📅 [PUT-Service] Bloque ya existía, aplicados solo datos del cliente al líder ${req.params.id}.`);
-                        blockWasApplied = true;
+                    if (currentStatus !== 'Available' && currentStatus !== 'Booked') {
+                        throw { httpStatus: 409, message: `El hueco ya no está disponible (estado actual: ${currentStatus}).` };
                     }
+                    f['ServiceType'] = svc.name;  // nombre canónico (no el del body)
+                    // Horas de taller por defecto del tipo, salvo que el body las
+                    // haya fijado a mano (ya estarían en f['DurationMin']).
+                    if (req.body.durationMin === undefined) f['DurationMin'] = svc.durationMin;
+                    try {
+                        await updateAppointmentFields(req.params.id, f);
+                    } catch (e: any) {
+                        if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                            console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                            const { Incident: _omitIncident, ...rest } = f;
+                            await updateAppointmentFields(req.params.id, rest);
+                        } else throw e;
+                    }
+                    console.log(`📅 [PUT-Service] Cita manual en 1 hueco (servicio "${svc.name}" → ${f['DurationMin'] ?? svc.durationMin}min taller) líder ${req.params.id}.`);
+                    blockWasApplied = true;
                 });
             } catch (svcErr: any) {
                 if (svcErr && typeof svcErr.httpStatus === 'number') {
                     return res.status(svcErr.httpStatus).json({ error: svcErr.message });
                 }
-                console.error('[API] Error procesando bloque de servicio:', svcErr?.message || svcErr);
+                console.error('[API] Error procesando el tipo de servicio:', svcErr?.message || svcErr);
                 return res.status(500).json({ error: 'Error procesando el tipo de servicio.' });
             }
         }
 
-        // CAMBIO DE TIPO DE SERVICIO EN UNA CITA YA BOOKED (edición).
-        // El agente humano abre "Gestionar Cita" sobre una cita ya reservada,
-        // cambia el dropdown de "Tipo de servicio" (de "Avería" 240min a
-        // "Revisión" 120min, o pone "Sin servicio") y guarda. Necesitamos:
-        //   - Si el bloque CRECE → validar y bloquear los huecos extra
-        //     consecutivos al final del bloque actual.
-        //   - Si el bloque MENGUA → liberar los secundarios sobrantes desde
-        //     el final del bloque actual.
-        //   - Si el bloque tiene el mismo tamaño pero distinto nombre → solo
-        //     cambiar ServiceType (re-etiquetar).
-        //   - Si no cambia el servicio → no hacer nada.
-        // El líder y los ajustes de secundarios van DENTRO del lock para
-        // cerrar la ventana de race con bookAppointment de Laura.
+        // CAMBIO DE TIPO DE SERVICIO EN UNA CITA YA BOOKED (edición, modelo 1 hueco).
+        // El agente abre "Gestionar Cita" sobre una cita reservada y cambia el
+        // tipo (de "Avería" a "Revisión", o "Sin servicio"). SOLO re-etiquetamos:
+        // actualizamos ServiceType y las horas de TALLER (DurationMin). La cita
+        // sigue ocupando UN único hueco de recepción; no se tocan otros huecos.
         const isEditingBookedService =
             !blockWasApplied
             && preUpdateStatus === 'Booked'
@@ -6318,152 +6276,39 @@ app.put('/api/appointments/:id', async (req, res) => {
             && req.body.service !== undefined;   // el frontend mandó el campo
         if (isEditingBookedService) {
             const incomingServiceRaw = req.body.service === null ? '' : String(req.body.service || '').trim();
-            const agendaName = preUpdateAgenda || (f['Agenda'] as string) || '';
             try {
-                const allAgendas = await getAgendas();
-                if (!allAgendas || allAgendas.length === 0) {
-                    return res.status(503).json({ error: 'No se pudo leer la configuración de agendas. Intenta de nuevo.' });
-                }
-                const matchedAgenda = agendaName ? allAgendas.find(a => a.name === agendaName) : allAgendas[0];
-                if (!matchedAgenda) {
-                    return res.status(400).json({ error: `Agenda "${agendaName}" no encontrada — no se puede ajustar el bloque del servicio.` });
-                }
-                const granularity = matchedAgenda.duration || 60;
-                // Resolver el servicio destino. Vacío = "sin servicio" (1 hueco).
                 let desiredService: AgendaService | null = null;
                 if (incomingServiceRaw) {
-                    desiredService = findServiceLoose(matchedAgenda.services, incomingServiceRaw);
+                    const catalog = await getServiceCatalog();
+                    desiredService = findServiceLoose(catalog, incomingServiceRaw);
                     if (!desiredService) {
-                        const available = (matchedAgenda.services || []).map(s => `"${s.name}"`).join(', ');
-                        return res.status(400).json({ error: `Servicio "${incomingServiceRaw}" no existe en la agenda "${matchedAgenda.name}". Disponibles: ${available || '(ninguno)'}.` });
+                        const available = catalog.map(s => `"${s.name}"`).join(', ');
+                        return res.status(400).json({ error: `Servicio "${incomingServiceRaw}" no existe. Disponibles: ${available || '(ninguno)'}.` });
                     }
                 }
-                const desiredSlotsNeeded = desiredService ? Math.max(1, Math.ceil(desiredService.durationMin / granularity)) : 1;
-                const desiredBlockDuration = desiredSlotsNeeded * granularity;
                 const desiredServiceName = desiredService?.name || '';
-                // Si el servicio no cambia (mismo nombre canónico y misma
-                // duración) salimos y dejamos que el flujo clásico aplique
-                // los demás campos (nombre, matrícula, etc.).
-                const currentSlotsCount = Math.max(1, Math.round(preUpdateDurationMin / granularity) || 1);
-                const sameService = desiredServiceName === preUpdateServiceType && desiredSlotsNeeded === currentSlotsCount;
-                if (!sameService) {
+                // Si el tipo no cambia, dejamos que el flujo clásico aplique el
+                // resto de campos (nombre, matrícula, y durationMin a mano si vino).
+                if (desiredServiceName !== preUpdateServiceType) {
                     await withAppointmentLock(req.params.id, async () => {
-                        // Releer dentro del lock para asegurar que nadie ha
-                        // tocado el líder entre la captura y este punto.
                         const currentLead = await base!('Appointments').find(req.params.id);
                         const currentStatus = currentLead.get('Status') as string;
-                        const currentDurationMinLive = Number(currentLead.get('DurationMin') || 0);
-                        const liveCurrentSlots = Math.max(1, Math.round(currentDurationMinLive / granularity) || 1);
                         if (currentStatus !== 'Booked') {
                             throw { httpStatus: 409, message: `La cita ya no está reservada (estado actual: ${currentStatus}). Recarga el calendario.` };
                         }
-                        const leadDate = new Date(currentLead.get('Date') as string);
-                        if (isNaN(leadDate.getTime())) {
-                            throw { httpStatus: 400, message: 'Fecha del slot líder inválida.' };
+                        f['ServiceType'] = desiredServiceName;
+                        // Horas de taller por defecto del nuevo tipo, salvo que el
+                        // body las haya fijado a mano. "Sin servicio" → 0.
+                        if (req.body.durationMin === undefined) f['DurationMin'] = desiredService ? desiredService.durationMin : 0;
+                        try {
+                            await updateAppointmentFields(req.params.id, f);
+                        } catch (e: any) {
+                            if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
+                                const { Incident: _omitIncident, ...rest } = f;
+                                await updateAppointmentFields(req.params.id, rest);
+                            } else throw e;
                         }
-                        const currentBlockEndMs = leadDate.getTime() + liveCurrentSlots * granularity * 60000;
-                        const leaderClientPhone = (currentLead.get('ClientPhone') as string) || preUpdateClientPhone || '';
-
-                        if (desiredSlotsNeeded > liveCurrentSlots) {
-                            // CRECER: validar huecos Available consecutivos
-                            // justo al final del bloque actual y reservarlos.
-                            const extraNeeded = desiredSlotsNeeded - liveCurrentSlots;
-                            const newBlockEndMs = leadDate.getTime() + desiredBlockDuration * 60000;
-                            const currentEndISO = new Date(currentBlockEndMs).toISOString();
-                            const newEndISO = new Date(newBlockEndMs).toISOString();
-                            const candidates = await base!('Appointments').select({
-                                filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Available', {Date}>='${escAt(currentEndISO)}', {Date}<'${escAt(newEndISO)}')`,
-                                sort: [{ field: 'Date', direction: 'asc' }]
-                            }).all();
-                            if (candidates.length < extraNeeded) {
-                                throw { httpStatus: 409, message: `No hay huecos consecutivos suficientes para ampliar a "${desiredServiceName}" (${desiredService!.durationMin}min): faltan ${extraNeeded - candidates.length} hueco(s) libre(s) seguidos tras la cita actual.` };
-                            }
-                            // Consecutividad estricta empezando justo al final del bloque actual.
-                            let prevMs = currentBlockEndMs - granularity * 60000;
-                            const extraIds: string[] = [];
-                            for (let i = 0; i < extraNeeded; i++) {
-                                const c = candidates[i];
-                                const cMs = new Date(c.get('Date') as string).getTime();
-                                const diffMin = Math.round((cMs - prevMs) / 60000);
-                                if (diffMin !== granularity) {
-                                    throw { httpStatus: 409, message: `Los huecos para ampliar no son consecutivos (hay un salto de ${diffMin}min cuando se esperan ${granularity}min).` };
-                                }
-                                extraIds.push(c.id);
-                                prevMs = cMs;
-                            }
-                            // Aplicar líder con nuevos DurationMin/ServiceType, y secundarios nuevos.
-                            f['DurationMin'] = desiredBlockDuration;
-                            f['ServiceType'] = desiredServiceName;
-                            try {
-                                await updateAppointmentFields(req.params.id, f);
-                            } catch (e: any) {
-                                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
-                                    const { Incident: _omitIncident, ...rest } = f;
-                                    await updateAppointmentFields(req.params.id, rest);
-                                } else throw e;
-                            }
-                            for (const sid of extraIds) {
-                                try {
-                                    await updateAppointmentFields(sid, { 'Status': 'Booked', 'ClientPhone': leaderClientPhone });
-                                } catch (secErr: any) {
-                                    console.warn(`[API] Error bloqueando slot secundario ${sid} al ampliar:`, secErr?.message);
-                                }
-                            }
-                            console.log(`📅 [PUT-Service-Edit] Bloque AMPLIADO en líder ${req.params.id}: ${liveCurrentSlots} → ${desiredSlotsNeeded} hueco(s) (servicio "${desiredServiceName || '(sin)'}", ${desiredBlockDuration}min).`);
-                        } else if (desiredSlotsNeeded < liveCurrentSlots) {
-                            // MENGUAR: liberar los secundarios sobrantes desde
-                            // el final del bloque actual hacia atrás.
-                            const toFreeCount = liveCurrentSlots - desiredSlotsNeeded;
-                            const newBlockEndMs = leadDate.getTime() + desiredBlockDuration * 60000;
-                            const newEndISO = new Date(newBlockEndMs).toISOString();
-                            const currentEndISO = new Date(currentBlockEndMs).toISOString();
-                            // Candidatos a liberar: misma agenda, Booked, en
-                            // rango (newEnd, currentEnd], y mismo ClientPhone
-                            // que el líder (para no tocar otras reservas).
-                            const secCandidates = await base!('Appointments').select({
-                                filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Booked', {Date}>='${escAt(newEndISO)}', {Date}<'${escAt(currentEndISO)}')`,
-                                sort: [{ field: 'Date', direction: 'asc' }]
-                            }).all();
-                            const secsToFree = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, leaderClientPhone));
-                            if (secsToFree.length < toFreeCount) {
-                                // Defensa: si por alguna razón no encontramos
-                                // suficientes secundarios para liberar (bloque
-                                // mal formado previamente), seguimos con los
-                                // que haya y avisamos. No bloqueamos al usuario.
-                                console.warn(`[API] PUT-Service-Edit: esperaba liberar ${toFreeCount} secundario(s) y encontré ${secsToFree.length} en ${matchedAgenda.name}.`);
-                            }
-                            f['DurationMin'] = desiredBlockDuration;
-                            f['ServiceType'] = desiredServiceName;
-                            try {
-                                await updateAppointmentFields(req.params.id, f);
-                            } catch (e: any) {
-                                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
-                                    const { Incident: _omitIncident, ...rest } = f;
-                                    await updateAppointmentFields(req.params.id, rest);
-                                } else throw e;
-                            }
-                            for (const r of secsToFree) {
-                                try {
-                                    await updateAppointmentFields(r.id, { 'Status': 'Available', 'ClientPhone': '', 'DurationMin': 0, 'ServiceType': '' });
-                                } catch (freeErr: any) {
-                                    console.warn(`[API] Error liberando slot secundario ${r.id} al mengar:`, freeErr?.message);
-                                }
-                            }
-                            console.log(`📅 [PUT-Service-Edit] Bloque REDUCIDO en líder ${req.params.id}: ${liveCurrentSlots} → ${desiredSlotsNeeded} hueco(s), ${secsToFree.length} secundario(s) liberado(s) (servicio "${desiredServiceName || '(sin)'}").`);
-                        } else {
-                            // MISMO TAMAÑO, distinto nombre → solo re-etiqueta.
-                            f['DurationMin'] = desiredBlockDuration;
-                            f['ServiceType'] = desiredServiceName;
-                            try {
-                                await updateAppointmentFields(req.params.id, f);
-                            } catch (e: any) {
-                                if (f.Incident !== undefined && /incident/i.test(e.message || '')) {
-                                    const { Incident: _omitIncident, ...rest } = f;
-                                    await updateAppointmentFields(req.params.id, rest);
-                                } else throw e;
-                            }
-                            console.log(`📅 [PUT-Service-Edit] Bloque RE-ETIQUETADO en líder ${req.params.id}: "${preUpdateServiceType}" → "${desiredServiceName || '(sin)'}" (${desiredBlockDuration}min, sin tocar huecos).`);
-                        }
+                        console.log(`📅 [PUT-Service-Edit] Tipo re-etiquetado en ${req.params.id}: "${preUpdateServiceType}" → "${desiredServiceName || '(sin)'}" (${f['DurationMin'] ?? '—'}min taller).`);
                         blockWasApplied = true;
                     });
                 }
@@ -6471,7 +6316,7 @@ app.put('/api/appointments/:id', async (req, res) => {
                 if (svcErr && typeof svcErr.httpStatus === 'number') {
                     return res.status(svcErr.httpStatus).json({ error: svcErr.message });
                 }
-                console.error('[API] Error ajustando bloque de servicio en edición:', svcErr?.message || svcErr);
+                console.error('[API] Error ajustando el tipo de servicio:', svcErr?.message || svcErr);
                 return res.status(500).json({ error: 'Error ajustando el tipo de servicio.' });
             }
         }
@@ -6565,7 +6410,7 @@ app.put('/api/appointments/:id', async (req, res) => {
                         const leadISO = leadDate.toISOString();
                         const endISO = new Date(leadDate.getTime() + preUpdateDurationMin * 60000).toISOString();
                         const secCandidates = await base('Appointments').select({
-                            filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(preUpdateAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
+                            filterByFormula: `AND({Status}='Booked', {ClientName}='', {Agenda}='${escAt(preUpdateAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
                         }).all();
                         // Solo los del MISMO cliente. Si el líder no tuviera teléfono,
                         // phoneMatch da false → no se libera nada.
@@ -6894,7 +6739,7 @@ app.delete('/api/appointments/:id', async (req, res) => {
                     const leadISO = leadDate.toISOString();
                     const endISO = new Date(leadDate.getTime() + preDurationMin * 60000).toISOString();
                     const secCandidates = await base('Appointments').select({
-                        filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(preAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
+                        filterByFormula: `AND({Status}='Booked', {ClientName}='', {Agenda}='${escAt(preAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
                     }).all();
                     // Solo del mismo cliente; sin teléfono (anómalo) no libera nada.
                     const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, preClientPhone));
@@ -7165,6 +7010,39 @@ app.post('/api/schedule', async (req, res) => {
         runScheduleMaintenance().catch(e => console.error('Error en mantenimiento de agenda:', e));
         res.json({ success: true, agendas: clean });
     } catch (e: any) { res.status(500).json({ error: "Error updating schedule", details: e.message }); }
+});
+
+// CONFIG DEL TALLER (capacidad de mecánicos + catálogo global de servicios)
+app.get('/api/taller/config', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB' });
+    try {
+        res.json(await getTallerConfig());
+    } catch (e: any) {
+        console.error('[API] Error GET /taller/config:', e.message);
+        res.status(500).json({ error: 'Error leyendo config del taller' });
+    }
+});
+
+app.post('/api/taller/config', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB' });
+    try {
+        const b = req.body || {};
+        const cfg: TallerConfig = {
+            mechanics: (Number.isFinite(Number(b.mechanics)) && Number(b.mechanics) > 0) ? Math.round(Number(b.mechanics)) : TALLER_DEFAULTS.mechanics,
+            hoursPerDay: (Number.isFinite(Number(b.hoursPerDay)) && Number(b.hoursPerDay) > 0) ? Number(b.hoursPerDay) : TALLER_DEFAULTS.hoursPerDay,
+            workingDays: Array.isArray(b.workingDays) ? b.workingDays.map((d: any) => Number(d)).filter((d: number) => d >= 0 && d <= 6) : [...TALLER_DEFAULTS.workingDays],
+            hoursByWeekday: (b.hoursByWeekday && typeof b.hoursByWeekday === 'object' && !Array.isArray(b.hoursByWeekday)) ? b.hoursByWeekday : {},
+            holidays: Array.isArray(b.holidays) ? b.holidays.map((d: any) => String(d)).filter(Boolean) : [],
+            services: Array.isArray(b.services)
+                ? b.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any, i: number) => ({ id: String(s.id || `svc${i + 1}`), name: String(s.name).trim(), durationMin: sanitizeMinutes(s.durationMin, 60) }))
+                : [],
+        };
+        await saveTallerConfig(cfg);
+        res.json({ success: true, config: cfg });
+    } catch (e: any) {
+        console.error('[API] Error POST /taller/config:', e.message);
+        res.status(500).json({ error: 'Error guardando config del taller', details: e.message });
+    }
 });
 
 // Templates

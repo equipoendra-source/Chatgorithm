@@ -123,6 +123,17 @@ interface Agenda {
     services: AgendaService[];  // tipos de servicio con duración variable
 }
 
+// Config del TALLER: capacidad de mecánicos + catálogo global de tipos de
+// servicio (independiente de la agenda de recepción). Vive en BotSettings.
+interface TallerConfig {
+    mechanics: number;          // nº de mecánicos
+    hoursPerDay: number;        // horas/día por mecánico (por defecto)
+    workingDays: number[];      // días laborables (0=Dom..6=Sáb)
+    hoursByWeekday: Record<string, number>;  // override de horas por día (opcional)
+    holidays: string[];         // festivos 'YYYY-MM-DD' (capacidad 0)
+    services: AgendaService[];  // catálogo global de tipos con minutos de taller
+}
+
 // Días de la semana para el selector (etiqueta + valor getDay)
 const WEEK_DAYS: { label: string; value: number }[] = [
     { label: 'L', value: 1 }, { label: 'M', value: 2 }, { label: 'X', value: 3 },
@@ -207,6 +218,14 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [savingAgendas, setSavingAgendas] = useState(false);
     const [agendaFilter, setAgendaFilter] = useState<string>('');  // '' = todas
 
+    // ---- Panel TALLER (capacidad de mecánicos por día) ----
+    const [tallerConfig, setTallerConfig] = useState<TallerConfig | null>(null);
+    const [showTallerPanel, setShowTallerPanel] = useState(false);
+    const [draftTaller, setDraftTaller] = useState<TallerConfig | null>(null);
+    const [tallerSettingsOpen, setTallerSettingsOpen] = useState(false);
+    const [savingTaller, setSavingTaller] = useState(false);
+    const [expandedTallerDay, setExpandedTallerDay] = useState<string | null>(null);
+
     // Modal Edición
     const [selectedAppt, setSelectedAppt] = useState<Appointment | null>(null);
     const [editStatus, setEditStatus] = useState('');
@@ -238,6 +257,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // los slots consecutivos necesarios — igual que hace Laura por WhatsApp.
     // '' = sin servicio = solo 1 slot (comportamiento clásico).
     const [editService, setEditService] = useState<string>('');
+    // Horas de TALLER de la cita (minutos). Por defecto las del tipo de servicio,
+    // editable a mano. NO es el tamaño del hueco de recepción (siempre 1 hueco).
+    const [editDurationMin, setEditDurationMin] = useState<number>(0);
 
     // AUTOCOMPLETADO POR TELÉFONO al crear cita. Cuando el agente teclea el
     // teléfono del cliente en el modal, debounce 300ms y consulta:
@@ -343,6 +365,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 setNewAgenda(prev => prev || (dataSched.agendas[0]?.name ?? ''));
             }
 
+            // Config del taller (capacidad + catálogo global de servicios).
+            // Opcional: si falla, el panel del taller usa valores por defecto.
+            try {
+                const resTaller = await fetch(`${API_URL}/taller/config`);
+                if (resTaller.ok) {
+                    const dataTaller = await resTaller.json();
+                    if (dataTaller && typeof dataTaller === 'object') setTallerConfig(dataTaller);
+                }
+            } catch { /* sin config de taller → defaults */ }
+
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
@@ -423,6 +455,107 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             setTimeout(fetchData, 2000);
         } catch (e) { alert('Error de conexión guardando agendas'); }
         finally { setSavingAgendas(false); }
+    };
+
+    // ---- Taller: ajustes (capacidad + catálogo) ----
+    const TALLER_FALLBACK: TallerConfig = { mechanics: 1, hoursPerDay: 8, workingDays: [1, 2, 3, 4, 5], hoursByWeekday: {}, holidays: [], services: [] };
+
+    const openTallerSettings = () => {
+        const baseCfg = tallerConfig || TALLER_FALLBACK;
+        setDraftTaller(JSON.parse(JSON.stringify(baseCfg)));
+        setTallerSettingsOpen(true);
+    };
+
+    const patchDraftTaller = (patch: Partial<TallerConfig>) => {
+        setDraftTaller(prev => prev ? { ...prev, ...patch } : prev);
+    };
+
+    const toggleTallerWorkingDay = (day: number) => {
+        setDraftTaller(prev => {
+            if (!prev) return prev;
+            const has = prev.workingDays.includes(day);
+            return { ...prev, workingDays: has ? prev.workingDays.filter(d => d !== day) : [...prev.workingDays, day] };
+        });
+    };
+
+    const addTallerService = () => {
+        setDraftTaller(prev => prev ? { ...prev, services: [...(prev.services || []), { id: `svc${Date.now()}`, name: '', durationMin: 60 }] } : prev);
+    };
+    const updateTallerService = (idx: number, patch: Partial<AgendaService>) => {
+        setDraftTaller(prev => prev ? { ...prev, services: (prev.services || []).map((s, i) => i === idx ? { ...s, ...patch } : s) } : prev);
+    };
+    const removeTallerService = (idx: number) => {
+        setDraftTaller(prev => prev ? { ...prev, services: (prev.services || []).filter((_, i) => i !== idx) } : prev);
+    };
+
+    const handleSaveTaller = async () => {
+        if (!draftTaller) return;
+        // Limpiamos servicios sin nombre antes de guardar.
+        const cleaned: TallerConfig = {
+            ...draftTaller,
+            mechanics: Math.max(1, Math.round(Number(draftTaller.mechanics) || 1)),
+            hoursPerDay: Math.max(1, Number(draftTaller.hoursPerDay) || 8),
+            services: (draftTaller.services || []).filter(s => s.name && s.name.trim()).map(s => ({ ...s, name: s.name.trim(), durationMin: Math.max(0, Math.round(Number(s.durationMin) || 0)) })),
+        };
+        setSavingTaller(true);
+        try {
+            const res = await fetch(`${API_URL}/taller/config`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(cleaned)
+            });
+            const data = await res.json();
+            if (!res.ok || !data.success) { alert('Error: ' + (data.error || 'desconocido')); return; }
+            setTallerConfig(data.config);
+            setTallerSettingsOpen(false);
+            alert('✅ Ajustes del taller guardados.');
+        } catch (e) { alert('Error de conexión guardando los ajustes del taller'); }
+        finally { setSavingTaller(false); }
+    };
+
+    // Calcula la carga del taller por día para los próximos `days` días.
+    // capacidad/día = mecánicos × horas (override por día de semana) × 60,
+    // 0 si no es día laborable o es festivo. Comprometido = suma de durationMin
+    // (horas de taller) de las citas Booked líderes de ese día.
+    const computeTallerLoad = (days: number = 30) => {
+        const cfg = tallerConfig || TALLER_FALLBACK;
+        const start = new Date(); start.setHours(0, 0, 0, 0);
+        // Agrupar minutos comprometidos por día (clave YYYY-MM-DD local).
+        const committedByDay: Record<string, number> = {};
+        const jobsByDay: Record<string, Appointment[]> = {};
+        for (const a of appointments) {
+            if (a.status !== 'Booked') continue;
+            if (!a.clientName || !a.clientName.trim()) continue; // líderes (descarta secundarios viejos)
+            const mins = a.durationMin || 0;
+            if (mins <= 0) continue;
+            if (selectedAccountId && a.originPhoneId && a.originPhoneId !== selectedAccountId) continue;
+            const key = toIsoDate(new Date(a.date));
+            committedByDay[key] = (committedByDay[key] || 0) + mins;
+            (jobsByDay[key] = jobsByDay[key] || []).push(a);
+        }
+        const out: { key: string; date: Date; dow: number; isWorking: boolean; capacityMin: number; committedMin: number; jobs: Appointment[] }[] = [];
+        for (let i = 0; i < days; i++) {
+            const d = new Date(start); d.setDate(start.getDate() + i);
+            const key = toIsoDate(d);
+            const dow = d.getDay();
+            const isHoliday = (cfg.holidays || []).includes(key);
+            const isWorking = (cfg.workingDays || []).includes(dow) && !isHoliday;
+            const hoursForDay = (cfg.hoursByWeekday && cfg.hoursByWeekday[String(dow)] != null) ? Number(cfg.hoursByWeekday[String(dow)]) : cfg.hoursPerDay;
+            const capacityMin = isWorking ? Math.max(0, cfg.mechanics * hoursForDay * 60) : 0;
+            out.push({
+                key, date: d, dow, isWorking, capacityMin,
+                committedMin: committedByDay[key] || 0,
+                jobs: (jobsByDay[key] || []).sort((x, y) => new Date(x.date).getTime() - new Date(y.date).getTime()),
+            });
+        }
+        return out;
+    };
+
+    // "4h 30min" a partir de minutos.
+    const fmtHm = (mins: number) => {
+        const m = Math.max(0, Math.round(mins));
+        const h = Math.floor(m / 60); const r = m % 60;
+        return h > 0 ? (r > 0 ? `${h}h ${r}min` : `${h}h`) : `${r}min`;
     };
 
     // Helper: ejecuta la consulta al backend para autocompletar la ficha
@@ -550,6 +683,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setVehicles([]);
         setSelectedVehicleId('');
         setEditService('');
+        setEditDurationMin(0);
         setLookingUpContact(false);
     }, []);
 
@@ -578,6 +712,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // Precargamos el servicio actual de la cita si la estamos editando ya
         // Booked. Para slots Available recién abiertos viene vacío → "sin servicio".
         setEditService(appt.serviceType || '');
+        setEditDurationMin(appt.durationMin || 0);
         setSelectedAppt(appt);
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
@@ -684,6 +819,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     service: isCreating
                         ? (editService || undefined)
                         : (isEditingBooked ? editService : undefined),
+                    // Horas de taller (carga de mecánicos) de ESTA cita. Se envía
+                    // siempre que la cita acabe en Booked, para respetar el ajuste
+                    // manual del agente por encima del valor por defecto del tipo.
+                    durationMin: (isCreating || isEditingBooked) ? editDurationMin : undefined,
                     actorUsername: getCurrentUsername()
                 })
             });
@@ -812,14 +951,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         if (selectedAppt?.id === id) setSelectedAppt(null);
     };
 
-    // Formatea "HH:MM - HH:MM" para un slot. Si el slot es líder de un bloque
-    // multi-slot (durationMin > slotDuration), usa esa duración para calcular
-    // el fin del bloque. Si no, usa slotDuration (1 hueco). Sin esto, una
-    // avería de 4h se veía como "13:00 - 14:00" en lugar de "13:00 - 17:00".
-    const formatTimeRange = (isoString: string, durationMin?: number) => {
+    // Formatea "HH:MM - HH:MM" para un slot. MODELO 1 HUECO: toda cita ocupa un
+    // único hueco de recepción (slotDuration). El parámetro durationMin se ignora
+    // a propósito — ahora son las HORAS DE TALLER (carga de mecánicos), NO la
+    // duración en recepción; usarlo aquí pintaría una avería de 4h como un bloque
+    // de 4 horas en el calendario, cuando en recepción solo ocupa 30 min.
+    const formatTimeRange = (isoString: string, _durationMin?: number) => {
         try {
             const start = new Date(isoString);
-            const dur = (durationMin && durationMin > 0) ? durationMin : slotDuration;
+            const dur = slotDuration;
             const end = new Date(start.getTime() + dur * 60000);
             const startStr = start.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             const endStr = end.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -991,32 +1131,17 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         }
         let bookedMin = 0;
         let availableCount = 0;
-        let suspiciousLeaderCount = 0; // líderes corruptos sin durationMin
-        for (let i = 0; i < sorted.length; i++) {
-            const s = sorted[i];
+        for (const s of sorted) {
             if (s.status === 'Booked') {
-                if (s.durationMin && s.durationMin > 0) {
-                    bookedMin += s.durationMin;
-                } else {
-                    // durationMin=0 puede ser:
-                    //   (a) un slot secundario de un bloque cuya cita líder ya
-                    //       sumamos (caso normal con citas multi-slot) → NO sumar.
-                    //   (b) un líder corrupto/pre-feature en Airtable → SÍ sumar
-                    //       como granularidad para no ocultar horas ocupadas.
-                    // Heurística: si el slot ANTERIOR no es Booked, es líder huérfano.
-                    const prev = i > 0 ? sorted[i - 1] : null;
-                    const isLikelySecondary = prev && prev.status === 'Booked';
-                    if (!isLikelySecondary) {
-                        bookedMin += granularityMin;
-                        suspiciousLeaderCount++;
-                    }
-                }
+                // MODELO 1 HUECO: cada cita real (líder, con nombre) ocupa UN hueco
+                // de recepción. Los secundarios de averías ANTIGUAS (Booked sin
+                // nombre) se ignoran para no contar dos veces. durationMin ya NO es
+                // duración de recepción (son horas de taller), por eso NO se suma.
+                const hasName = !!(s.clientName && s.clientName.trim());
+                if (hasName) bookedMin += granularityMin;
             } else if (s.status === 'Available') {
                 availableCount++;
             }
-        }
-        if (suspiciousLeaderCount > 0) {
-            console.warn(`[CalendarHours] ${suspiciousLeaderCount} slot(s) Booked sin durationMin en este día. Contados como granularidad (${granularityMin}min). Revisa el campo DurationMin en Airtable.`);
         }
         const freeMin = availableCount * granularityMin;
         const totalMin = bookedMin + freeMin;
@@ -1090,7 +1215,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Fila individual de cita/hueco para la vista de DÍA.
     const renderDaySlotRow = (s: Appointment) => {
         const start = new Date(s.date);
-        const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
+        // MODELO 1 HUECO: la cita ocupa siempre un hueco de recepción (slotDuration).
+        // durationMin son horas de taller, NO se usa para el rango horario.
+        const dur = slotDuration;
         const end = new Date(start.getTime() + dur * 60000);
         const isBooked = s.status === 'Booked';
         const isDelivered = shouldPaintDelivered(s);
@@ -1245,9 +1372,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     );
 
     const renderChip = (s: Appointment) => {
-        // Para bloques multi-slot el líder muestra hora inicio-fin (ej. "13:00-17:00").
-        // Para citas de 1 hueco o Available, solo la hora de inicio.
-        const isMultiSlotLeader = s.status === 'Booked' && (s.durationMin || 0) > slotDuration;
+        // MODELO 1 HUECO: toda cita (incl. avería/revisión) ocupa un único hueco,
+        // así que el chip muestra solo la hora de inicio.
         // Tres estados visuales: entregado (verde) > reservado (ámbar) > libre (azul).
         // El delivered tiene prioridad sobre booked porque una cita entregada
         // técnicamente sigue siendo Booked en el modelo, pero queremos que el
@@ -1274,7 +1400,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 )}
                 {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
                 <span className="font-bold font-mono flex-shrink-0">
-                    {isMultiSlotLeader ? formatTimeRange(s.date, s.durationMin) : fmtTime(s.date)}
+                    {fmtTime(s.date)}
                 </span>
                 {s.status === 'Booked'
                     ? <span className="truncate font-medium">{s.clientName || 'Cliente'}</span>
@@ -1324,6 +1450,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         {breakdownAppointments.length}
                                     </span>
                                 )}
+                            </button>
+                            {/* Panel TALLER: carga de mecánicos (horas disponibles) por día — uso interno */}
+                            <button
+                                onClick={() => { setTallerSettingsOpen(false); setShowTallerPanel(true); }}
+                                className={`relative px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-cyan-300 bg-cyan-900/30 hover:bg-cyan-900/50' : 'text-cyan-700 bg-cyan-50 hover:bg-cyan-100'}`}
+                                title="Carga del taller: horas de mecánicos ocupadas/libres por día"
+                            >
+                                <Clock size={18} />
+                                <span className="hidden md:inline">Taller</span>
                             </button>
                             {/* Panel "Pendientes de entrega": citas Booked en el pasado sin DeliveredAt */}
                             <button
@@ -1685,7 +1820,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             : (isDark ? 'bg-blue-900/30 text-blue-300 border-blue-700' : 'bg-blue-100 text-blue-800 border-blue-300')}`}>
                                             {isBreakdownService(selectedAppt.serviceType) ? <Wrench size={12} /> : <CalendarIcon size={12} />}
                                             {selectedAppt.serviceType}
-                                            {selectedAppt.durationMin ? ` · ${selectedAppt.durationMin >= 60 ? `${Math.floor(selectedAppt.durationMin / 60)}h${selectedAppt.durationMin % 60 ? ` ${selectedAppt.durationMin % 60}min` : ''}` : `${selectedAppt.durationMin}min`}` : ''}
+                                            {selectedAppt.durationMin ? ` · Taller: ${selectedAppt.durationMin >= 60 ? `${Math.floor(selectedAppt.durationMin / 60)}h${selectedAppt.durationMin % 60 ? ` ${selectedAppt.durationMin % 60}min` : ''}` : `${selectedAppt.durationMin}min`}` : ''}
                                         </span>
                                     </div>
                                 )}
@@ -1899,51 +2034,53 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         (liberando los secundarios sobrantes) o solo re-etiquetar.
                                         Sin servicio = solo 1 hueco (comportamiento clásico). */}
                                     {!readOnly && editStatus === 'Booked' && (() => {
-                                        // Fallback: si la cita no tiene agenda asignada o el nombre
-                                        // no coincide con ninguna agenda configurada (típico en citas
-                                        // viejas, anteriores a la introducción de multi-agenda),
-                                        // caemos a la primera agenda con servicios para que el agente
-                                        // pueda seguir editando el tipo de servicio. El backend
-                                        // también aplica el mismo fallback al primer agenda al
-                                        // ajustar el bloque.
-                                        const apptAgendaName = (selectedAppt?.agenda || '').trim();
-                                        const slotAgenda = (apptAgendaName && agendas.find(a => a.name === apptAgendaName))
-                                            || agendas.find(a => (a.services || []).some(s => s.name && s.name.trim() && s.durationMin > 0))
-                                            || agendas[0];
-                                        const availableServices = (slotAgenda?.services || []).filter(s => s.name && s.name.trim() && s.durationMin > 0);
-                                        if (availableServices.length === 0) return null;
-                                        const granularity = slotAgenda?.duration || 60;
-                                        const chosen = availableServices.find(s => s.name === editService);
-                                        const slotsNeeded = chosen ? Math.max(1, Math.ceil(chosen.durationMin / granularity)) : 1;
+                                        // Catálogo GLOBAL de tipos (panel Taller), independiente de la
+                                        // agenda. Elegir un tipo precarga sus horas de taller por
+                                        // defecto; el agente puede ajustarlas. La cita SIEMPRE ocupa
+                                        // 1 hueco de recepción — las horas son solo carga de mecánicos.
+                                        const catalog = (tallerConfig?.services || []).filter(s => s.name && s.name.trim());
                                         return (
-                                            <div>
-                                                <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Tipo de servicio (opcional)</label>
-                                                <select
-                                                    value={editService}
-                                                    onChange={(e) => setEditService(e.target.value)}
-                                                    className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
-                                                >
-                                                    <option value="">— Sin servicio (1 hueco) —</option>
-                                                    {availableServices.map(s => (
-                                                        <option key={s.name} value={s.name}>
-                                                            {s.name} · {s.durationMin}min
-                                                        </option>
-                                                    ))}
-                                                </select>
-                                                {chosen && (
+                                            <div className="space-y-3">
+                                                <div>
+                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Tipo de servicio (taller)</label>
+                                                    <select
+                                                        value={editService}
+                                                        onChange={(e) => {
+                                                            const name = e.target.value;
+                                                            setEditService(name);
+                                                            // Al cambiar de tipo, precargamos sus horas de taller por defecto.
+                                                            const svc = catalog.find(s => s.name === name);
+                                                            setEditDurationMin(svc ? svc.durationMin : 0);
+                                                        }}
+                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                    >
+                                                        <option value="">— Sin servicio (0h taller) —</option>
+                                                        {catalog.map(s => (
+                                                            <option key={s.name} value={s.name}>
+                                                                {s.name} · {s.durationMin}min
+                                                            </option>
+                                                        ))}
+                                                    </select>
+                                                    {catalog.length === 0 && (
+                                                        <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                            No hay tipos configurados. Añádelos en el botón <strong>Taller</strong> → Ajustes.
+                                                        </p>
+                                                    )}
+                                                </div>
+                                                <div>
+                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Horas de taller (min)</label>
+                                                    <input
+                                                        type="number"
+                                                        min={0}
+                                                        step={15}
+                                                        value={editDurationMin}
+                                                        onChange={(e) => setEditDurationMin(Math.max(0, parseInt(e.target.value) || 0))}
+                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                    />
                                                     <p className={`text-[11px] mt-1 ${isDark ? 'text-purple-300' : 'text-purple-600'}`}>
-                                                        {/* El backend bloquea slotsNeeded huecos enteros aunque el servicio
-                                                            sea más corto. Mostramos la duración REAL bloqueada (slotsNeeded
-                                                            × granularidad) para que el agente sepa exactamente cuánto se
-                                                            reserva del calendario. */}
-                                                        Esta cita ocupará <strong>{slotsNeeded * granularity} min</strong> ({slotsNeeded} {slotsNeeded === 1 ? 'hueco' : 'huecos consecutivos'}).
-                                                        {chosen.durationMin !== slotsNeeded * granularity && (
-                                                            <span className={`block opacity-80 ${isDark ? 'text-purple-300/80' : 'text-purple-600/80'}`}>
-                                                                (Servicio dura {chosen.durationMin}min, redondeado a huecos de {granularity}min)
-                                                            </span>
-                                                        )}
+                                                        Carga de mecánicos de esta cita (uso interno). La recepción ocupa <strong>1 hueco</strong>; esto no cambia el calendario.
                                                     </p>
-                                                )}
+                                                </div>
                                             </div>
                                         );
                                     })()}
@@ -2171,39 +2308,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </div>
                                     </div>
 
-                                    {/* Tipos de servicio — duración variable por servicio */}
-                                    <div className={`rounded-xl border p-3 ${isDark ? 'border-white/10 bg-slate-800/40' : 'border-slate-200 bg-slate-50'}`}>
-                                        <div className="flex items-center justify-between mb-2">
-                                            <label className="text-xs font-bold text-slate-400 uppercase">Tipos de servicio <span className="font-normal lowercase">(duración variable, opcional)</span></label>
-                                            <button onClick={() => addService(i)} className={`text-xs px-2 py-1 rounded-lg flex items-center gap-1 font-semibold transition ${isDark ? 'bg-purple-900/40 text-purple-300 hover:bg-purple-900/60' : 'bg-purple-50 text-purple-700 hover:bg-purple-100'}`}>
-                                                <Plus size={11} /> Añadir
-                                            </button>
-                                        </div>
-                                        {(!ag.services || ag.services.length === 0) && (
-                                            <p className="text-xs text-slate-400 italic">Sin tipos — todos los huecos duran {ag.duration} min.</p>
-                                        )}
-                                        {(ag.services || []).map((svc, si) => (
-                                            <div key={svc.id} className="flex items-center gap-2 mb-2">
-                                                <input
-                                                    value={svc.name}
-                                                    onChange={e => updateService(i, si, { name: e.target.value })}
-                                                    placeholder="Ej: Avería, Revisión..."
-                                                    className={`flex-1 p-1.5 border rounded-lg text-sm outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`}
-                                                />
-                                                <div className="flex items-center gap-1 flex-shrink-0">
-                                                    <input
-                                                        type="number" min={5} step={5}
-                                                        value={svc.durationMin}
-                                                        onChange={e => updateService(i, si, { durationMin: parseInt(e.target.value) || ag.duration })}
-                                                        className={`w-20 p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`}
-                                                    />
-                                                    <span className="text-xs text-slate-400">min</span>
-                                                </div>
-                                                <button onClick={() => removeService(i, si)} className={`p-1.5 rounded-lg transition ${isDark ? 'text-red-400 hover:bg-red-900/30' : 'text-red-500 hover:bg-red-50'}`}>
-                                                    <X size={14} />
-                                                </button>
-                                            </div>
-                                        ))}
+                                    {/* Los TIPOS DE SERVICIO (avería, revisión…) y sus horas de
+                                        taller se gestionan ahora en el botón Taller → Ajustes,
+                                        porque son independientes de la agenda de recepción. */}
+                                    <div className={`rounded-xl border border-dashed p-3 text-xs ${isDark ? 'border-white/10 bg-slate-800/40 text-slate-400' : 'border-slate-200 bg-slate-50 text-slate-500'}`}>
+                                        Los <strong>tipos de servicio</strong> (avería, revisión…) y sus horas de taller se configuran en el botón <strong>Taller → Ajustes</strong>.
                                     </div>
 
                                 </div>
@@ -2249,6 +2358,169 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 Filtra appointments cuyo serviceType contenga "aver" (tolerante a
                 tildes y mayúsculas) y respeta el filtro de agenda y línea de
                 WhatsApp activos. Al clicar "Ver" abre el modal estándar de cita. */}
+            {showTallerPanel && (
+                <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center p-2 md:p-4 bg-black/60 backdrop-blur-sm overflow-y-auto" onClick={() => setShowTallerPanel(false)}>
+                    <div
+                        onClick={e => e.stopPropagation()}
+                        className={`rounded-2xl shadow-2xl w-full max-w-lg my-4 flex flex-col max-h-[92vh] ${isDark ? 'glass-panel border border-white/10' : 'bg-white'}`}
+                    >
+                        <div className={`p-4 border-b flex justify-between items-center flex-shrink-0 ${isDark ? 'border-white/5 bg-slate-900/30' : 'border-slate-100 bg-slate-50'}`}>
+                            <h3 className={`font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                <Clock size={18} className="text-cyan-500" />
+                                {tallerSettingsOpen ? 'Taller · Ajustes' : 'Taller · Carga de mecánicos'}
+                            </h3>
+                            <div className="flex items-center gap-1">
+                                {!readOnly && !tallerSettingsOpen && (
+                                    <button onClick={openTallerSettings} className={`p-1.5 rounded-lg transition text-xs font-semibold flex items-center gap-1 ${isDark ? 'text-cyan-300 hover:bg-cyan-900/40' : 'text-cyan-700 hover:bg-cyan-50'}`} title="Ajustes del taller">
+                                        <Layers size={16} /> <span className="hidden md:inline">Ajustes</span>
+                                    </button>
+                                )}
+                                <button onClick={() => setShowTallerPanel(false)} className={`p-1 rounded-full transition ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-200 text-slate-400 hover:text-slate-600'}`}><X size={20} /></button>
+                            </div>
+                        </div>
+
+                        <div className="p-4 space-y-3 overflow-y-auto flex-1">
+                            {tallerSettingsOpen ? (() => {
+                                const d = draftTaller || TALLER_FALLBACK;
+                                return (
+                                    <div className="space-y-4">
+                                        <div className="grid grid-cols-2 gap-3">
+                                            <div>
+                                                <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Nº de mecánicos</label>
+                                                <input type="number" min={1} value={d.mechanics}
+                                                    onChange={e => patchDraftTaller({ mechanics: Math.max(1, parseInt(e.target.value) || 1) })}
+                                                    className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`} />
+                                            </div>
+                                            <div>
+                                                <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Horas/día por mecánico</label>
+                                                <input type="number" min={1} step={0.5} value={d.hoursPerDay}
+                                                    onChange={e => patchDraftTaller({ hoursPerDay: Math.max(1, parseFloat(e.target.value) || 8) })}
+                                                    className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`} />
+                                            </div>
+                                        </div>
+                                        <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                            Capacidad por día laborable: <strong>{fmtHm((d.mechanics || 1) * (d.hoursPerDay || 8) * 60)}</strong> ({d.mechanics} × {d.hoursPerDay}h).
+                                        </p>
+
+                                        <div>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Días laborables del taller</label>
+                                            <div className="flex gap-1.5 flex-wrap">
+                                                {WEEK_DAYS.map(wd => {
+                                                    const on = d.workingDays.includes(wd.value);
+                                                    return (
+                                                        <button key={wd.value} onClick={() => toggleTallerWorkingDay(wd.value)}
+                                                            className={`w-9 h-9 rounded-lg text-sm font-bold transition ${on ? 'bg-cyan-500 text-white' : (isDark ? 'bg-slate-800 text-slate-400 border border-slate-700' : 'bg-slate-100 text-slate-500')}`}>
+                                                            {wd.label}
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
+                                        </div>
+
+                                        <div>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Festivos / vacaciones (capacidad 0)</label>
+                                            <div className="flex flex-wrap gap-1.5 mb-2">
+                                                {(d.holidays || []).length === 0 && <span className="text-xs text-slate-400 italic">Ninguno.</span>}
+                                                {(d.holidays || []).map(h => (
+                                                    <span key={h} className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold ${isDark ? 'bg-slate-800 text-slate-200 border border-slate-700' : 'bg-slate-100 text-slate-700'}`}>
+                                                        {h}
+                                                        <button onClick={() => patchDraftTaller({ holidays: (d.holidays || []).filter(x => x !== h) })} className="text-red-400 hover:text-red-600"><X size={12} /></button>
+                                                    </span>
+                                                ))}
+                                            </div>
+                                            <input type="date"
+                                                onChange={e => { const v = e.target.value; if (v && !(d.holidays || []).includes(v)) patchDraftTaller({ holidays: [...(d.holidays || []), v].sort() }); e.target.value = ''; }}
+                                                className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`} />
+                                        </div>
+
+                                        <div className={`rounded-xl border p-3 ${isDark ? 'border-white/10 bg-slate-800/40' : 'border-slate-200 bg-slate-50'}`}>
+                                            <div className="flex items-center justify-between mb-2">
+                                                <label className="text-xs font-bold text-slate-400 uppercase">Tipos de servicio <span className="font-normal lowercase">(horas de taller)</span></label>
+                                                <button onClick={addTallerService} className={`text-xs px-2 py-1 rounded-lg flex items-center gap-1 font-semibold transition ${isDark ? 'bg-cyan-900/40 text-cyan-300 hover:bg-cyan-900/60' : 'bg-cyan-50 text-cyan-700 hover:bg-cyan-100'}`}>
+                                                    <Plus size={11} /> Añadir
+                                                </button>
+                                            </div>
+                                            {(d.services || []).length === 0 && <p className="text-xs text-slate-400 italic">Sin tipos. Añade "Avería", "Revisión"…</p>}
+                                            {(d.services || []).map((svc, si) => (
+                                                <div key={svc.id || si} className="flex items-center gap-2 mb-2">
+                                                    <input value={svc.name} onChange={e => updateTallerService(si, { name: e.target.value })} placeholder="Ej: Avería, Revisión..."
+                                                        className={`flex-1 p-1.5 border rounded-lg text-sm outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`} />
+                                                    <div className="flex items-center gap-1 flex-shrink-0">
+                                                        <input type="number" min={0} step={15} value={svc.durationMin}
+                                                            onChange={e => updateTallerService(si, { durationMin: Math.max(0, parseInt(e.target.value) || 0) })}
+                                                            className={`w-20 p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
+                                                        <span className="text-xs text-slate-400">min</span>
+                                                    </div>
+                                                    <button onClick={() => removeTallerService(si)} className={`p-1.5 rounded-lg transition ${isDark ? 'text-red-400 hover:bg-red-900/30' : 'text-red-500 hover:bg-red-50'}`}><X size={14} /></button>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                );
+                            })() : (
+                                <div className="space-y-2">
+                                    <p className={`text-[11px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                        Horas de mecánico comprometidas vs. capacidad por día. Uso interno — la recepción no se ve afectada.
+                                    </p>
+                                    {computeTallerLoad(30).map(day => {
+                                        const pct = day.capacityMin > 0 ? Math.round((day.committedMin / day.capacityMin) * 100) : (day.committedMin > 0 ? 999 : 0);
+                                        const over = day.capacityMin > 0 && day.committedMin > day.capacityMin;
+                                        const barColor = !day.isWorking ? 'bg-slate-400' : over ? 'bg-red-500' : pct >= 85 ? 'bg-amber-500' : 'bg-emerald-500';
+                                        const dayName = day.date.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' });
+                                        const expanded = expandedTallerDay === day.key;
+                                        const freeMin = Math.max(0, day.capacityMin - day.committedMin);
+                                        const widthPct = Math.min(100, day.capacityMin > 0 ? (day.committedMin / day.capacityMin) * 100 : (day.committedMin > 0 ? 100 : 0));
+                                        return (
+                                            <div key={day.key} className={`rounded-xl border p-2.5 ${isDark ? 'border-white/5 bg-slate-800/30' : 'border-slate-100 bg-white'}`}>
+                                                <button onClick={() => setExpandedTallerDay(expanded ? null : day.key)} className="w-full text-left">
+                                                    <div className="flex items-center justify-between mb-1">
+                                                        <span className={`text-sm font-bold capitalize ${isDark ? 'text-white' : 'text-slate-800'}`}>{dayName}</span>
+                                                        <span className={`text-xs font-semibold ${over ? 'text-red-500' : (isDark ? 'text-slate-300' : 'text-slate-600')}`}>
+                                                            {!day.isWorking ? (day.committedMin > 0 ? `${fmtHm(day.committedMin)} · cerrado` : 'Cerrado') : `${fmtHm(day.committedMin)} / ${fmtHm(day.capacityMin)}`}
+                                                        </span>
+                                                    </div>
+                                                    <div className={`h-2.5 rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                                                        <div className={`h-full ${barColor} transition-all`} style={{ width: `${widthPct}%` }} />
+                                                    </div>
+                                                    <div className="flex items-center justify-between mt-1">
+                                                        <span className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                            {day.isWorking ? (over ? `Sobrecarga +${fmtHm(day.committedMin - day.capacityMin)}` : `${fmtHm(freeMin)} libres`) : '—'}
+                                                            {day.jobs.length > 0 ? ` · ${day.jobs.length} trabajo${day.jobs.length === 1 ? '' : 's'}` : ''}
+                                                        </span>
+                                                        {day.jobs.length > 0 && <ChevronDown size={14} className={`text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />}
+                                                    </div>
+                                                </button>
+                                                {expanded && day.jobs.length > 0 && (
+                                                    <div className="mt-2 space-y-1 border-t pt-2 border-dashed border-slate-300/30">
+                                                        {day.jobs.map(j => (
+                                                            <div key={j.id} className="flex items-center justify-between text-xs cursor-pointer hover:opacity-80" onClick={() => { setShowTallerPanel(false); handleOpenEdit(j); }}>
+                                                                <span className={`truncate ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                                                                    <span className="font-mono text-slate-400">{fmtTime(j.date)}</span> · {j.clientName || 'Cliente'}{j.serviceType ? ` · ${j.serviceType}` : ''}
+                                                                </span>
+                                                                <span className="font-semibold flex-shrink-0 ml-2 text-cyan-500">{fmtHm(j.durationMin || 0)}</span>
+                                                            </div>
+                                                        ))}
+                                                    </div>
+                                                )}
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+
+                        {tallerSettingsOpen && (
+                            <div className={`p-4 border-t flex gap-2 flex-shrink-0 ${isDark ? 'border-white/5 bg-slate-900/30' : 'border-slate-100 bg-slate-50'}`}>
+                                <button onClick={() => setTallerSettingsOpen(false)} className={`px-4 py-2.5 rounded-xl font-semibold text-sm ${isDark ? 'bg-white/5 hover:bg-white/10 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}>Cancelar</button>
+                                <button onClick={handleSaveTaller} disabled={savingTaller} className="flex-1 px-4 py-2.5 rounded-xl font-semibold text-sm bg-cyan-600 hover:bg-cyan-700 text-white flex items-center justify-center gap-2 disabled:opacity-60">
+                                    {savingTaller ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Guardar
+                                </button>
+                            </div>
+                        )}
+                    </div>
+                </div>
+            )}
+
             {showBreakdownsModal && (
                 <div className="fixed inset-0 z-50 flex items-start md:items-center justify-center p-2 md:p-4 bg-black/60 backdrop-blur-sm overflow-y-auto" onClick={() => setShowBreakdownsModal(false)}>
                     <div
