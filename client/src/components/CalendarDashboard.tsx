@@ -1638,7 +1638,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
                                         {/* Agrupado por hora: si la hora tiene 1 sola plaza, bloque detallado;
                                             si tiene varias (capacidad alta), una píldora compacta "HH–HH · X/N". */}
-                                        {groupSlotsByHour(slots).map(hora => {
+                                        {/* En el MES solo listamos las horas CON reservas. Las libres ya se
+                                            resumen en el badge "X/Y Ocupados" + "Nh libres", así un día vacío
+                                            (0/36) queda limpio en vez de mostrar decenas de huecos libres. */}
+                                        {groupSlotsByHour(slots).filter(h => h.bookedCount > 0).map(hora => {
                                             if (hora.totalCount > 1) return renderHourPill(hora, new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
                                             if (hora.entries.length === 1) return renderMonthSlot(hora.entries[0]);
                                             return null; // continuación de una avería ya mostrada en su hora de inicio
@@ -1714,7 +1717,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         {slots.length === 0 && (
                                             <p className={`text-xs italic ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas</p>
                                         )}
-                                        {groupSlotsByHour(slots).map(hora => {
+                                        {/* En la SEMANA solo listamos las horas CON reservas (las libres se
+                                            resumen en el badge "X/Y" + "Nh libres"). */}
+                                        {groupSlotsByHour(slots).filter(h => h.bookedCount > 0).map(hora => {
                                             if (hora.totalCount > 1) return renderHourPill(hora, d);
                                             if (hora.entries.length === 1) return renderChip(hora.entries[0]);
                                             return null; // continuación de una avería ya mostrada en su hora de inicio
