@@ -1342,24 +1342,21 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         dateToOpen: Date
     ) => {
         const full = hora.totalCount > 0 && hora.bookedCount >= hora.totalCount;
-        const anyDelivered = hora.entries.some(e => shouldPaintDelivered(e));
         const anyBooked = hora.bookedCount > 0;
-        const endLabel = new Date(hora.key + slotDuration * 60000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        const pct = hora.totalCount > 0 ? Math.round((hora.bookedCount / hora.totalCount) * 100) : 0;
+        // Barra de ocupación tipo mockup: azul = libre, ámbar = con reservas, rojo = llena.
+        const barColor = full ? '#dc2626' : anyBooked ? '#d97706' : '#38bdf8';
         return (
             <div
                 key={hora.key}
                 onClick={(e) => { e.stopPropagation(); openDayView(dateToOpen); }}
-                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${anyDelivered
-                    ? (isDark ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90' : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
-                    : full
-                        ? (isDark ? 'bg-red-700/70 border-red-400 text-white hover:bg-red-600/80' : 'bg-red-300 border-red-600 text-red-950 hover:bg-red-400')
-                        : anyBooked
-                            ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
-                            : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
-                    }`}
+                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex items-center gap-2 border ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 hover:bg-slate-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
             >
-                <span className="font-bold font-mono">{hora.label}–{endLabel}</span>
-                <span className="text-[10px] font-bold whitespace-nowrap ml-2">{hora.bookedCount}/{hora.totalCount}</span>
+                <span className="font-bold font-mono whitespace-nowrap">{hora.label}</span>
+                <div className={`flex-1 min-w-[12px] h-1.5 rounded-full overflow-hidden ${isDark ? 'bg-slate-600' : 'bg-slate-200'}`}>
+                    <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: barColor }} />
+                </div>
+                <span className="font-bold whitespace-nowrap">{hora.bookedCount}/{hora.totalCount}</span>
             </div>
         );
     };
@@ -1638,10 +1635,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
                                         {/* Agrupado por hora: si la hora tiene 1 sola plaza, bloque detallado;
                                             si tiene varias (capacidad alta), una píldora compacta "HH–HH · X/N". */}
-                                        {/* En el MES solo listamos las horas CON reservas. Las libres ya se
-                                            resumen en el badge "X/Y Ocupados" + "Nh libres", así un día vacío
-                                            (0/36) queda limpio en vez de mostrar decenas de huecos libres. */}
-                                        {groupSlotsByHour(slots).filter(h => h.bookedCount > 0).map(hora => {
+                                        {/* Una fila por HORA (libres incluidas): si hay varias plazas, píldora
+                                            con barra de ocupación "HH · ▓▓ · X/N"; si es 1 plaza, el bloque
+                                            detallado de siempre. Las horas de continuación de una avería (1 plaza)
+                                            no se duplican. */}
+                                        {groupSlotsByHour(slots).map(hora => {
                                             if (hora.totalCount > 1) return renderHourPill(hora, new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
                                             if (hora.entries.length === 1) return renderMonthSlot(hora.entries[0]);
                                             return null; // continuación de una avería ya mostrada en su hora de inicio
@@ -1717,9 +1715,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         {slots.length === 0 && (
                                             <p className={`text-xs italic ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas</p>
                                         )}
-                                        {/* En la SEMANA solo listamos las horas CON reservas (las libres se
-                                            resumen en el badge "X/Y" + "Nh libres"). */}
-                                        {groupSlotsByHour(slots).filter(h => h.bookedCount > 0).map(hora => {
+                                        {/* Una fila por HORA (libres incluidas): píldora con barra si hay
+                                            varias plazas; bloque detallado si es 1 plaza. */}
+                                        {groupSlotsByHour(slots).map(hora => {
                                             if (hora.totalCount > 1) return renderHourPill(hora, d);
                                             if (hora.entries.length === 1) return renderChip(hora.entries[0]);
                                             return null; // continuación de una avería ya mostrada en su hora de inicio
