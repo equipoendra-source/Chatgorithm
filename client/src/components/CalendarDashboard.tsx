@@ -1146,17 +1146,39 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // clicables salen de collapseBookedBlocks (el líder de la avería aparece una
     // sola vez, en su hora de inicio, con su rango).
     const groupSlotsByHour = (daySlots: Appointment[]) => {
-        const hourKey = (iso: string) => { const d = new Date(iso); d.setMinutes(0, 0, 0); return d.getTime(); };
+        // Granularidad REAL del día = mínima diferencia entre slots consecutivos (capada a 120min).
+        // Misma heurística que computeDayHours. Antes truncábamos siempre a la hora en punto, lo
+        // que fusionaba 08:00+08:30 en una píldora "0/8" cuando el grid era 30min → el usuario
+        // perdía visibilidad de su propio grid. Ahora respeta el grid configurado.
+        const sorted = [...daySlots].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        let granularityMin = slotDuration;
+        if (sorted.length >= 2) {
+            let minDiff = Infinity;
+            for (let i = 1; i < sorted.length; i++) {
+                const d = Math.round((new Date(sorted[i].date).getTime() - new Date(sorted[i - 1].date).getTime()) / 60000);
+                if (d > 0 && d < minDiff) minDiff = d;
+            }
+            if (minDiff !== Infinity) granularityMin = Math.min(minDiff, 120);
+        }
+        const bucketMs = Math.max(1, granularityMin) * 60000;
+        // Clave anclada al inicio del día local (evita drift por DST si el día tiene minutos no alineados).
+        const slotKey = (iso: string) => {
+            const d = new Date(iso);
+            const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+            const offset = d.getTime() - dayStart;
+            const bucket = Math.floor(offset / bucketMs) * bucketMs;
+            return dayStart + bucket;
+        };
         const totalByHour = new Map<number, number>();
         const bookedByHour = new Map<number, number>();
         for (const s of daySlots) {
-            const k = hourKey(s.date);
+            const k = slotKey(s.date);
             totalByHour.set(k, (totalByHour.get(k) || 0) + 1);
             if (s.status === 'Booked') bookedByHour.set(k, (bookedByHour.get(k) || 0) + 1);
         }
         const entriesByHour = new Map<number, Appointment[]>();
         for (const s of collapseBookedBlocks(daySlots)) {
-            const k = hourKey(s.date);
+            const k = slotKey(s.date);
             if (!entriesByHour.has(k)) entriesByHour.set(k, []);
             entriesByHour.get(k)!.push(s);
         }
