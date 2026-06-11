@@ -121,9 +121,6 @@ interface Agenda {
     endTime: string;
     duration: number;      // granularidad del slot (minutos)
     services: AgendaService[];  // tipos de servicio con duración variable
-    capacity?: number;     // nº de plazas/trabajadores por hora (1 = clásico)
-    capacityByWeekday?: Record<string, number>;  // "0".."6" → trabajadores ese día (0 = cerrado)
-    capacityOverrides?: Record<string, number>;  // "YYYY-MM-DD" → trabajadores ese día (vacaciones; 0 = cerrado)
 }
 
 // Días de la semana para el selector (etiqueta + valor getDay)
@@ -181,12 +178,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [slotDuration, setSlotDuration] = useState(60);
     // Vista activa del calendario: día / semana / mes
     const [viewMode, setViewMode] = useState<'month' | 'week' | 'day'>('month');
-    // Vista de día agrupada por hora: qué horas están desplegadas (clave = timestamp de la hora en punto).
-    const [expandedHours, setExpandedHours] = useState<Set<number>>(new Set());
-    const toggleHour = (key: number) => setExpandedHours(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
-    // Citas que quedaron por encima del cupo de su día (vacaciones / capacidad reducida).
-    const [overCapacity, setOverCapacity] = useState<any[]>([]);
-    const [showOverCapacityModal, setShowOverCapacityModal] = useState(false);
 
     // Si nos pasan initialDate (desde el toast de nueva cita), saltamos al día y abrimos vista día
     useEffect(() => {
@@ -352,13 +343,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 setNewAgenda(prev => prev || (dataSched.agendas[0]?.name ?? ''));
             }
 
-            // Citas por encima del cupo de su día (vacaciones / capacidad reducida).
-            // No bloqueante: si falla, simplemente no se muestra el aviso.
-            try {
-                const resOver = await fetch(`${API_URL}/schedule/overcapacity`);
-                const dataOver = await resOver.json();
-                if (dataOver && Array.isArray(dataOver.items)) setOverCapacity(dataOver.items);
-            } catch { /* no bloqueante */ }
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
@@ -368,14 +352,14 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // Si no hay agendas, arrancamos con una por defecto
         setDraftAgendas(agendas.length > 0
             ? JSON.parse(JSON.stringify(agendas))
-            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60, services: [], capacity: 1 }]);
+            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60, services: [] }]);
         setShowAgendaModal(true);
     };
 
     const addDraftAgenda = () => {
         setDraftAgendas(prev => [...prev, {
             id: `ag${Date.now()}`, name: '', description: '', days: [1, 2, 3, 4, 5],
-            startTime: '09:00', endTime: '18:00', duration: 60, services: [], capacity: 1
+            startTime: '09:00', endTime: '18:00', duration: 60, services: []
         }]);
     };
 
@@ -406,43 +390,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setDraftAgendas(prev => prev.map((a, idx) => idx === i ? { ...a, ...patch } : a));
     };
 
-    // --- Capacidad avanzada: por día de la semana y excepciones por fecha (vacaciones) ---
-    const setWeekdayCapacity = (i: number, weekday: number, raw: string) => {
-        const cur: Record<string, number> = { ...(draftAgendas[i].capacityByWeekday || {}) };
-        if (raw === '') delete cur[String(weekday)];
-        else cur[String(weekday)] = Math.max(0, Math.min(20, parseInt(raw) || 0));
-        updateDraftAgenda(i, { capacityByWeekday: cur });
-    };
-    const addOverride = (i: number) => {
-        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
-        // Clave inicial = primera fecha futura libre (para no pisar otra ya añadida).
-        const base = new Date(); let key = '';
-        for (let k = 0; k < 366; k++) {
-            const s = new Date(base.getTime() + k * 86400000).toLocaleDateString('en-CA');
-            if (!(s in cur)) { key = s; break; }
-        }
-        if (!key) return;
-        cur[key] = 0;
-        updateDraftAgenda(i, { capacityOverrides: cur });
-    };
-    const setOverrideDate = (i: number, oldDate: string, newDate: string) => {
-        if (!newDate || newDate === oldDate) return;
-        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
-        if (newDate in cur) return; // ya existe esa fecha
-        cur[newDate] = cur[oldDate];
-        delete cur[oldDate];
-        updateDraftAgenda(i, { capacityOverrides: cur });
-    };
-    const setOverrideCap = (i: number, date: string, raw: string) => {
-        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
-        cur[date] = Math.max(0, Math.min(20, parseInt(raw) || 0));
-        updateDraftAgenda(i, { capacityOverrides: cur });
-    };
-    const removeOverride = (i: number, date: string) => {
-        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
-        delete cur[date];
-        updateDraftAgenda(i, { capacityOverrides: cur });
-    };
 
     const removeDraftAgenda = (i: number) => {
         setDraftAgendas(prev => prev.filter((_, idx) => idx !== i));
@@ -1140,66 +1087,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         return result;
     };
 
-    // Agrupa los huecos de un día por HORA EN PUNTO para la vista de día.
-    // Conteo (ocupadas/total) sobre los slots ORIGINALES (sin colapsar): así un
-    // secundario de avería cuenta como plaza ocupada en su hora. Las ENTRADAS
-    // clicables salen de collapseBookedBlocks (el líder de la avería aparece una
-    // sola vez, en su hora de inicio, con su rango).
-    const groupSlotsByHour = (daySlots: Appointment[]) => {
-        // Granularidad REAL del día = mínima diferencia entre slots consecutivos (capada a 120min).
-        // Misma heurística que computeDayHours. Antes truncábamos siempre a la hora en punto, lo
-        // que fusionaba 08:00+08:30 en una píldora "0/8" cuando el grid era 30min → el usuario
-        // perdía visibilidad de su propio grid. Ahora respeta el grid configurado.
-        const sorted = [...daySlots].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-        let granularityMin = slotDuration;
-        if (sorted.length >= 2) {
-            let minDiff = Infinity;
-            for (let i = 1; i < sorted.length; i++) {
-                const d = Math.round((new Date(sorted[i].date).getTime() - new Date(sorted[i - 1].date).getTime()) / 60000);
-                if (d > 0 && d < minDiff) minDiff = d;
-            }
-            if (minDiff !== Infinity) granularityMin = Math.min(minDiff, 120);
-        }
-        const bucketMs = Math.max(1, granularityMin) * 60000;
-        // Clave anclada al inicio del día local (evita drift por DST si el día tiene minutos no alineados).
-        const slotKey = (iso: string) => {
-            const d = new Date(iso);
-            const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
-            const offset = d.getTime() - dayStart;
-            const bucket = Math.floor(offset / bucketMs) * bucketMs;
-            return dayStart + bucket;
-        };
-        const totalByHour = new Map<number, number>();
-        const bookedByHour = new Map<number, number>();
-        for (const s of daySlots) {
-            const k = slotKey(s.date);
-            totalByHour.set(k, (totalByHour.get(k) || 0) + 1);
-            if (s.status === 'Booked') bookedByHour.set(k, (bookedByHour.get(k) || 0) + 1);
-        }
-        const entriesByHour = new Map<number, Appointment[]>();
-        for (const s of collapseBookedBlocks(daySlots)) {
-            const k = slotKey(s.date);
-            if (!entriesByHour.has(k)) entriesByHour.set(k, []);
-            entriesByHour.get(k)!.push(s);
-        }
-        return Array.from(totalByHour.keys()).sort((a, b) => a - b).map(k => {
-            const total = totalByHour.get(k) || 0;
-            const booked = bookedByHour.get(k) || 0;
-            const entries = (entriesByHour.get(k) || []).sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
-            return {
-                key: k,
-                label: new Date(k).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-                bookedCount: booked,
-                totalCount: total,
-                freeCount: Math.max(0, total - booked),
-                entries,
-                availableEntries: entries.filter(e => e.status === 'Available'),
-            };
-        });
-    };
-
-    // Fila individual de cita/hueco (idéntica a la vista de día previa). Se usa
-    // dentro del panel desplegado de cada hora.
+    // Fila individual de cita/hueco para la vista de DÍA.
     const renderDaySlotRow = (s: Appointment) => {
         const start = new Date(s.date);
         const dur = (s.status === 'Booked' && s.durationMin && s.durationMin > 0) ? s.durationMin : slotDuration;
@@ -1297,7 +1185,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const goToday = () => setCurrentDate(new Date());
 
     // Abrir la vista de día concreto al pulsar un día en mes/semana
-    const openDayView = (d: Date) => { setCurrentDate(new Date(d)); setViewMode('day'); setExpandedHours(new Set()); };
+    const openDayView = (d: Date) => { setCurrentDate(new Date(d)); setViewMode('day'); };
 
     // Título de la cabecera según la vista activa
     const headerTitle: string = (() => {
@@ -1355,33 +1243,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             </div>
         </div>
     );
-
-    // Píldora compacta de una HORA con varias plazas (capacidad > 1): muestra el
-    // rango horario + "ocupadas/total" y al pulsar abre la vista de día (donde se
-    // despliega cada plaza). Evita listar N bloques idénticos en mes/semana.
-    const renderHourPill = (
-        hora: { key: number; label: string; bookedCount: number; totalCount: number; entries: Appointment[] },
-        dateToOpen: Date
-    ) => {
-        const full = hora.totalCount > 0 && hora.bookedCount >= hora.totalCount;
-        const anyBooked = hora.bookedCount > 0;
-        const pct = hora.totalCount > 0 ? Math.round((hora.bookedCount / hora.totalCount) * 100) : 0;
-        // Barra de ocupación tipo mockup: azul = libre, ámbar = con reservas, rojo = llena.
-        const barColor = full ? '#dc2626' : anyBooked ? '#d97706' : '#38bdf8';
-        return (
-            <div
-                key={hora.key}
-                onClick={(e) => { e.stopPropagation(); openDayView(dateToOpen); }}
-                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex items-center gap-2 border ${isDark ? 'bg-slate-800 border-slate-600 text-slate-200 hover:bg-slate-700' : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'}`}
-            >
-                <span className="font-bold font-mono whitespace-nowrap">{hora.label}</span>
-                <div className={`flex-1 min-w-[12px] h-1.5 rounded-full overflow-hidden ${isDark ? 'bg-slate-600' : 'bg-slate-200'}`}>
-                    <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: barColor }} />
-                </div>
-                <span className="font-bold whitespace-nowrap">{hora.bookedCount}/{hora.totalCount}</span>
-            </div>
-        );
-    };
 
     const renderChip = (s: Appointment) => {
         // Para bloques multi-slot el líder muestra hora inicio-fin (ej. "13:00-17:00").
@@ -1464,20 +1325,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     </span>
                                 )}
                             </button>
-                            {/* Citas a reprogramar: reservas que quedaron por encima del cupo (vacaciones / capacidad reducida) */}
-                            {overCapacity.length > 0 && (
-                                <button
-                                    onClick={() => setShowOverCapacityModal(true)}
-                                    className={`relative px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-red-300 bg-red-900/30 hover:bg-red-900/50' : 'text-red-700 bg-red-50 hover:bg-red-100'}`}
-                                    title="Citas que quedaron por encima del nº de trabajadores de su día (p. ej. por vacaciones): hay que reprogramarlas"
-                                >
-                                    <RefreshCw size={18} />
-                                    <span className="hidden md:inline">Reprogramar</span>
-                                    <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-red-500 text-red-950' : 'bg-red-600 text-white'}`}>
-                                        {overCapacity.length}
-                                    </span>
-                                </button>
-                            )}
                             {/* Panel "Pendientes de entrega": citas Booked en el pasado sin DeliveredAt */}
                             <button
                                 onClick={() => setShowPendingDeliveryModal(true)}
@@ -1657,15 +1504,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
                                         {/* Agrupado por hora: si la hora tiene 1 sola plaza, bloque detallado;
                                             si tiene varias (capacidad alta), una píldora compacta "HH–HH · X/N". */}
-                                        {/* Una fila por HORA (libres incluidas): si hay varias plazas, píldora
-                                            con barra de ocupación "HH · ▓▓ · X/N"; si es 1 plaza, el bloque
-                                            detallado de siempre. Las horas de continuación de una avería (1 plaza)
-                                            no se duplican. */}
-                                        {groupSlotsByHour(slots).map(hora => {
-                                            if (hora.totalCount > 1) return renderHourPill(hora, new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
-                                            if (hora.entries.length === 1) return renderMonthSlot(hora.entries[0]);
-                                            return null; // continuación de una avería ya mostrada en su hora de inicio
-                                        })}
+                                        {/* Lista de citas del día (vista MES): una fila por hueco/cita. */}
+                                        {collapseBookedBlocks(slots).map(s => renderMonthSlot(s))}
                                     </div>
 
                                     {/* Botón rápido + */}
@@ -1737,13 +1577,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         {slots.length === 0 && (
                                             <p className={`text-xs italic ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas</p>
                                         )}
-                                        {/* Una fila por HORA (libres incluidas): píldora con barra si hay
-                                            varias plazas; bloque detallado si es 1 plaza. */}
-                                        {groupSlotsByHour(slots).map(hora => {
-                                            if (hora.totalCount > 1) return renderHourPill(hora, d);
-                                            if (hora.entries.length === 1) return renderChip(hora.entries[0]);
-                                            return null; // continuación de una avería ya mostrada en su hora de inicio
-                                        })}
+                                        {/* Citas del día (vista SEMANA): una fila por hueco. */}
+                                        {collapseBookedBlocks(slots).map(s => renderChip(s))}
                                     </div>
                                     {!readOnly && (
                                         <button
@@ -1792,57 +1627,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 </div>
                             )}
 
-                            {/* Lista AGRUPADA POR HORA: una fila por hora con barra de ocupación
-                                y contador; al hacer clic se despliega para ver/gestionar cada
-                                cita o plaza de esa hora y añadir en una plaza libre. */}
+                            {/* Lista de citas del día (vista DÍA clásica): una fila por hueco/cita.
+                                Los secundarios de averías se colapsan bajo su líder. */}
                             <div className="space-y-2">
-                                {groupSlotsByHour(slots).map(hora => {
-                                    const isOpen = expandedHours.has(hora.key);
-                                    const full = hora.totalCount > 0 && hora.bookedCount >= hora.totalCount;
-                                    const pct = hora.totalCount > 0 ? Math.round((hora.bookedCount / hora.totalCount) * 100) : 0;
-                                    const bookedNames = hora.entries.filter(e => e.status === 'Booked').map(e => e.clientName || 'Cliente');
-                                    const resumen = bookedNames.slice(0, 2).join(', ') + (bookedNames.length > 2 ? `, +${bookedNames.length - 2}` : '');
-                                    return (
-                                        <div key={hora.key} className={`rounded-2xl border-2 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
-                                            {/* Fila de la hora (colapsable) */}
-                                            <div onClick={() => toggleHour(hora.key)} className={`flex items-center gap-3 p-3 cursor-pointer rounded-2xl transition ${isDark ? 'hover:bg-slate-700/50' : 'hover:bg-slate-50'}`}>
-                                                <span className={`text-lg font-bold font-mono leading-tight min-w-[56px] ${isDark ? 'text-white' : 'text-slate-800'}`}>{hora.label}</span>
-                                                <div className="flex-1 min-w-0">
-                                                    <div className="flex items-center gap-2">
-                                                        <div className={`flex-1 h-2 rounded-full overflow-hidden ${isDark ? 'bg-slate-600' : 'bg-slate-200'}`}>
-                                                            <div className="h-full rounded-full" style={{ width: `${pct}%`, backgroundColor: full ? '#dc2626' : (hora.bookedCount > 0 ? '#d97706' : '#cbd5e1') }} />
-                                                        </div>
-                                                        <span className={`text-[11px] font-bold px-2 py-0.5 rounded-full border whitespace-nowrap ${full ? (isDark ? 'bg-red-600/80 text-white border-red-300' : 'bg-red-500 text-white border-red-700') : (isDark ? 'bg-sky-600/80 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700')}`}>{hora.bookedCount}/{hora.totalCount}</span>
-                                                    </div>
-                                                    {(resumen || hora.freeCount > 0) && (
-                                                        <div className="text-xs text-slate-400 mt-1 truncate">
-                                                            {resumen}{resumen && hora.freeCount > 0 ? ' · ' : ''}{hora.freeCount > 0 ? `${hora.freeCount} libres` : ''}
-                                                        </div>
-                                                    )}
-                                                </div>
-                                                {isOpen
-                                                    ? <ChevronDown size={18} className="text-slate-400 flex-shrink-0" />
-                                                    : <ChevronRight size={18} className="text-slate-400 flex-shrink-0" />}
-                                            </div>
-                                            {/* Panel desplegado: citas/plazas de esa hora + añadir */}
-                                            {isOpen && (
-                                                <div className="px-3 pb-3 space-y-2">
-                                                    {hora.entries.map(s => renderDaySlotRow(s))}
-                                                    {!readOnly && hora.availableEntries.length > 0 && (
-                                                        <button
-                                                            onClick={() => handleOpenEdit(hora.availableEntries[0])}
-                                                            className={`w-full py-2 rounded-xl border-2 border-dashed font-semibold text-xs flex items-center justify-center gap-2 transition ${isDark
-                                                                ? 'border-slate-600 text-slate-400 hover:border-purple-500 hover:text-purple-300'
-                                                                : 'border-slate-300 text-slate-500 hover:border-purple-400 hover:text-purple-600'}`}
-                                                        >
-                                                            <Plus size={14} /> Añadir cita ({hora.freeCount} libre{hora.freeCount !== 1 ? 's' : ''})
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            )}
-                                        </div>
-                                    );
-                                })}
+                                {collapseBookedBlocks(slots).map(s => renderDaySlotRow(s))}
                             </div>
 
                             {/* Añadir hueco al día */}
@@ -2365,7 +2153,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     </div>
 
                                     {/* Horas + duración */}
-                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
+                                    <div className="grid grid-cols-2 md:grid-cols-3 gap-2 mb-3">
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Apertura</label>
                                             <input type="time" value={ag.startTime} onChange={e => updateDraftAgenda(i, { startTime: e.target.value })}
@@ -2379,11 +2167,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Grid slot (min)</label>
                                             <input type="number" min={5} step={5} value={ag.duration} onChange={e => updateDraftAgenda(i, { duration: parseInt(e.target.value) || 30 })}
-                                                className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
-                                        </div>
-                                        <div>
-                                            <label className="text-xs font-bold text-slate-400 block mb-1 uppercase" title="Cuántos coches pueden entrar a la misma hora (nº de mecánicos/plazas)">Trabajadores</label>
-                                            <input type="number" min={1} step={1} value={ag.capacity ?? 1} onChange={e => updateDraftAgenda(i, { capacity: Math.max(1, parseInt(e.target.value) || 1) })}
                                                 className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
                                         </div>
                                     </div>
@@ -2423,48 +2206,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         ))}
                                     </div>
 
-                                    {/* Horario avanzado / vacaciones — trabajadores por día y excepciones por fecha */}
-                                    <details className={`mt-3 rounded-xl border p-3 ${isDark ? 'border-white/10 bg-slate-800/40' : 'border-slate-200 bg-slate-50'}`}>
-                                        <summary className="text-xs font-bold text-slate-400 uppercase cursor-pointer select-none">Horario avanzado / Vacaciones</summary>
-                                        <div className="mt-3 space-y-4">
-                                            <div>
-                                                <label className="text-[11px] font-semibold text-slate-400 block mb-1">Trabajadores por día <span className="font-normal lowercase">(vacío = {ag.capacity ?? 1} por defecto · 0 = cerrado)</span></label>
-                                                <div className="grid grid-cols-7 gap-1">
-                                                    {WEEK_DAYS.map(d => (
-                                                        <div key={d.value} className="flex flex-col items-center gap-1">
-                                                            <span className="text-[10px] text-slate-400">{d.label.slice(0, 3)}</span>
-                                                            <input type="number" min={0} max={20}
-                                                                value={ag.capacityByWeekday?.[String(d.value)] ?? ''}
-                                                                placeholder={String(ag.capacity ?? 1)}
-                                                                onChange={e => setWeekdayCapacity(i, d.value, e.target.value)}
-                                                                className={`w-full p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`} />
-                                                        </div>
-                                                    ))}
-                                                </div>
-                                            </div>
-                                            <div>
-                                                <div className="flex items-center justify-between mb-1">
-                                                    <label className="text-[11px] font-semibold text-slate-400">Vacaciones / días especiales <span className="font-normal lowercase">(0 = cerrado)</span></label>
-                                                    <button onClick={() => addOverride(i)} className={`text-xs px-2 py-1 rounded-lg flex items-center gap-1 font-semibold transition ${isDark ? 'bg-purple-900/40 text-purple-300 hover:bg-purple-900/60' : 'bg-purple-50 text-purple-700 hover:bg-purple-100'}`}><Plus size={11} /> Añadir fecha</button>
-                                                </div>
-                                                {Object.keys(ag.capacityOverrides || {}).length === 0 && (
-                                                    <p className="text-xs text-slate-400 italic">Sin excepciones.</p>
-                                                )}
-                                                {Object.entries(ag.capacityOverrides || {}).sort((a, b) => a[0].localeCompare(b[0])).map(([date, cap]) => (
-                                                    <div key={date} className="flex items-center gap-2 mb-2">
-                                                        <input type="date" value={date} onChange={e => setOverrideDate(i, date, e.target.value)}
-                                                            className={`flex-1 p-1.5 border rounded-lg text-sm outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white scheme-dark' : 'bg-white border-slate-200'}`} />
-                                                        <div className="flex items-center gap-1 flex-shrink-0">
-                                                            <input type="number" min={0} max={20} value={cap} onChange={e => setOverrideCap(i, date, e.target.value)}
-                                                                className={`w-16 p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
-                                                            <span className="text-xs text-slate-400">trab.</span>
-                                                        </div>
-                                                        <button onClick={() => removeOverride(i, date)} className={`p-1.5 rounded-lg transition ${isDark ? 'text-red-400 hover:bg-red-900/30' : 'text-red-500 hover:bg-red-50'}`}><X size={14} /></button>
-                                                    </div>
-                                                ))}
-                                            </div>
-                                        </div>
-                                    </details>
                                 </div>
                             ))}
 
@@ -2487,42 +2228,6 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 </div>
             )}
 
-            {/* Modal "Citas a reprogramar": reservas por encima del cupo de su día */}
-            {showOverCapacityModal && (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setShowOverCapacityModal(false)}>
-                    <div onClick={e => e.stopPropagation()} className={`w-full max-w-lg max-h-[80vh] overflow-y-auto rounded-2xl shadow-xl ${isDark ? 'bg-slate-900 text-white' : 'bg-white text-slate-800'}`}>
-                        <div className={`p-4 border-b flex items-center justify-between sticky top-0 ${isDark ? 'border-white/10 bg-slate-900' : 'border-slate-100 bg-white'}`}>
-                            <h3 className="font-bold flex items-center gap-2"><RefreshCw size={18} /> Citas a reprogramar ({overCapacity.length})</h3>
-                            <button onClick={() => setShowOverCapacityModal(false)} className="p-1.5 rounded-lg hover:bg-black/10"><X size={18} /></button>
-                        </div>
-                        <div className="p-4">
-                            <p className="text-xs text-slate-400 mb-3">Estas citas quedaron por encima del nº de trabajadores de su día (p. ej. por vacaciones). No se han borrado: ábrelas y muévelas a una plaza/hora libre.</p>
-                            {overCapacity.length === 0 ? (
-                                <p className="text-sm text-slate-400">No hay citas a reprogramar.</p>
-                            ) : (
-                                <div className="space-y-2">
-                                    {overCapacity.map(item => {
-                                        const d = new Date(item.date);
-                                        return (
-                                            <button key={item.id} onClick={() => { setShowOverCapacityModal(false); openDayView(d); }}
-                                                className={`w-full text-left p-3 rounded-xl border flex items-center justify-between gap-3 transition ${isDark ? 'border-slate-700 hover:bg-slate-800' : 'border-slate-200 hover:bg-slate-50'}`}>
-                                                <div className="min-w-0">
-                                                    <div className="font-semibold text-sm truncate">{item.clientName || 'Cliente'}{item.clientPhone ? ` · ${item.clientPhone}` : ''}</div>
-                                                    <div className="text-xs text-slate-400">
-                                                        {d.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })} · {d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
-                                                        {agendas.length > 1 && item.agenda ? ` · ${item.agenda}` : ''}
-                                                    </div>
-                                                </div>
-                                                <span className="text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap flex-shrink-0 bg-red-500/80 text-white">plaza {item.slotIndex + 1} · cupo {item.capacity}</span>
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
 
             {/* Panel de historial de citas — reservas y cancelaciones */}
             <AppointmentHistoryPanel
