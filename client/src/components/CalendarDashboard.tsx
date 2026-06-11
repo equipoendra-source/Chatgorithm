@@ -122,6 +122,8 @@ interface Agenda {
     duration: number;      // granularidad del slot (minutos)
     services: AgendaService[];  // tipos de servicio con duración variable
     capacity?: number;     // nº de plazas/trabajadores por hora (1 = clásico)
+    capacityByWeekday?: Record<string, number>;  // "0".."6" → trabajadores ese día (0 = cerrado)
+    capacityOverrides?: Record<string, number>;  // "YYYY-MM-DD" → trabajadores ese día (vacaciones; 0 = cerrado)
 }
 
 // Días de la semana para el selector (etiqueta + valor getDay)
@@ -182,6 +184,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Vista de día agrupada por hora: qué horas están desplegadas (clave = timestamp de la hora en punto).
     const [expandedHours, setExpandedHours] = useState<Set<number>>(new Set());
     const toggleHour = (key: number) => setExpandedHours(prev => { const n = new Set(prev); n.has(key) ? n.delete(key) : n.add(key); return n; });
+    // Citas que quedaron por encima del cupo de su día (vacaciones / capacidad reducida).
+    const [overCapacity, setOverCapacity] = useState<any[]>([]);
+    const [showOverCapacityModal, setShowOverCapacityModal] = useState(false);
 
     // Si nos pasan initialDate (desde el toast de nueva cita), saltamos al día y abrimos vista día
     useEffect(() => {
@@ -346,6 +351,14 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 // Default de la agenda en el formulario de creación manual
                 setNewAgenda(prev => prev || (dataSched.agendas[0]?.name ?? ''));
             }
+
+            // Citas por encima del cupo de su día (vacaciones / capacidad reducida).
+            // No bloqueante: si falla, simplemente no se muestra el aviso.
+            try {
+                const resOver = await fetch(`${API_URL}/schedule/overcapacity`);
+                const dataOver = await resOver.json();
+                if (dataOver && Array.isArray(dataOver.items)) setOverCapacity(dataOver.items);
+            } catch { /* no bloqueante */ }
         } catch (err) { console.error(err); }
         finally { setLoading(false); }
     };
@@ -391,6 +404,44 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
     const updateDraftAgenda = (i: number, patch: Partial<Agenda>) => {
         setDraftAgendas(prev => prev.map((a, idx) => idx === i ? { ...a, ...patch } : a));
+    };
+
+    // --- Capacidad avanzada: por día de la semana y excepciones por fecha (vacaciones) ---
+    const setWeekdayCapacity = (i: number, weekday: number, raw: string) => {
+        const cur: Record<string, number> = { ...(draftAgendas[i].capacityByWeekday || {}) };
+        if (raw === '') delete cur[String(weekday)];
+        else cur[String(weekday)] = Math.max(0, Math.min(20, parseInt(raw) || 0));
+        updateDraftAgenda(i, { capacityByWeekday: cur });
+    };
+    const addOverride = (i: number) => {
+        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
+        // Clave inicial = primera fecha futura libre (para no pisar otra ya añadida).
+        const base = new Date(); let key = '';
+        for (let k = 0; k < 366; k++) {
+            const s = new Date(base.getTime() + k * 86400000).toLocaleDateString('en-CA');
+            if (!(s in cur)) { key = s; break; }
+        }
+        if (!key) return;
+        cur[key] = 0;
+        updateDraftAgenda(i, { capacityOverrides: cur });
+    };
+    const setOverrideDate = (i: number, oldDate: string, newDate: string) => {
+        if (!newDate || newDate === oldDate) return;
+        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
+        if (newDate in cur) return; // ya existe esa fecha
+        cur[newDate] = cur[oldDate];
+        delete cur[oldDate];
+        updateDraftAgenda(i, { capacityOverrides: cur });
+    };
+    const setOverrideCap = (i: number, date: string, raw: string) => {
+        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
+        cur[date] = Math.max(0, Math.min(20, parseInt(raw) || 0));
+        updateDraftAgenda(i, { capacityOverrides: cur });
+    };
+    const removeOverride = (i: number, date: string) => {
+        const cur: Record<string, number> = { ...(draftAgendas[i].capacityOverrides || {}) };
+        delete cur[date];
+        updateDraftAgenda(i, { capacityOverrides: cur });
     };
 
     const removeDraftAgenda = (i: number) => {
@@ -1322,6 +1373,20 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     </span>
                                 )}
                             </button>
+                            {/* Citas a reprogramar: reservas que quedaron por encima del cupo (vacaciones / capacidad reducida) */}
+                            {overCapacity.length > 0 && (
+                                <button
+                                    onClick={() => setShowOverCapacityModal(true)}
+                                    className={`relative px-3 py-2 rounded-xl transition flex items-center gap-2 text-sm font-semibold ${isDark ? 'text-red-300 bg-red-900/30 hover:bg-red-900/50' : 'text-red-700 bg-red-50 hover:bg-red-100'}`}
+                                    title="Citas que quedaron por encima del nº de trabajadores de su día (p. ej. por vacaciones): hay que reprogramarlas"
+                                >
+                                    <RefreshCw size={18} />
+                                    <span className="hidden md:inline">Reprogramar</span>
+                                    <span className={`min-w-[18px] h-[18px] px-1 rounded-full text-[10px] font-bold flex items-center justify-center ${isDark ? 'bg-red-500 text-red-950' : 'bg-red-600 text-white'}`}>
+                                        {overCapacity.length}
+                                    </span>
+                                </button>
+                            )}
                             {/* Panel "Pendientes de entrega": citas Booked en el pasado sin DeliveredAt */}
                             <button
                                 onClick={() => setShowPendingDeliveryModal(true)}
@@ -2308,6 +2373,49 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             </div>
                                         ))}
                                     </div>
+
+                                    {/* Horario avanzado / vacaciones — trabajadores por día y excepciones por fecha */}
+                                    <details className={`mt-3 rounded-xl border p-3 ${isDark ? 'border-white/10 bg-slate-800/40' : 'border-slate-200 bg-slate-50'}`}>
+                                        <summary className="text-xs font-bold text-slate-400 uppercase cursor-pointer select-none">Horario avanzado / Vacaciones</summary>
+                                        <div className="mt-3 space-y-4">
+                                            <div>
+                                                <label className="text-[11px] font-semibold text-slate-400 block mb-1">Trabajadores por día <span className="font-normal lowercase">(vacío = {ag.capacity ?? 1} por defecto · 0 = cerrado)</span></label>
+                                                <div className="grid grid-cols-7 gap-1">
+                                                    {WEEK_DAYS.map(d => (
+                                                        <div key={d.value} className="flex flex-col items-center gap-1">
+                                                            <span className="text-[10px] text-slate-400">{d.label.slice(0, 3)}</span>
+                                                            <input type="number" min={0} max={20}
+                                                                value={ag.capacityByWeekday?.[String(d.value)] ?? ''}
+                                                                placeholder={String(ag.capacity ?? 1)}
+                                                                onChange={e => setWeekdayCapacity(i, d.value, e.target.value)}
+                                                                className={`w-full p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`} />
+                                                        </div>
+                                                    ))}
+                                                </div>
+                                            </div>
+                                            <div>
+                                                <div className="flex items-center justify-between mb-1">
+                                                    <label className="text-[11px] font-semibold text-slate-400">Vacaciones / días especiales <span className="font-normal lowercase">(0 = cerrado)</span></label>
+                                                    <button onClick={() => addOverride(i)} className={`text-xs px-2 py-1 rounded-lg flex items-center gap-1 font-semibold transition ${isDark ? 'bg-purple-900/40 text-purple-300 hover:bg-purple-900/60' : 'bg-purple-50 text-purple-700 hover:bg-purple-100'}`}><Plus size={11} /> Añadir fecha</button>
+                                                </div>
+                                                {Object.keys(ag.capacityOverrides || {}).length === 0 && (
+                                                    <p className="text-xs text-slate-400 italic">Sin excepciones.</p>
+                                                )}
+                                                {Object.entries(ag.capacityOverrides || {}).sort((a, b) => a[0].localeCompare(b[0])).map(([date, cap]) => (
+                                                    <div key={date} className="flex items-center gap-2 mb-2">
+                                                        <input type="date" value={date} onChange={e => setOverrideDate(i, date, e.target.value)}
+                                                            className={`flex-1 p-1.5 border rounded-lg text-sm outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white scheme-dark' : 'bg-white border-slate-200'}`} />
+                                                        <div className="flex items-center gap-1 flex-shrink-0">
+                                                            <input type="number" min={0} max={20} value={cap} onChange={e => setOverrideCap(i, date, e.target.value)}
+                                                                className={`w-16 p-1.5 border rounded-lg text-sm text-center outline-none focus:ring-1 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
+                                                            <span className="text-xs text-slate-400">trab.</span>
+                                                        </div>
+                                                        <button onClick={() => removeOverride(i, date)} className={`p-1.5 rounded-lg transition ${isDark ? 'text-red-400 hover:bg-red-900/30' : 'text-red-500 hover:bg-red-50'}`}><X size={14} /></button>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        </div>
+                                    </details>
                                 </div>
                             ))}
 
@@ -2325,6 +2433,43 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 {savingAgendas ? <Loader2 className="animate-spin" size={16} /> : <Save size={16} />}
                                 {savingAgendas ? 'Guardando...' : 'Guardar agendas'}
                             </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {/* Modal "Citas a reprogramar": reservas por encima del cupo de su día */}
+            {showOverCapacityModal && (
+                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setShowOverCapacityModal(false)}>
+                    <div onClick={e => e.stopPropagation()} className={`w-full max-w-lg max-h-[80vh] overflow-y-auto rounded-2xl shadow-xl ${isDark ? 'bg-slate-900 text-white' : 'bg-white text-slate-800'}`}>
+                        <div className={`p-4 border-b flex items-center justify-between sticky top-0 ${isDark ? 'border-white/10 bg-slate-900' : 'border-slate-100 bg-white'}`}>
+                            <h3 className="font-bold flex items-center gap-2"><RefreshCw size={18} /> Citas a reprogramar ({overCapacity.length})</h3>
+                            <button onClick={() => setShowOverCapacityModal(false)} className="p-1.5 rounded-lg hover:bg-black/10"><X size={18} /></button>
+                        </div>
+                        <div className="p-4">
+                            <p className="text-xs text-slate-400 mb-3">Estas citas quedaron por encima del nº de trabajadores de su día (p. ej. por vacaciones). No se han borrado: ábrelas y muévelas a una plaza/hora libre.</p>
+                            {overCapacity.length === 0 ? (
+                                <p className="text-sm text-slate-400">No hay citas a reprogramar.</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {overCapacity.map(item => {
+                                        const d = new Date(item.date);
+                                        return (
+                                            <button key={item.id} onClick={() => { setShowOverCapacityModal(false); openDayView(d); }}
+                                                className={`w-full text-left p-3 rounded-xl border flex items-center justify-between gap-3 transition ${isDark ? 'border-slate-700 hover:bg-slate-800' : 'border-slate-200 hover:bg-slate-50'}`}>
+                                                <div className="min-w-0">
+                                                    <div className="font-semibold text-sm truncate">{item.clientName || 'Cliente'}{item.clientPhone ? ` · ${item.clientPhone}` : ''}</div>
+                                                    <div className="text-xs text-slate-400">
+                                                        {d.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' })} · {d.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit' })}
+                                                        {agendas.length > 1 && item.agenda ? ` · ${item.agenda}` : ''}
+                                                    </div>
+                                                </div>
+                                                <span className="text-[10px] font-bold px-2 py-1 rounded-full whitespace-nowrap flex-shrink-0 bg-red-500/80 text-white">plaza {item.slotIndex + 1} · cupo {item.capacity}</span>
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>

@@ -1831,7 +1831,9 @@ interface Agenda {
     endTime: string;
     duration: number;      // granularidad del grid (tamaño del slot base, en minutos)
     services: AgendaService[];  // tipos de servicio con duración variable (vacío = todos usan `duration`)
-    capacity: number;      // nº de plazas/trabajadores por hora (1 = comportamiento clásico). Ver SlotIndex.
+    capacity: number;      // nº de plazas/trabajadores por hora por defecto (1 = clásico). Ver SlotIndex.
+    capacityByWeekday?: Record<string, number>;  // "0".."6" (getDay) → nº trabajadores ese día de la semana (0 = cerrado)
+    capacityOverrides?: Record<string, number>;  // "YYYY-MM-DD" → nº trabajadores esa fecha concreta (vacaciones; 0 = cerrado)
 }
 
 // Lee las agendas configuradas. Soporta el formato antiguo (un único horario sin
@@ -1859,6 +1861,33 @@ function sanitizeCapacity(value: any): number {
     return 1;
 }
 
+// Sanea un mapa de capacidad (por día de semana o por fecha). A diferencia de
+// sanitizeCapacity, AQUÍ se permite 0 (= día cerrado / trabajador de vacaciones).
+// keyOk valida la clave (0..6 para días de semana, YYYY-MM-DD para fechas).
+function sanitizeCapacityMap(raw: any, keyOk: (k: string) => boolean): Record<string, number> {
+    const out: Record<string, number> = {};
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+        for (const k of Object.keys(raw)) {
+            const n = Math.round(Number(raw[k]));
+            if (keyOk(k) && Number.isFinite(n) && n >= 0) out[k] = Math.min(n, 20);
+        }
+    }
+    return out;
+}
+const isWeekdayKey = (k: string) => /^[0-6]$/.test(k);
+const isDateKey = (k: string) => /^\d{4}-\d{2}-\d{2}$/.test(k);
+
+// Capacidad efectiva de una agenda para un día concreto.
+// Prioridad: excepción por FECHA (vacaciones) > día de la SEMANA > capacidad por defecto.
+// Las dos primeras pueden ser 0 (día cerrado); la por defecto siempre es >= 1.
+function effectiveCapacity(ag: Agenda, d: Date): number {
+    const dateKey = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+    if (ag.capacityOverrides && dateKey in ag.capacityOverrides) return ag.capacityOverrides[dateKey];
+    const wk = String(d.getDay());
+    if (ag.capacityByWeekday && wk in ag.capacityByWeekday) return ag.capacityByWeekday[wk];
+    return ag.capacity;
+}
+
 async function getAgendas(): Promise<Agenda[]> {
     if (!base) return [];
     try {
@@ -1883,7 +1912,9 @@ async function getAgendas(): Promise<Agenda[]> {
                             durationMin: sanitizeMinutes(s.durationMin, sanitizeMinutes(a.duration, 60))
                         }))
                         : [],
-                    capacity: sanitizeCapacity(a.capacity)
+                    capacity: sanitizeCapacity(a.capacity),
+                    capacityByWeekday: sanitizeCapacityMap(a.capacityByWeekday, isWeekdayKey),
+                    capacityOverrides: sanitizeCapacityMap(a.capacityOverrides, isDateKey)
                 }));
         }
         // Formato antiguo: { days, startTime, endTime, duration } → una agenda "General"
@@ -1975,11 +2006,15 @@ async function runScheduleMaintenance() {
             // `start` no avanzara y el while fuera un bucle infinito que cuelga el
             // servidor. getAgendas ya lo sanea, pero blindamos también el punto de uso.
             const step = sanitizeMinutes(ag.duration, 60);
-            // Plazas/trabajadores por hora. Si el campo SlotIndex no existe en
-            // Airtable, forzamos 1 para no generar duplicados imposibles de deduplicar.
-            const capacity = slotIndexFieldExists ? sanitizeCapacity(ag.capacity) : 1;
             for (let d = new Date(now); d <= endDate; d.setDate(d.getDate() + 1)) {
                 if (!ag.days.includes(d.getDay())) continue;
+                // Plazas/trabajadores de ESTE día (vacaciones por fecha > día de la
+                // semana > por defecto). 0 = día cerrado (no se generan huecos).
+                // Sin el campo SlotIndex no podemos tener >1 plaza, pero SÍ podemos
+                // cerrar un día (0): por eso se cap a 1 en vez de forzar 1.
+                const effRaw = effectiveCapacity(ag, d);
+                const eff = Math.max(0, Math.min(20, Math.round(Number(effRaw))));
+                const capacity = slotIndexFieldExists ? eff : Math.min(eff, 1);
                 const [startH, startM] = ag.startTime.split(':').map(Number);
                 const [endH, endM] = ag.endTime.split(':').map(Number);
                 let start = setMadridTime(d, startH, startM);
@@ -7198,6 +7233,48 @@ app.get('/api/schedule', async (req, res) => {
     } catch (e) { res.status(500).json({ error: "Error fetching schedule" }); }
 });
 
+// Citas "por encima del cupo": reservas futuras (Booked) cuya plaza (SlotIndex)
+// queda por encima de la capacidad efectiva de su día — típico tras poner a un
+// trabajador de vacaciones (bajar la capacidad un día con citas ya reservadas).
+// NUNCA se borran; este endpoint solo las LISTA para reprogramarlas a mano.
+app.get('/api/schedule/overcapacity', async (req, res) => {
+    if (!base) return res.status(500).json({ error: "DB" });
+    try {
+        const agendas = await getAgendas();
+        const agByName = new Map(agendas.map(a => [a.name, a]));
+        const nowISO = new Date().toISOString();
+        const booked = await base('Appointments').select({
+            filterByFormula: `AND({Status}='Booked', {Date} > '${nowISO}')`,
+            fields: ['Date', 'Agenda', 'ClientName', 'ClientPhone', 'SlotIndex', 'ServiceType']
+        }).all();
+        const over: any[] = [];
+        for (const r of booked) {
+            const agenda = (r.get('Agenda') as string) || '';
+            const ag = agByName.get(agenda);
+            if (!ag) continue;  // agenda borrada: no evaluamos cupo
+            const clientName = (r.get('ClientName') as string) || '';
+            if (!clientName) continue;  // secundarios/huérfanos sin nombre: no son una cita a mostrar
+            const dateStr = r.get('Date') as string;
+            const d = new Date(dateStr);
+            if (isNaN(d.getTime())) continue;
+            const idx = Number.isFinite(Number(r.get('SlotIndex'))) ? Number(r.get('SlotIndex')) : 0;
+            const cap = effectiveCapacity(ag, d);
+            if (idx < cap) continue;  // dentro del cupo del día
+            over.push({
+                id: r.id, date: dateStr, agenda, clientName,
+                clientPhone: (r.get('ClientPhone') as string) || '',
+                serviceType: (r.get('ServiceType') as string) || '',
+                slotIndex: idx, capacity: cap
+            });
+        }
+        over.sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime());
+        res.json({ count: over.length, items: over });
+    } catch (e: any) {
+        console.error('[API] Error /api/schedule/overcapacity:', e.message);
+        res.status(500).json({ error: "Error" });
+    }
+});
+
 app.post('/api/schedule', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     let agendas = req.body.agendas;
@@ -7233,7 +7310,12 @@ app.post('/api/schedule', async (req, res) => {
                 : [],
             // Plazas/trabajadores por hora. Este endpoint reconstruye cada agenda
             // campo a campo, así que SIN esta línea la capacidad no se guardaría.
-            capacity: sanitizeCapacity(a.capacity)
+            capacity: sanitizeCapacity(a.capacity),
+            // Capacidad por día de la semana y excepciones por fecha (vacaciones).
+            // Este endpoint reconstruye cada agenda campo a campo: sin estas líneas
+            // NO se guardarían (mismo motivo que el comentario de capacity).
+            capacityByWeekday: sanitizeCapacityMap(a.capacityByWeekday, isWeekdayKey),
+            capacityOverrides: sanitizeCapacityMap(a.capacityOverrides, isDateKey)
         }));
     if (clean.length === 0) {
         return res.status(400).json({ error: "Cada agenda necesita nombre y al menos un día" });
