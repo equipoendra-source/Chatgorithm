@@ -1,5 +1,16 @@
 # Chatgorithm — Notas del proyecto
 
+## Preferencias del usuario (Diego)
+
+- **Avisar SIEMPRE cuando un cambio toque el frontend.** Render no siempre
+  redespliega el Static Site de `chatgorithm-frontend` solo. En cuanto
+  modifiques cualquier archivo bajo `client/`, recuerda al usuario que:
+  1. Verifique el último deploy en el Render Dashboard del frontend.
+  2. Si no está al día con el commit nuevo, dele a **Manual Deploy →
+     Deploy latest commit**.
+  3. Hard refresh en el navegador (Cmd+Shift+R) para invalidar caché.
+  Cambios solo en `server/` se redespliegan solos (no hace falta avisar).
+
 ## Stack
 - **Frontend:** React + TypeScript + Vite + Capacitor (web y APK Android)
 - **Backend:** Node.js + Express + TypeScript, desplegado en Render
