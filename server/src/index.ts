@@ -1831,6 +1831,7 @@ interface Agenda {
     endTime: string;
     duration: number;      // granularidad del grid (tamaño del slot base, en minutos)
     services: AgendaService[];  // tipos de servicio con duración variable (vacío = todos usan `duration`)
+    capacity: number;      // nº de plazas/trabajadores por hora (1 = comportamiento clásico). Ver SlotIndex.
 }
 
 // Lee las agendas configuradas. Soporta el formato antiguo (un único horario sin
@@ -1847,6 +1848,15 @@ function sanitizeMinutes(value: any, fallback: number = 60): number {
     if (Number.isFinite(n) && n >= MIN_SLOT_MIN) return n;
     const fb = Math.round(Number(fallback));
     return (Number.isFinite(fb) && fb >= MIN_SLOT_MIN) ? fb : 60;
+}
+
+// Plazas/trabajadores por hora de una agenda. Mínimo 1 (= comportamiento clásico
+// de 1 hueco por hora). Cap a 20 por seguridad (evita generar miles de registros
+// por un valor erróneo).
+function sanitizeCapacity(value: any): number {
+    const n = Math.round(Number(value));
+    if (Number.isFinite(n) && n >= 1) return Math.min(n, 20);
+    return 1;
 }
 
 async function getAgendas(): Promise<Agenda[]> {
@@ -1872,12 +1882,13 @@ async function getAgendas(): Promise<Agenda[]> {
                             name: String(s.name).trim(),
                             durationMin: sanitizeMinutes(s.durationMin, sanitizeMinutes(a.duration, 60))
                         }))
-                        : []
+                        : [],
+                    capacity: sanitizeCapacity(a.capacity)
                 }));
         }
         // Formato antiguo: { days, startTime, endTime, duration } → una agenda "General"
         if (parsed && Array.isArray(parsed.days)) {
-            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: sanitizeMinutes(parsed.duration, 60), services: [] }];
+            return [{ id: 'general', name: 'General', description: '', days: parsed.days, startTime: parsed.startTime || '09:00', endTime: parsed.endTime || '18:00', duration: sanitizeMinutes(parsed.duration, 60), services: [], capacity: 1 }];
         }
         return [];
     } catch (e) {
@@ -1926,15 +1937,30 @@ async function runScheduleMaintenance() {
             await delay(200);
         }
 
+        // CAPACIDAD: ¿existe el campo SlotIndex en Airtable? Si no, la capacidad por
+        // hora se desactiva (1 plaza) hasta que se cree (degradación limpia, sin
+        // generar duplicados imposibles de deduplicar). Lo probamos con un select mínimo.
+        let slotIndexFieldExists = true;
+        try {
+            await base('Appointments').select({ maxRecords: 1, fields: ['SlotIndex'] }).firstPage();
+        } catch (e: any) {
+            if (/slotindex|unknown field/i.test(e.message || '')) {
+                slotIndexFieldExists = false;
+                console.error('⚠️ [Agendas] El campo "SlotIndex" (Número) no existe en Airtable: la capacidad por hora NO funcionará hasta crearlo. Generando 1 plaza por hora.');
+            }
+        }
+        // Índice de plaza de un registro (0..capacity-1). Campo ausente → plaza 0.
+        const slotIdxOf = (r: any) => { const v = Number(r.get('SlotIndex')); return Number.isFinite(v) ? v : 0; };
+
         // 2. Leer huecos futuros (Available Y Booked) para no duplicar ni pisar reservas activas
         const endDate = new Date();
         endDate.setDate(now.getDate() + 90);
         const futureSlots = await base('Appointments').select({
             filterByFormula: `AND(OR({Status}='Available',{Status}='Booked'), {Date}>'${nowISO}')`,
-            fields: ['Date', 'Agenda', 'Status']
+            fields: slotIndexFieldExists ? ['Date', 'Agenda', 'Status', 'SlotIndex'] : ['Date', 'Agenda', 'Status']
         }).all();
-        // Clave de deduplicación: agenda + fecha ISO (cubre tanto Available como Booked)
-        const existing = new Set(futureSlots.map(r => `${(r.get('Agenda') as string) || ''}|${new Date(r.get('Date') as string).toISOString()}`));
+        // Clave de deduplicación: agenda + fecha ISO + plaza (cubre tanto Available como Booked)
+        const existing = new Set(futureSlots.map(r => `${(r.get('Agenda') as string) || ''}|${new Date(r.get('Date') as string).toISOString()}|${slotIdxOf(r)}`));
 
         // 3. Calcular el conjunto de slots VÁLIDOS (clave `agenda|iso`) según el
         //    horario actual de cada agenda. Lo usamos para dos cosas: detectar
@@ -1949,6 +1975,9 @@ async function runScheduleMaintenance() {
             // `start` no avanzara y el while fuera un bucle infinito que cuelga el
             // servidor. getAgendas ya lo sanea, pero blindamos también el punto de uso.
             const step = sanitizeMinutes(ag.duration, 60);
+            // Plazas/trabajadores por hora. Si el campo SlotIndex no existe en
+            // Airtable, forzamos 1 para no generar duplicados imposibles de deduplicar.
+            const capacity = slotIndexFieldExists ? sanitizeCapacity(ag.capacity) : 1;
             for (let d = new Date(now); d <= endDate; d.setDate(d.getDate() + 1)) {
                 if (!ag.days.includes(d.getDay())) continue;
                 const [startH, startM] = ag.startTime.split(':').map(Number);
@@ -1958,10 +1987,15 @@ async function runScheduleMaintenance() {
                 while (start.getTime() + step * 60000 <= end.getTime()) {
                     if (start > now) {
                         const iso = start.toISOString();
-                        const key = `${ag.name}|${iso}`;
-                        validKeys.add(key);
-                        if (!existing.has(key)) {
-                            newSlotsToCreate.push({ fields: { "Date": iso, "Status": "Available", "Agenda": ag.name } });
+                        // Una fila por plaza (SlotIndex 0..capacity-1) a la misma hora.
+                        for (let s = 0; s < capacity; s++) {
+                            const key = `${ag.name}|${iso}|${s}`;
+                            validKeys.add(key);
+                            if (!existing.has(key)) {
+                                const fields: any = { "Date": iso, "Status": "Available", "Agenda": ag.name };
+                                if (slotIndexFieldExists) fields["SlotIndex"] = s;
+                                newSlotsToCreate.push({ fields });
+                            }
                         }
                     }
                     start = new Date(start.getTime() + step * 60000);
@@ -1983,7 +2017,7 @@ async function runScheduleMaintenance() {
                 const ag = (r.get('Agenda') as string) || '';
                 if (!ag || !agendaNames.has(ag)) return true;           // huérfano
                 const iso = new Date(r.get('Date') as string).toISOString();
-                return !validKeys.has(`${ag}|${iso}`);                  // fuera de horario
+                return !validKeys.has(`${ag}|${iso}|${slotIdxOf(r)}`);  // fuera de horario o plaza sobrante
             })
             .map(r => r.id);
         for (let i = 0; i < toDeleteIds.length; i += 10) {
@@ -3602,19 +3636,40 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         });
 
         // --- Buscar grupos de slots consecutivos suficientes para el servicio ---
-        // Un grupo es válido si hay `slotsNeeded` slots seguidos separados exactamente por `slotGranularity` min.
-        const validStarts: Array<{ lead: any, allIds: string[] }> = [];
-        for (let i = 0; i <= filtered.length - slotsNeeded; i++) {
-            let ok = true;
-            const group = [filtered[i]];
-            for (let j = 1; j < slotsNeeded; j++) {
-                const prev = new Date(filtered[i + j - 1].get('Date') as string).getTime();
-                const next = new Date(filtered[i + j].get('Date') as string).getTime();
-                if (next - prev !== slotGranularity * 60000) { ok = false; break; }
-                group.push(filtered[i + j]);
-            }
-            if (ok) validStarts.push({ lead: filtered[i], allIds: group.map(r => r.id) });
+        // CAPACIDAD (varias plazas/hora): particionamos por (agenda, plaza) ANTES de
+        // buscar consecutivos. Así una avería ocupa slots seguidos de la MISMA plaza,
+        // y dos plazas a la misma hora (separación 0) no rompen la detección. Luego
+        // deduplicamos por hora de inicio: el cliente ve cada hora UNA sola vez aunque
+        // haya varias plazas libres. Sin campo SlotIndex → todos plaza 0 → idéntico al clásico.
+        const slotIdxOf = (r: any) => { const v = Number(r.get('SlotIndex')); return Number.isFinite(v) ? v : 0; };
+        const byBay = new Map<string, any[]>();
+        for (const r of filtered) {
+            const k = `${(r.get('Agenda') as string) || ''}|${slotIdxOf(r)}`;
+            if (!byBay.has(k)) byBay.set(k, []);
+            byBay.get(k)!.push(r);
         }
+        const startsByIso = new Map<string, { lead: any, allIds: string[] }>();
+        for (const baySlots of byBay.values()) {
+            baySlots.sort((a, b) => new Date(a.get('Date') as string).getTime() - new Date(b.get('Date') as string).getTime());
+            for (let i = 0; i <= baySlots.length - slotsNeeded; i++) {
+                let ok = true;
+                const group = [baySlots[i]];
+                for (let j = 1; j < slotsNeeded; j++) {
+                    const prev = new Date(baySlots[i + j - 1].get('Date') as string).getTime();
+                    const next = new Date(baySlots[i + j].get('Date') as string).getTime();
+                    if (next - prev !== slotGranularity * 60000) { ok = false; break; }
+                    group.push(baySlots[i + j]);
+                }
+                if (!ok) continue;
+                const iso = new Date(baySlots[i].get('Date') as string).toISOString();
+                // Una opción por hora de inicio (no repetir la hora aunque haya N plazas libres).
+                if (!startsByIso.has(iso)) {
+                    startsByIso.set(iso, { lead: baySlots[i], allIds: group.map(r => r.id) });
+                }
+            }
+        }
+        const validStarts = Array.from(startsByIso.values())
+            .sort((a, b) => new Date(a.lead.get('Date') as string).getTime() - new Date(b.lead.get('Date') as string).getTime());
 
         const validRecords = validStarts.slice(0, 10);
         if (validRecords.length === 0) {
@@ -4212,7 +4267,14 @@ async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' |
             const secCandidates = await base('Appointments').select({
                 filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(leadAgenda)}', {Date}>'${leadDate.toISOString()}', {Date}<'${endDate}')`
             }).all();
-            const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, clientPhone));
+            // CAPACIDAD: la avería ocupa la MISMA plaza en todas sus horas. Liberamos
+            // solo los secundarios de esa plaza (SlotIndex del líder); en JS, tolerante
+            // (campo ausente → plaza 0 → comportamiento clásico).
+            const leadIdx = Number.isFinite(Number(record.get('SlotIndex'))) ? Number(record.get('SlotIndex')) : 0;
+            const secondaries = secCandidates.filter((r: any) => {
+                const idx = Number.isFinite(Number(r.get('SlotIndex'))) ? Number(r.get('SlotIndex')) : 0;
+                return phoneMatch(r.get('ClientPhone') as string, clientPhone) && idx === leadIdx;
+            });
             if (secondaries.length > 0) {
                 for (let i = 0; i < secondaries.length; i += 10) {
                     const batch = secondaries.slice(i, i + 10);
@@ -6139,6 +6201,7 @@ app.put('/api/appointments/:id', async (req, res) => {
         let preUpdateAgenda = '';
         let preUpdateDurationMin = 0;   // para liberar los secundarios del bloque al cancelar
         let preUpdateServiceType = '';  // para detectar cambio de tipo de servicio en edición
+        let preUpdateSlotIndex = 0;     // plaza del líder (capacidad) para liberar solo su plaza
         try {
             const before = await base('Appointments').find(req.params.id);
             preUpdateStatus = (before.get('Status') as string) || '';
@@ -6148,6 +6211,7 @@ app.put('/api/appointments/:id', async (req, res) => {
             preUpdateAgenda = (before.get('Agenda') as string) || '';
             preUpdateDurationMin = Number(before.get('DurationMin') || 0);
             preUpdateServiceType = (before.get('ServiceType') as string) || '';
+            preUpdateSlotIndex = Number.isFinite(Number(before.get('SlotIndex'))) ? Number(before.get('SlotIndex')) : 0;
         } catch (_) { /* no bloqueamos si no se puede leer */ }
 
         // RESERVA CON BLOQUE DE SLOTS (tipo de servicio).
@@ -6227,10 +6291,18 @@ app.put('/api/appointments/:id', async (req, res) => {
                         // Buscar los N-1 secundarios bajo el lock: misma
                         // agenda, Available, entre leadDate (exclusivo) y
                         // leadDate + bloque (exclusivo).
-                        const candidates = await base!('Appointments').select({
+                        const candidatesRaw = await base!('Appointments').select({
                             filterByFormula: `AND({Agenda}='${escAt(matchedAgenda.name)}', {Status}='Available', {Date}>'${escAt(leadISO)}', {Date}<'${escAt(endISO)}')`,
                             sort: [{ field: 'Date', direction: 'asc' }]
                         }).all();
+                        // CAPACIDAD: la avería ocupa la MISMA plaza en todas sus horas.
+                        // Filtramos los secundarios por el SlotIndex del líder (JS, tolerante
+                        // si el campo no existe → plaza 0 → comportamiento clásico).
+                        const leadIdx = Number.isFinite(Number(currentLead.get('SlotIndex'))) ? Number(currentLead.get('SlotIndex')) : 0;
+                        const candidates = candidatesRaw.filter((c: any) => {
+                            const idx = Number.isFinite(Number(c.get('SlotIndex'))) ? Number(c.get('SlotIndex')) : 0;
+                            return idx === leadIdx;
+                        });
                         const expected = slotsNeeded - 1;
                         if (candidates.length < expected) {
                             throw { httpStatus: 409, message: `No hay huecos consecutivos suficientes para "${serviceName}" (${svc.durationMin}min): faltan ${expected - candidates.length} hueco(s) libre(s) seguidos. Suele pasar cuando el hueco está a una hora no alineada con la agenda (ej. 10:30 en una agenda de tramos de ${granularity}min): crea el hueco en una hora del tramo (cada ${granularity}min desde la apertura) o crea los huecos contiguos que faltan.` };
@@ -6565,11 +6637,14 @@ app.put('/api/appointments/:id', async (req, res) => {
                         const secCandidates = await base('Appointments').select({
                             filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(preUpdateAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
                         }).all();
-                        // Solo los del MISMO cliente (no liberar citas de otro que
-                        // solape en esa agenda/horario). Si el líder no tuviera
-                        // teléfono (caso anómalo), phoneMatch da false → no se
-                        // libera nada, igual que hace cancelAppointment (el bot).
-                        const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, preUpdateClientPhone));
+                        // Solo los del MISMO cliente y MISMA plaza (SlotIndex del
+                        // líder): con capacidad, no liberar secundarios de otra avería
+                        // del mismo cliente en otra plaza a la misma hora. Si el líder
+                        // no tuviera teléfono, phoneMatch da false → no se libera nada.
+                        const secondaries = secCandidates.filter((r: any) => {
+                            const idx = Number.isFinite(Number(r.get('SlotIndex'))) ? Number(r.get('SlotIndex')) : 0;
+                            return phoneMatch(r.get('ClientPhone') as string, preUpdateClientPhone) && idx === preUpdateSlotIndex;
+                        });
                         for (const r of secondaries) {
                             await updateAppointmentFields(r.id, { Status: 'Available', ClientPhone: '', DurationMin: 0 });
                         }
@@ -6868,6 +6943,7 @@ app.delete('/api/appointments/:id', async (req, res) => {
         let preDate = '';
         let preAgenda = '';
         let preDurationMin = 0;   // para liberar los secundarios del bloque al borrar el líder
+        let preSlotIndex = 0;     // plaza del líder (capacidad)
         try {
             const rec = await base('Appointments').find(req.params.id);
             preClientPhone = (rec.get('ClientPhone') as string) || '';
@@ -6876,6 +6952,7 @@ app.delete('/api/appointments/:id', async (req, res) => {
             preDate = (rec.get('Date') as string) || '';
             preAgenda = (rec.get('Agenda') as string) || '';
             preDurationMin = Number(rec.get('DurationMin') || 0);
+            preSlotIndex = Number.isFinite(Number(rec.get('SlotIndex'))) ? Number(rec.get('SlotIndex')) : 0;
         } catch { /* el record puede no existir o haber sido borrado en paralelo */ }
 
         await base('Appointments').destroy([req.params.id]);
@@ -6896,8 +6973,12 @@ app.delete('/api/appointments/:id', async (req, res) => {
                     const secCandidates = await base('Appointments').select({
                         filterByFormula: `AND({Status}='Booked', {Agenda}='${escAt(preAgenda)}', {Date}>'${leadISO}', {Date}<'${endISO}')`
                     }).all();
-                    // Solo del mismo cliente; sin teléfono (anómalo) no libera nada.
-                    const secondaries = secCandidates.filter((r: any) => phoneMatch(r.get('ClientPhone') as string, preClientPhone));
+                    // Solo del mismo cliente y MISMA plaza (SlotIndex del líder); sin
+                    // teléfono (anómalo) no libera nada.
+                    const secondaries = secCandidates.filter((r: any) => {
+                        const idx = Number.isFinite(Number(r.get('SlotIndex'))) ? Number(r.get('SlotIndex')) : 0;
+                        return phoneMatch(r.get('ClientPhone') as string, preClientPhone) && idx === preSlotIndex;
+                    });
                     for (const r of secondaries) {
                         await updateAppointmentFields(r.id, { Status: 'Available', ClientPhone: '', DurationMin: 0 });
                     }
@@ -7149,7 +7230,10 @@ app.post('/api/schedule', async (req, res) => {
                     name: String(s.name).trim(),
                     durationMin: sanitizeMinutes(s.durationMin, sanitizeMinutes(a.duration, 60))
                 }))
-                : []
+                : [],
+            // Plazas/trabajadores por hora. Este endpoint reconstruye cada agenda
+            // campo a campo, así que SIN esta línea la capacidad no se guardaría.
+            capacity: sanitizeCapacity(a.capacity)
         }));
     if (clean.length === 0) {
         return res.status(400).json({ error: "Cada agenda necesita nombre y al menos un día" });

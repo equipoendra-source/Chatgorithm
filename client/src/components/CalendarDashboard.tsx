@@ -121,6 +121,7 @@ interface Agenda {
     endTime: string;
     duration: number;      // granularidad del slot (minutos)
     services: AgendaService[];  // tipos de servicio con duración variable
+    capacity?: number;     // nº de plazas/trabajadores por hora (1 = clásico)
 }
 
 // Días de la semana para el selector (etiqueta + valor getDay)
@@ -351,14 +352,14 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // Si no hay agendas, arrancamos con una por defecto
         setDraftAgendas(agendas.length > 0
             ? JSON.parse(JSON.stringify(agendas))
-            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60, services: [] }]);
+            : [{ id: 'ag1', name: 'General', description: '', days: [1, 2, 3, 4, 5], startTime: '09:00', endTime: '18:00', duration: 60, services: [], capacity: 1 }]);
         setShowAgendaModal(true);
     };
 
     const addDraftAgenda = () => {
         setDraftAgendas(prev => [...prev, {
             id: `ag${Date.now()}`, name: '', description: '', days: [1, 2, 3, 4, 5],
-            startTime: '09:00', endTime: '18:00', duration: 60, services: []
+            startTime: '09:00', endTime: '18:00', duration: 60, services: [], capacity: 1
         }]);
     };
 
@@ -2166,7 +2167,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     </div>
 
                                     {/* Horas + duración */}
-                                    <div className="grid grid-cols-3 gap-2 mb-3">
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3">
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Apertura</label>
                                             <input type="time" value={ag.startTime} onChange={e => updateDraftAgenda(i, { startTime: e.target.value })}
@@ -2180,6 +2181,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         <div>
                                             <label className="text-xs font-bold text-slate-400 block mb-1 uppercase">Grid slot (min)</label>
                                             <input type="number" min={5} step={5} value={ag.duration} onChange={e => updateDraftAgenda(i, { duration: parseInt(e.target.value) || 30 })}
+                                                className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
+                                        </div>
+                                        <div>
+                                            <label className="text-xs font-bold text-slate-400 block mb-1 uppercase" title="Cuántos coches pueden entrar a la misma hora (nº de mecánicos/plazas)">Trabajadores</label>
+                                            <input type="number" min={1} step={1} value={ag.capacity ?? 1} onChange={e => updateDraftAgenda(i, { capacity: Math.max(1, parseInt(e.target.value) || 1) })}
                                                 className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-purple-500 ${isDark ? 'bg-slate-700 border-slate-600 text-white' : 'bg-white border-slate-200'}`} />
                                         </div>
                                     </div>
