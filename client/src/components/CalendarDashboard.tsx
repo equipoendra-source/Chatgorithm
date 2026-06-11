@@ -1912,7 +1912,17 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         (liberando los secundarios sobrantes) o solo re-etiquetar.
                                         Sin servicio = solo 1 hueco (comportamiento clásico). */}
                                     {!readOnly && editStatus === 'Booked' && (() => {
-                                        const slotAgenda = agendas.find(a => a.name === (selectedAppt?.agenda || ''));
+                                        // Fallback: si la cita no tiene agenda asignada o el nombre
+                                        // no coincide con ninguna agenda configurada (típico en citas
+                                        // viejas, anteriores a la introducción de multi-agenda),
+                                        // caemos a la primera agenda con servicios para que el agente
+                                        // pueda seguir editando el tipo de servicio. El backend
+                                        // también aplica el mismo fallback al primer agenda al
+                                        // ajustar el bloque.
+                                        const apptAgendaName = (selectedAppt?.agenda || '').trim();
+                                        const slotAgenda = (apptAgendaName && agendas.find(a => a.name === apptAgendaName))
+                                            || agendas.find(a => (a.services || []).some(s => s.name && s.name.trim() && s.durationMin > 0))
+                                            || agendas[0];
                                         const availableServices = (slotAgenda?.services || []).filter(s => s.name && s.name.trim() && s.durationMin > 0);
                                         if (availableServices.length === 0) return null;
                                         const granularity = slotAgenda?.duration || 60;
