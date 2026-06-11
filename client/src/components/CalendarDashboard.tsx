@@ -1292,6 +1292,78 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     })();
 
     // Chip compacto de cita — usado en la vista de Semana
+    // Bloque detallado de una cita/hueco en la vista de MES (idéntico al que había).
+    const renderMonthSlot = (s: Appointment) => (
+        <div
+            key={s.id}
+            onClick={() => handleOpenEdit(s)}
+            className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${shouldPaintDelivered(s)
+                ? (isDark ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90' : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
+                : s.status === 'Booked'
+                    ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
+                    : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
+                }`}
+        >
+            <div className="flex flex-col md:flex-row md:items-center gap-1">
+                <span className="font-bold font-mono flex items-center gap-1">
+                    {agendas.length > 1 && s.agenda && (
+                        <span className="inline-block w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: agendaColor(s.agenda) }} title={s.agenda} />
+                    )}
+                    {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
+                    {formatTimeRange(s.date, s.durationMin)}
+                </span>
+                {agendas.length > 1 && s.agenda && (
+                    <span className="text-[9px] font-semibold uppercase tracking-wide opacity-70 truncate max-w-[90px]">{s.agenda}</span>
+                )}
+                {s.status === 'Booked' && (
+                    <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${shouldPaintDelivered(s)
+                        ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
+                        : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
+                        • {s.clientName || 'Cliente'}
+                    </span>
+                )}
+            </div>
+            <div className="flex items-center gap-2">
+                {s.status === 'Booked' && <User size={12} className="md:w-[10px] md:h-[10px]" />}
+                {!readOnly && (
+                    <button onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }} className="md:hidden md:group-hover:block text-red-400 hover:text-red-600 p-1">
+                        <Trash2 size={14} className="md:w-[10px] md:h-[10px]" />
+                    </button>
+                )}
+            </div>
+        </div>
+    );
+
+    // Píldora compacta de una HORA con varias plazas (capacidad > 1): muestra el
+    // rango horario + "ocupadas/total" y al pulsar abre la vista de día (donde se
+    // despliega cada plaza). Evita listar N bloques idénticos en mes/semana.
+    const renderHourPill = (
+        hora: { key: number; label: string; bookedCount: number; totalCount: number; entries: Appointment[] },
+        dateToOpen: Date
+    ) => {
+        const full = hora.totalCount > 0 && hora.bookedCount >= hora.totalCount;
+        const anyDelivered = hora.entries.some(e => shouldPaintDelivered(e));
+        const anyBooked = hora.bookedCount > 0;
+        const endLabel = new Date(hora.key + slotDuration * 60000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return (
+            <div
+                key={hora.key}
+                onClick={(e) => { e.stopPropagation(); openDayView(dateToOpen); }}
+                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${anyDelivered
+                    ? (isDark ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90' : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
+                    : full
+                        ? (isDark ? 'bg-red-700/70 border-red-400 text-white hover:bg-red-600/80' : 'bg-red-300 border-red-600 text-red-950 hover:bg-red-400')
+                        : anyBooked
+                            ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
+                            : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
+                    }`}
+            >
+                <span className="font-bold font-mono">{hora.label}–{endLabel}</span>
+                <span className="text-[10px] font-bold whitespace-nowrap ml-2">{hora.bookedCount}/{hora.totalCount}</span>
+            </div>
+        );
+    };
+
     const renderChip = (s: Appointment) => {
         // Para bloques multi-slot el líder muestra hora inicio-fin (ej. "13:00-17:00").
         // Para citas de 1 hueco o Available, solo la hora de inicio.
@@ -1564,65 +1636,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     <div className="space-y-2 md:space-y-1 max-h-none md:max-h-[100px] overflow-y-visible md:overflow-y-auto pr-1 custom-scrollbar">
                                         {slots.length === 0 && <p className={`md:hidden text-xs italic ml-2 ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas programadas</p>}
 
-                                        {collapseBookedBlocks(slots).map(s => (
-                                            <div
-                                                key={s.id}
-                                                onClick={() => handleOpenEdit(s)}
-                                                className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${shouldPaintDelivered(s)
-                                                    ? (isDark
-                                                        ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90'
-                                                        : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
-                                                    : s.status === 'Booked'
-                                                        ? (isDark
-                                                            ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90'
-                                                            : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
-                                                        : (isDark
-                                                            ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80'
-                                                            : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
-                                                    }`}
-                                            >
-                                                <div className="flex flex-col md:flex-row md:items-center gap-1">
-                                                    <span className="font-bold font-mono flex items-center gap-1">
-                                                        {agendas.length > 1 && s.agenda && (
-                                                            <span
-                                                                className="inline-block w-2 h-2 rounded-full flex-shrink-0"
-                                                                style={{ backgroundColor: agendaColor(s.agenda) }}
-                                                                title={s.agenda}
-                                                            />
-                                                        )}
-                                                        {s.incident && <Zap size={11} className="text-amber-500 flex-shrink-0" />}
-                                                        {formatTimeRange(s.date, s.durationMin)}
-                                                    </span>
-                                                    {/* Nombre de la agenda (visible si hay varias) */}
-                                                    {agendas.length > 1 && s.agenda && (
-                                                        <span className="text-[9px] font-semibold uppercase tracking-wide opacity-70 truncate max-w-[90px]">
-                                                            {s.agenda}
-                                                        </span>
-                                                    )}
-                                                    {/* En móvil mostramos el nombre del cliente si está reservado */}
-                                                    {s.status === 'Booked' && (
-                                                        <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${shouldPaintDelivered(s)
-                                                            ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
-                                                            : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
-                                                            • {s.clientName || 'Cliente'}
-                                                        </span>
-                                                    )}
-                                                </div>
-
-                                                <div className="flex items-center gap-2">
-                                                    {s.status === 'Booked' && <User size={12} className="md:w-[10px] md:h-[10px]" />}
-
-                                                    {!readOnly && (
-                                                        <button
-                                                            onClick={(e) => { e.stopPropagation(); handleDelete(s.id); }}
-                                                            className="md:hidden md:group-hover:block text-red-400 hover:text-red-600 p-1"
-                                                        >
-                                                            <Trash2 size={14} className="md:w-[10px] md:h-[10px]" />
-                                                        </button>
-                                                    )}
-                                                </div>
-                                            </div>
-                                        ))}
+                                        {/* Agrupado por hora: si la hora tiene 1 sola plaza, bloque detallado;
+                                            si tiene varias (capacidad alta), una píldora compacta "HH–HH · X/N". */}
+                                        {groupSlotsByHour(slots).map(hora => {
+                                            if (hora.totalCount > 1) return renderHourPill(hora, new Date(currentDate.getFullYear(), currentDate.getMonth(), day));
+                                            if (hora.entries.length === 1) return renderMonthSlot(hora.entries[0]);
+                                            return null; // continuación de una avería ya mostrada en su hora de inicio
+                                        })}
                                     </div>
 
                                     {/* Botón rápido + */}
@@ -1694,7 +1714,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         {slots.length === 0 && (
                                             <p className={`text-xs italic ${isDark ? 'text-slate-600' : 'text-slate-300'}`}>Sin citas</p>
                                         )}
-                                        {collapseBookedBlocks(slots).map(renderChip)}
+                                        {groupSlotsByHour(slots).map(hora => {
+                                            if (hora.totalCount > 1) return renderHourPill(hora, d);
+                                            if (hora.entries.length === 1) return renderChip(hora.entries[0]);
+                                            return null; // continuación de una avería ya mostrada en su hora de inicio
+                                        })}
                                     </div>
                                     {!readOnly && (
                                         <button
