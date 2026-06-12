@@ -132,6 +132,7 @@ interface TallerConfig {
     hoursByWeekday: Record<string, number>;  // override de horas por día (opcional)
     holidays: string[];         // festivos 'YYYY-MM-DD' (capacidad 0)
     services: AgendaService[];  // catálogo global de tipos con minutos de taller
+    reservedIncidentHoursPerDay: number;  // colchón/día para walk-ins (incident=true)
 }
 
 // Días de la semana para el selector (etiqueta + valor getDay)
@@ -458,7 +459,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     };
 
     // ---- Taller: ajustes (capacidad + catálogo) ----
-    const TALLER_FALLBACK: TallerConfig = { mechanics: 1, hoursPerDay: 8, workingDays: [1, 2, 3, 4, 5], hoursByWeekday: {}, holidays: [], services: [] };
+    const TALLER_FALLBACK: TallerConfig = { mechanics: 1, hoursPerDay: 8, workingDays: [1, 2, 3, 4, 5], hoursByWeekday: {}, holidays: [], services: [], reservedIncidentHoursPerDay: 0 };
 
     const openTallerSettings = () => {
         const baseCfg = tallerConfig || TALLER_FALLBACK;
@@ -491,11 +492,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const handleSaveTaller = async () => {
         if (!draftTaller) return;
         // Limpiamos servicios sin nombre antes de guardar.
+        const mech = Math.max(1, Math.round(Number(draftTaller.mechanics) || 1));
+        const hpd = Math.max(1, Number(draftTaller.hoursPerDay) || 8);
         const cleaned: TallerConfig = {
             ...draftTaller,
-            mechanics: Math.max(1, Math.round(Number(draftTaller.mechanics) || 1)),
-            hoursPerDay: Math.max(1, Number(draftTaller.hoursPerDay) || 8),
+            mechanics: mech,
+            hoursPerDay: hpd,
             services: (draftTaller.services || []).filter(s => s.name && s.name.trim()).map(s => ({ ...s, name: s.name.trim(), durationMin: Math.max(0, Math.round(Number(s.durationMin) || 0)) })),
+            // Clamp el colchón a la capacidad total del día (mecanics × hoursPerDay).
+            reservedIncidentHoursPerDay: Math.max(0, Math.min(mech * hpd, Number(draftTaller.reservedIncidentHoursPerDay) || 0)),
         };
         setSavingTaller(true);
         try {
@@ -513,38 +518,65 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         finally { setSavingTaller(false); }
     };
 
-    // Calcula la carga del taller por día para los próximos `days` días.
-    // capacidad/día = mecánicos × horas (override por día de semana) × 60,
-    // 0 si no es día laborable o es festivo. Comprometido = suma de durationMin
-    // (horas de taller) de las citas Booked líderes de ese día.
+    // Clave de día en zona Madrid — debe coincidir EXACTAMENTE con madridDayKey
+    // del backend (server/src/index.ts). Sin esto, un agente con TZ del navegador
+    // distinta a Madrid (viajando, VPN, etc.) ve la carga atribuida al día
+    // equivocado, mientras el backend bloquea con la key Madrid → 409 sorpresa.
+    const tallerDayKey = (d: Date | string): string => {
+        const dt = typeof d === 'string' ? new Date(d) : d;
+        return dt.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+    };
+
+    // Calcula la carga del taller por día. Separa dos buckets:
+    //   - PREVIAS:  Booked con clientName!='' AND incident!=true → consumen
+    //               del bucket "previasMax = capacityMin − reservedMin" (lo
+    //               que Laura puede ofrecer a citas previas).
+    //   - WALK-INS: Booked con clientName!='' AND incident==true → consumen
+    //               del colchón reservedMin (luego del bucket previas si lo
+    //               agotan; eso visualmente se ve como sobrecarga).
+    // NOTA: NO filtra por selectedAccountId. El taller es físico — un mecánico
+    // ocupado con una cita de una cuenta no puede atender otra de cuenta distinta.
+    // Si filtraramos, el pre-check local divergería del check del backend (que
+    // tampoco filtra) → 409 sorpresa.
     const computeTallerLoad = (days: number = 30) => {
         const cfg = tallerConfig || TALLER_FALLBACK;
         const start = new Date(); start.setHours(0, 0, 0, 0);
-        // Agrupar minutos comprometidos por día (clave YYYY-MM-DD local).
-        const committedByDay: Record<string, number> = {};
+        const previaByDay: Record<string, number> = {};
+        const walkinByDay: Record<string, number> = {};
         const jobsByDay: Record<string, Appointment[]> = {};
         for (const a of appointments) {
             if (a.status !== 'Booked') continue;
-            if (!a.clientName || !a.clientName.trim()) continue; // líderes (descarta secundarios viejos)
+            if (!a.clientName || !a.clientName.trim()) continue;
             const mins = a.durationMin || 0;
             if (mins <= 0) continue;
-            if (selectedAccountId && a.originPhoneId && a.originPhoneId !== selectedAccountId) continue;
-            const key = toIsoDate(new Date(a.date));
-            committedByDay[key] = (committedByDay[key] || 0) + mins;
+            const key = tallerDayKey(a.date);
+            if (a.incident) walkinByDay[key] = (walkinByDay[key] || 0) + mins;
+            else previaByDay[key] = (previaByDay[key] || 0) + mins;
             (jobsByDay[key] = jobsByDay[key] || []).push(a);
         }
-        const out: { key: string; date: Date; dow: number; isWorking: boolean; capacityMin: number; committedMin: number; jobs: Appointment[] }[] = [];
+        const out: {
+            key: string; date: Date; dow: number; isWorking: boolean;
+            capacityMin: number; reservedMin: number; previasMax: number;
+            committedPrevia: number; committedWalkin: number; committedMin: number;
+            jobs: Appointment[];
+        }[] = [];
         for (let i = 0; i < days; i++) {
             const d = new Date(start); d.setDate(start.getDate() + i);
-            const key = toIsoDate(d);
+            const key = tallerDayKey(d);
             const dow = d.getDay();
             const isHoliday = (cfg.holidays || []).includes(key);
             const isWorking = (cfg.workingDays || []).includes(dow) && !isHoliday;
             const hoursForDay = (cfg.hoursByWeekday && cfg.hoursByWeekday[String(dow)] != null) ? Number(cfg.hoursByWeekday[String(dow)]) : cfg.hoursPerDay;
             const capacityMin = isWorking ? Math.max(0, cfg.mechanics * hoursForDay * 60) : 0;
+            const reservedMin = isWorking ? Math.min(capacityMin, Math.max(0, (cfg.reservedIncidentHoursPerDay || 0) * 60)) : 0;
+            const previasMax = Math.max(0, capacityMin - reservedMin);
+            const committedPrevia = previaByDay[key] || 0;
+            const committedWalkin = walkinByDay[key] || 0;
             out.push({
-                key, date: d, dow, isWorking, capacityMin,
-                committedMin: committedByDay[key] || 0,
+                key, date: d, dow, isWorking,
+                capacityMin, reservedMin, previasMax,
+                committedPrevia, committedWalkin,
+                committedMin: committedPrevia + committedWalkin,  // compat
                 jobs: (jobsByDay[key] || []).sort((x, y) => new Date(x.date).getTime() - new Date(y.date).getTime()),
             });
         }
@@ -801,35 +833,91 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // elegido. En cancelaciones (→ Available) no tiene sentido enviarlo.
         const isCreating = selectedAppt.status === 'Available' && editStatus === 'Booked';
         const isEditingBooked = selectedAppt.status === 'Booked' && editStatus === 'Booked';
+
+        // Pre-check local de capacidad del taller. Si esta cita dejaría el día
+        // sobrecargado (previas > previasMax para citas previas, o total >
+        // capacityMin para walk-ins), pedimos confirm al agente. Si acepta,
+        // marcamos forceOverride para que el backend ignore su propio check.
+        // El backend valida también (defensa en profundidad por race con otros
+        // usuarios) y devuelve 409 con detalles; en ese caso reintentamos con
+        // confirm de nuevo + forceOverride.
+        let forceOverride = false;
+        if ((isCreating || isEditingBooked) && editDurationMin > 0) {
+            const dayKey = tallerDayKey(selectedAppt.date);
+            const dayLoad = computeTallerLoad(90).find(d => d.key === dayKey);
+            if (dayLoad) {
+                let committedPrevia = dayLoad.committedPrevia;
+                let committedWalkin = dayLoad.committedWalkin;
+                // Descontar la cita actual si ya estaba Booked (estamos editándola).
+                if (selectedAppt.status === 'Booked' && (selectedAppt.durationMin || 0) > 0) {
+                    if (selectedAppt.incident) committedWalkin -= selectedAppt.durationMin || 0;
+                    else committedPrevia -= selectedAppt.durationMin || 0;
+                }
+                committedPrevia = Math.max(0, committedPrevia);
+                committedWalkin = Math.max(0, committedWalkin);
+                const exceeds = editIncident
+                    ? (committedPrevia + committedWalkin + editDurationMin > dayLoad.capacityMin)
+                    : (committedPrevia + editDurationMin > dayLoad.previasMax);
+                if (!dayLoad.isWorking || exceeds) {
+                    const reasonTxt = !dayLoad.isWorking
+                        ? `El taller está CERRADO ese día (capacidad 0h).`
+                        : editIncident
+                            ? `El taller quedaría sobrecargado: ${fmtHm(committedPrevia + committedWalkin + editDurationMin)} / ${fmtHm(dayLoad.capacityMin)} capacidad.`
+                            : `Quedarían más horas de citas previas (${fmtHm(committedPrevia + editDurationMin)}) que las disponibles (${fmtHm(dayLoad.previasMax)}), porque hay ${fmtHm(dayLoad.reservedMin)} reservadas para walk-ins.`;
+                    if (!window.confirm(`${reasonTxt}\n\n¿Forzar el guardado igualmente?`)) return;
+                    forceOverride = true;
+                }
+            }
+        }
+
+        const buildBody = (override: boolean) => ({
+            status: editStatus,
+            clientName: editName,
+            clientPhone: editPhone,
+            phonePrefix: editPrefix,
+            matricula: editMatricula,
+            marca: editMarca,
+            modelo: editModelo,
+            extra: editExtra,
+            notas: editNotas,
+            incident: editIncident,
+            service: isCreating
+                ? (editService || undefined)
+                : (isEditingBooked ? editService : undefined),
+            // Horas de taller (carga de mecánicos) de ESTA cita. Se envía
+            // siempre que la cita acabe en Booked, para respetar el ajuste
+            // manual del agente por encima del valor por defecto del tipo.
+            durationMin: (isCreating || isEditingBooked) ? editDurationMin : undefined,
+            actorUsername: getCurrentUsername(),
+            ...(override ? { forceOverride: true } : {}),
+        });
+
         try {
-            const res = await fetch(`${API_URL}/appointments/${selectedAppt.id}`, {
+            let res = await fetch(`${API_URL}/appointments/${selectedAppt.id}`, {
                 method: 'PUT',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    status: editStatus,
-                    clientName: editName,
-                    clientPhone: editPhone,
-                    phonePrefix: editPrefix,
-                    matricula: editMatricula,
-                    marca: editMarca,
-                    modelo: editModelo,
-                    extra: editExtra,
-                    notas: editNotas,
-                    incident: editIncident,
-                    service: isCreating
-                        ? (editService || undefined)
-                        : (isEditingBooked ? editService : undefined),
-                    // Horas de taller (carga de mecánicos) de ESTA cita. Se envía
-                    // siempre que la cita acabe en Booked, para respetar el ajuste
-                    // manual del agente por encima del valor por defecto del tipo.
-                    durationMin: (isCreating || isEditingBooked) ? editDurationMin : undefined,
-                    actorUsername: getCurrentUsername()
-                })
+                body: JSON.stringify(buildBody(forceOverride))
             });
+            // 409 CAPACITY_EXCEEDED: defensa en profundidad — otro usuario llenó
+            // el día entre nuestro pre-check local y la escritura en el server.
+            // Si el agente confirma, reintentamos con forceOverride.
+            if (res.status === 409) {
+                const err = await res.json().catch(() => ({} as any));
+                if (err.error === 'CAPACITY_EXCEEDED') {
+                    const msg = err.reason === 'closed'
+                        ? `El taller está cerrado ese día (festivo/no laborable).\n\n¿Forzar el guardado igualmente?`
+                        : err.reason === 'previas_full'
+                            ? `El taller acaba de llenarse: ${fmtHm(err.committedPrevia)} previas + ${fmtHm(err.requestedMin)} nuevas > ${fmtHm(err.previasMax)} máx (hay ${fmtHm(err.reservedMin)} reservadas para walk-ins).\n\n¿Forzar el guardado igualmente?`
+                            : `El taller acaba de llenarse: ${fmtHm(err.committedPrevia + err.committedWalkin + err.requestedMin)} totales > ${fmtHm(err.capacityMin)} capacidad.\n\n¿Forzar el guardado igualmente?`;
+                    if (!window.confirm(msg)) return;
+                    res = await fetch(`${API_URL}/appointments/${selectedAppt.id}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(buildBody(true))
+                    });
+                }
+            }
             if (!res.ok) {
-                // Mostrar el mensaje específico que devuelve el backend
-                // (ej. "No hay slots consecutivos suficientes para Avería...")
-                // en lugar de un genérico "Error guardando".
                 const err = await res.json().catch(() => ({}));
                 alert(err.error || 'Error guardando');
                 return;
@@ -2403,6 +2491,19 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         </p>
 
                                         <div>
+                                            <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>
+                                                Horas reservadas para sin-cita (walk-ins / incidencias)
+                                            </label>
+                                            <input type="number" min={0} step={0.5} max={(d.mechanics || 1) * (d.hoursPerDay || 8)}
+                                                value={d.reservedIncidentHoursPerDay ?? 0}
+                                                onChange={e => patchDraftTaller({ reservedIncidentHoursPerDay: Math.max(0, Math.min((d.mechanics || 1) * (d.hoursPerDay || 8), parseFloat(e.target.value) || 0)) })}
+                                                className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`} />
+                                            <p className={`text-[11px] mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                Colchón diario para clientes que llegan al taller sin haber pedido cita previa. Esas horas <strong>NO se ofrecen al bot</strong> ni desde el calendario para citas previas: quedan reservadas para incidencias del mismo día. Disponible para reservas previas: <strong>{fmtHm(Math.max(0, ((d.mechanics || 1) * (d.hoursPerDay || 8) - (d.reservedIncidentHoursPerDay || 0)) * 60))}</strong>.
+                                            </p>
+                                        </div>
+
+                                        <div>
                                             <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Días laborables del taller</label>
                                             <div className="flex gap-1.5 flex-wrap">
                                                 {WEEK_DAYS.map(wd => {
@@ -2463,28 +2564,61 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         Horas de mecánico comprometidas vs. capacidad por día. Uso interno — la recepción no se ve afectada.
                                     </p>
                                     {computeTallerLoad(30).map(day => {
-                                        const pct = day.capacityMin > 0 ? Math.round((day.committedMin / day.capacityMin) * 100) : (day.committedMin > 0 ? 999 : 0);
-                                        const over = day.capacityMin > 0 && day.committedMin > day.capacityMin;
-                                        const barColor = !day.isWorking ? 'bg-slate-400' : over ? 'bg-red-500' : pct >= 85 ? 'bg-amber-500' : 'bg-emerald-500';
                                         const dayName = day.date.toLocaleDateString('es-ES', { weekday: 'short', day: 'numeric', month: 'short' });
                                         const expanded = expandedTallerDay === day.key;
-                                        const freeMin = Math.max(0, day.capacityMin - day.committedMin);
-                                        const widthPct = Math.min(100, day.capacityMin > 0 ? (day.committedMin / day.capacityMin) * 100 : (day.committedMin > 0 ? 100 : 0));
+                                        // Estados:
+                                        //  - over = sobrecarga TOTAL (previas+walkins > capacity)  → barra principal roja
+                                        //  - previasFull = previas saturan su bucket (committedPrevia > previasMax)  → ámbar
+                                        const totalCommitted = day.committedPrevia + day.committedWalkin;
+                                        const over = day.isWorking && day.capacityMin > 0 && totalCommitted > day.capacityMin;
+                                        const previasFull = day.isWorking && day.previasMax > 0 && day.committedPrevia > day.previasMax;
+                                        const previasNear = day.isWorking && day.previasMax > 0 && (day.committedPrevia / day.previasMax) >= 0.85;
+                                        const previaColor = !day.isWorking ? 'bg-slate-400'
+                                            : over ? 'bg-red-500'
+                                            : previasFull ? 'bg-amber-500'
+                                            : previasNear ? 'bg-amber-400'
+                                            : 'bg-emerald-500';
+                                        // Segmentos de la barra (en % sobre el total visualizado):
+                                        //   1) Previas (color por estado)
+                                        //   2) Walk-ins ya hechas (ámbar)
+                                        //   3) Reserva restante para walk-ins futuras (ámbar/rayado pálido)
+                                        // Si hay sobrecarga (totalCommitted > capacityMin), ensanchamos el
+                                        // denominador para que los segmentos comprometidos quepan; y la
+                                        // reserva restante se anula porque las previas se han 'comido' su zona.
+                                        const total = Math.max(day.capacityMin, totalCommitted);
+                                        const previaPct = total > 0 ? (day.committedPrevia / total) * 100 : 0;
+                                        const walkinPct = total > 0 ? (day.committedWalkin / total) * 100 : 0;
+                                        const reservedRemainingMin = over ? 0 : Math.max(0, Math.min(day.reservedMin - day.committedWalkin, day.capacityMin - totalCommitted));
+                                        const reservedRemainingPct = total > 0 ? (reservedRemainingMin / total) * 100 : 0;
+                                        const freeForPreviasMin = Math.max(0, day.previasMax - day.committedPrevia);
                                         return (
                                             <div key={day.key} className={`rounded-xl border p-2.5 ${isDark ? 'border-white/5 bg-slate-800/30' : 'border-slate-100 bg-white'}`}>
                                                 <button onClick={() => setExpandedTallerDay(expanded ? null : day.key)} className="w-full text-left">
                                                     <div className="flex items-center justify-between mb-1">
                                                         <span className={`text-sm font-bold capitalize ${isDark ? 'text-white' : 'text-slate-800'}`}>{dayName}</span>
-                                                        <span className={`text-xs font-semibold ${over ? 'text-red-500' : (isDark ? 'text-slate-300' : 'text-slate-600')}`}>
-                                                            {!day.isWorking ? (day.committedMin > 0 ? `${fmtHm(day.committedMin)} · cerrado` : 'Cerrado') : `${fmtHm(day.committedMin)} / ${fmtHm(day.capacityMin)}`}
+                                                        <span className={`text-xs font-semibold ${over ? 'text-red-500' : previasFull ? 'text-amber-500' : (isDark ? 'text-slate-300' : 'text-slate-600')}`}>
+                                                            {!day.isWorking
+                                                                ? (totalCommitted > 0 ? `${fmtHm(totalCommitted)} · cerrado` : 'Cerrado')
+                                                                : day.reservedMin > 0
+                                                                    ? `${fmtHm(day.committedPrevia)} / ${fmtHm(day.previasMax)} previas`
+                                                                    : `${fmtHm(totalCommitted)} / ${fmtHm(day.capacityMin)}`}
                                                         </span>
                                                     </div>
-                                                    <div className={`h-2.5 rounded-full overflow-hidden ${isDark ? 'bg-slate-700' : 'bg-slate-200'}`}>
-                                                        <div className={`h-full ${barColor} transition-all`} style={{ width: `${widthPct}%` }} />
+                                                    <div className={`h-2.5 rounded-full overflow-hidden flex ${isDark ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                                                        <div className={`h-full ${previaColor} transition-all`} style={{ width: `${previaPct}%` }} title={`Citas previas: ${fmtHm(day.committedPrevia)}`} />
+                                                        {walkinPct > 0 && <div className="h-full bg-orange-500 transition-all" style={{ width: `${walkinPct}%` }} title={`Walk-ins: ${fmtHm(day.committedWalkin)}`} />}
+                                                        {reservedRemainingPct > 0 && <div className="h-full bg-orange-200/70 transition-all" style={{ width: `${reservedRemainingPct}%` }} title={`Reserva restante para walk-ins: ${fmtHm(reservedRemainingMin)}`} />}
                                                     </div>
                                                     <div className="flex items-center justify-between mt-1">
                                                         <span className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-                                                            {day.isWorking ? (over ? `Sobrecarga +${fmtHm(day.committedMin - day.capacityMin)}` : `${fmtHm(freeMin)} libres`) : '—'}
+                                                            {!day.isWorking
+                                                                ? '—'
+                                                                : over
+                                                                    ? `Sobrecarga +${fmtHm(totalCommitted - day.capacityMin)}`
+                                                                    : previasFull
+                                                                        ? `Previas llenas · ${fmtHm(reservedRemainingMin)} colchón`
+                                                                        : `${fmtHm(freeForPreviasMin)} libres para previas`}
+                                                            {day.reservedMin > 0 && day.isWorking ? ` · ${fmtHm(day.committedWalkin)}/${fmtHm(day.reservedMin)} walk-ins` : ''}
                                                             {day.jobs.length > 0 ? ` · ${day.jobs.length} trabajo${day.jobs.length === 1 ? '' : 's'}` : ''}
                                                         </span>
                                                         {day.jobs.length > 0 && <ChevronDown size={14} className={`text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />}

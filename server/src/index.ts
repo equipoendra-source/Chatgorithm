@@ -1915,6 +1915,7 @@ interface TallerConfig {
     hoursByWeekday: Record<string, number>;  // override de horas por día de la semana (opcional)
     holidays: string[];         // festivos 'YYYY-MM-DD' (capacidad 0)
     services: AgendaService[];  // catálogo global de tipos con sus minutos de taller
+    reservedIncidentHoursPerDay: number;  // colchón/día reservado para walk-ins (Incident=true)
 }
 
 const TALLER_DEFAULTS: Omit<TallerConfig, 'services'> = {
@@ -1923,6 +1924,7 @@ const TALLER_DEFAULTS: Omit<TallerConfig, 'services'> = {
     workingDays: [1, 2, 3, 4, 5],
     hoursByWeekday: {},
     holidays: [],
+    reservedIncidentHoursPerDay: 0,
 };
 
 // Une los servicios de todas las agendas (deduplicados por nombre canónico),
@@ -1952,15 +1954,23 @@ async function getTallerConfig(): Promise<TallerConfig> {
             console.error('[Taller] Error leyendo taller_config:', e);
         }
     }
+    const mechanics = (Number.isFinite(Number(raw.mechanics)) && Number(raw.mechanics) > 0) ? Math.round(Number(raw.mechanics)) : TALLER_DEFAULTS.mechanics;
+    const hoursPerDay = (Number.isFinite(Number(raw.hoursPerDay)) && Number(raw.hoursPerDay) > 0) ? Number(raw.hoursPerDay) : TALLER_DEFAULTS.hoursPerDay;
+    // Clamp el colchón a la capacidad total del día (mecánicos × horas) para que
+    // no pueda dejar previasMax en negativo si el usuario baja luego mechanics.
+    const dailyCapacityHours = mechanics * hoursPerDay;
     const cfg: TallerConfig = {
-        mechanics: (Number.isFinite(Number(raw.mechanics)) && Number(raw.mechanics) > 0) ? Math.round(Number(raw.mechanics)) : TALLER_DEFAULTS.mechanics,
-        hoursPerDay: (Number.isFinite(Number(raw.hoursPerDay)) && Number(raw.hoursPerDay) > 0) ? Number(raw.hoursPerDay) : TALLER_DEFAULTS.hoursPerDay,
+        mechanics,
+        hoursPerDay,
         workingDays: Array.isArray(raw.workingDays) ? raw.workingDays.map((d: any) => Number(d)).filter((d: number) => d >= 0 && d <= 6) : [...TALLER_DEFAULTS.workingDays],
         hoursByWeekday: (raw.hoursByWeekday && typeof raw.hoursByWeekday === 'object' && !Array.isArray(raw.hoursByWeekday)) ? raw.hoursByWeekday : {},
         holidays: Array.isArray(raw.holidays) ? raw.holidays.map((d: any) => String(d)).filter(Boolean) : [],
         services: Array.isArray(raw.services)
             ? raw.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any) => ({ id: String(s.id || s.name), name: String(s.name).trim(), durationMin: sanitizeMinutes(s.durationMin, 60) }))
             : [],
+        reservedIncidentHoursPerDay: (Number.isFinite(Number(raw.reservedIncidentHoursPerDay)) && Number(raw.reservedIncidentHoursPerDay) >= 0)
+            ? Math.min(dailyCapacityHours, Number(raw.reservedIncidentHoursPerDay))
+            : TALLER_DEFAULTS.reservedIncidentHoursPerDay,
     };
     if (cfg.services.length === 0) {
         try { cfg.services = unionAgendaServices(await getAgendas()); } catch { /* sin agendas → catálogo vacío */ }
@@ -1983,6 +1993,128 @@ async function saveTallerConfig(cfg: TallerConfig): Promise<void> {
     } else {
         await base('BotSettings').create([{ fields: { "Setting": "taller_config", "Value": value } }]);
     }
+}
+
+// --- HELPERS DE CAPACIDAD DEL TALLER ---
+// Buckets por día:
+//   - PREVIAS: Booked con ClientName!='' AND Incident!=true → consumen del bucket
+//     "capacityMin − reservedIncidentMin" (lo que Laura puede ofrecer).
+//   - WALK-INS: Booked con ClientName!='' AND Incident==true → consumen del
+//     colchón "reservedIncidentMin", pero si lo agotan se cuentan contra el
+//     total (capacityMin) sin tocar el bucket previas estricto.
+
+// Fecha YYYY-MM-DD en zona Madrid (coincide con frontend computeTallerLoad).
+function madridDayKey(d: Date | string): string {
+    const dt = typeof d === 'string' ? new Date(d) : d;
+    return dt.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+}
+
+// Capacidad total del taller en MINUTOS para un día (0 si cerrado).
+function capacityTallerMinForDay(cfg: TallerConfig, dateKey: string): number {
+    if ((cfg.holidays || []).includes(dateKey)) return 0;
+    const parts = dateKey.split('-').map(Number);
+    if (parts.length !== 3 || parts.some(n => !Number.isFinite(n))) return 0;
+    const [y, m, day] = parts;
+    const dt = new Date(y, m - 1, day);
+    const dow = dt.getDay();
+    if (!(cfg.workingDays || []).includes(dow)) return 0;
+    const hoursForDay = (cfg.hoursByWeekday && cfg.hoursByWeekday[String(dow)] != null)
+        ? Number(cfg.hoursByWeekday[String(dow)])
+        : cfg.hoursPerDay;
+    return Math.max(0, cfg.mechanics * hoursForDay * 60);
+}
+
+// Reservado en MINUTOS para walk-ins (colchón) para un día. Nunca > capacityMin.
+function reservedIncidentMinForDay(cfg: TallerConfig, dateKey: string): number {
+    const cap = capacityTallerMinForDay(cfg, dateKey);
+    if (cap <= 0) return 0;
+    return Math.min(cap, Math.max(0, (cfg.reservedIncidentHoursPerDay || 0) * 60));
+}
+
+// Suma de DurationMin de Booked líderes agrupados por día (Madrid), separando
+// walk-in (Incident=true) de previa. excludeId descuenta una cita existente
+// (necesario al EDITAR para no contar la cita actual dos veces).
+async function getCommittedTallerByDay(opts: { excludeId?: string } = {}): Promise<Record<string, { previa: number; walkin: number }>> {
+    if (!base) return {};
+    try {
+        // El filterByFormula usa una ventana UTC amplia (24h antes) para no perder
+        // citas de "hoy-Madrid" que en ISO caen en "ayer-UTC" cerca de medianoche.
+        // El filtro estricto por fecha lo hacemos en JS abajo comparando madridDayKey.
+        const cutoff = new Date(Date.now() - 24 * 3600 * 1000).toISOString().split('T')[0];
+        const records = await base('Appointments').select({
+            filterByFormula: `AND({Status}='Booked', {Date} >= '${cutoff}')`,
+            sort: [{ field: 'Date', direction: 'asc' }]
+        }).all();
+        const todayMadrid = madridDayKey(new Date());
+        const out: Record<string, { previa: number; walkin: number }> = {};
+        for (const r of records) {
+            if (opts.excludeId && r.id === opts.excludeId) continue;
+            const name = ((r.get('ClientName') as string) || '').trim();
+            if (!name) continue;  // secundarios viejos del modelo multi-hueco
+            const dur = Number(r.get('DurationMin') || 0);
+            if (dur <= 0) continue;
+            const dateRaw = r.get('Date') as string;
+            if (!dateRaw) continue;
+            const key = madridDayKey(dateRaw);
+            if (key < todayMadrid) continue;  // hoy-Madrid o futuro
+            const bucket = out[key] || (out[key] = { previa: 0, walkin: 0 });
+            if (r.get('Incident')) bucket.walkin += dur;
+            else bucket.previa += dur;
+        }
+        return out;
+    } catch (e: any) {
+        console.warn('[Taller] Error agregando committed por día:', e?.message);
+        return {};
+    }
+}
+
+// Check de capacidad para añadir/editar una cita.
+//   - PREVIA  (isIncident=false): cabe si committedPrevia + nueva <= previasMax
+//   - WALK-IN (isIncident=true): cabe si committedPrevia + committedWalkin + nueva <= capacityMin
+// Devuelve { ok: true } o detalles del exceso. excludeId descuenta una cita existente.
+async function checkTallerCapacity(opts: {
+    dateKey: string;
+    durationMin: number;
+    isIncident: boolean;
+    excludeId?: string;
+}): Promise<
+    | { ok: true }
+    | {
+        ok: false;
+        reason: 'closed' | 'previas_full' | 'capacity_full';
+        capacityMin: number;
+        reservedMin: number;
+        previasMax: number;
+        committedPrevia: number;
+        committedWalkin: number;
+        requestedMin: number;
+    }
+> {
+    const cfg = await getTallerConfig();
+    const capacityMin = capacityTallerMinForDay(cfg, opts.dateKey);
+    const reservedMin = reservedIncidentMinForDay(cfg, opts.dateKey);
+    const previasMax = Math.max(0, capacityMin - reservedMin);
+    const committed = await getCommittedTallerByDay({ excludeId: opts.excludeId });
+    const day = committed[opts.dateKey] || { previa: 0, walkin: 0 };
+    const baseInfo = {
+        capacityMin,
+        reservedMin,
+        previasMax,
+        committedPrevia: day.previa,
+        committedWalkin: day.walkin,
+        requestedMin: opts.durationMin,
+    };
+    if (capacityMin <= 0) return { ok: false, reason: 'closed', ...baseInfo };
+    if (opts.isIncident) {
+        if (day.previa + day.walkin + opts.durationMin > capacityMin) {
+            return { ok: false, reason: 'capacity_full', ...baseInfo };
+        }
+        return { ok: true };
+    }
+    if (day.previa + opts.durationMin > previasMax) {
+        return { ok: false, reason: 'previas_full', ...baseInfo };
+    }
+    return { ok: true };
 }
 
 // --- MANTENIMIENTO AUTOMÁTICO AGENDA ---
@@ -3643,21 +3775,29 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         // horas de taller (DurationMin); ya NO multiplica huecos. Por eso slotsNeeded=1.
         const slotsNeeded = 1;
         let serviceLabel = '';
+        let tallerMin = 0;
+        // Matching tolerante contra el catálogo GLOBAL del taller (avería,
+        // revisión, …), independiente de la agenda de recepción. Si el catálogo
+        // tiene servicios configurados, EXIGIMOS conocer el tipo antes de mostrar
+        // huecos — así filtramos los días donde el taller ya esté lleno para
+        // ese tipo concreto (no ofrecemos un día con hueco de recepción pero
+        // sin horas de mecánico disponibles).
+        const catalog = await getServiceCatalog();
         if (serviceKey) {
-            // Matching tolerante contra el catálogo GLOBAL del taller (avería,
-            // revisión, …), independiente de la agenda de recepción. Si el bot
-            // pide un tipo que no existe, devolvemos error para que use uno válido.
-            const catalog = await getServiceCatalog();
             const svc = findServiceLoose(catalog, serviceKey);
             if (svc) {
                 if (svc.name !== serviceKey.trim()) {
                     console.warn(`⚠️ [Slots] Laura pasó servicio "${serviceKey}" pero en config está "${svc.name}". Matcheado por normalización.`);
                 }
                 serviceLabel = svc.name;
+                tallerMin = svc.durationMin;
             } else if (catalog.length > 0) {
                 const available = catalog.map(s => `"${s.name}"`).join(', ');
                 return `⚠️ El servicio "${serviceKey}" no está configurado. Servicios disponibles: ${available}. Pregúntale al cliente cuál de estos quiere y vuelve a llamar a get_available_appointments con el nombre EXACTO.`;
             }
+        } else if (catalog.length > 0) {
+            const available = catalog.map(s => `"${s.name}"`).join(', ');
+            return `⚠️ FALTA EL TIPO DE SERVICIO. Antes de mostrar horarios necesito saber qué tipo de cita quiere el cliente (${available}). Pregúntaselo, y cuando lo sepas vuelve a llamar a get_available_appointments con el parámetro 'service' relleno con el nombre EXACTO. Solo así puedo descartar días donde el taller ya está lleno.`;
         }
 
         const todayStr = new Date().toISOString().split('T')[0];
@@ -3669,7 +3809,7 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         }).all();
 
         const now = new Date();
-        const filtered = records.filter(r => {
+        let filtered = records.filter(r => {
             const d = new Date(r.get('Date') as string);
             if (d <= now) return false;
             if (agenda && ((r.get('Agenda') as string) || '') !== agenda) return false;
@@ -3679,6 +3819,31 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
             }
             return true;
         });
+
+        // FILTRO POR CAPACIDAD DEL TALLER. Solo aplica si conocemos el tipo
+        // (tallerMin > 0): descartamos días donde committedPrevia + tallerMin
+        // superaría previasMax (capacidad − colchón walk-ins). Laura SIEMPRE
+        // reserva PREVIAS — el colchón es para incidencias que llegan a mano
+        // el mismo día desde el calendario, no las gestiona ella.
+        if (tallerMin > 0) {
+            const cfg = await getTallerConfig();
+            const committed = await getCommittedTallerByDay({});
+            const blockedDays = new Set<string>();
+            const candidateDays = new Set<string>();
+            for (const r of filtered) candidateDays.add(madridDayKey(new Date(r.get('Date') as string)));
+            for (const dayKey of candidateDays) {
+                const capacityMin = capacityTallerMinForDay(cfg, dayKey);
+                const reservedMin = reservedIncidentMinForDay(cfg, dayKey);
+                const previasMax = Math.max(0, capacityMin - reservedMin);
+                const dayCommitted = committed[dayKey] || { previa: 0, walkin: 0 };
+                if (dayCommitted.previa + tallerMin > previasMax) blockedDays.add(dayKey);
+            }
+            if (blockedDays.size > 0) {
+                const before = filtered.length;
+                filtered = filtered.filter(r => !blockedDays.has(madridDayKey(new Date(r.get('Date') as string))));
+                console.log(`[Slots] Taller lleno en ${blockedDays.size} día(s) para "${serviceLabel}" (${tallerMin}min). Filtrados ${before - filtered.length}/${before} huecos.`);
+            }
+        }
 
         // --- Buscar grupos de slots consecutivos suficientes para el servicio ---
         // Un grupo es válido si hay `slotsNeeded` slots seguidos separados exactamente por `slotGranularity` min.
@@ -3765,10 +3930,13 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
     } catch (error: any) { return "Error técnico al leer la agenda."; }
 }
 
-// Obtener días con citas disponibles (para flujo de 2 pasos)
-async function getAvailableDays(agendaName?: string) {
+// Obtener días con citas disponibles (para flujo de 2 pasos).
+// Acepta `serviceName` para filtrar también por capacidad del taller (un día con
+// hueco de recepción puede tener el taller ya saturado para ese tipo de servicio).
+async function getAvailableDays(agendaName?: string, serviceName?: string) {
     if (!base) return "Error DB";
     const agenda = (agendaName || '').trim();
+    const serviceKey = (serviceName || '').trim();
     try {
         // GUARDA MULTI-AGENDA: si hay varias agendas y no se ha indicado cuál,
         // NO mostramos días (saldrían días de agendas distintas mezclados).
@@ -3780,12 +3948,50 @@ async function getAvailableDays(agendaName?: string) {
             return `⚠️ AGENDA NO ESPECIFICADA. Este negocio tiene ${allAgendas.length} agendas/departamentos distintos: ${names}. PREGÚNTALE al cliente por cuál de esas agendas/departamentos quiere la cita antes de mostrar días. Luego vuelve a llamar a get_available_days con el parámetro 'agenda' relleno con el nombre EXACTO.`;
         }
 
+        // Validar/exigir tipo de servicio (igual que en getAvailableAppointments).
+        // Si el catálogo del taller tiene tipos configurados, exigimos saberlo
+        // antes de mostrar días — así filtramos los que tengan el taller lleno.
+        const catalog = await getServiceCatalog();
+        let tallerMin = 0;
+        if (serviceKey) {
+            const svc = findServiceLoose(catalog, serviceKey);
+            if (svc) {
+                tallerMin = svc.durationMin;
+            } else if (catalog.length > 0) {
+                const available = catalog.map(s => `"${s.name}"`).join(', ');
+                return `⚠️ El servicio "${serviceKey}" no está configurado. Servicios disponibles: ${available}. Pregúntale al cliente cuál de estos quiere y vuelve a llamar a get_available_days con el nombre EXACTO.`;
+            }
+        } else if (catalog.length > 0) {
+            const available = catalog.map(s => `"${s.name}"`).join(', ');
+            return `⚠️ FALTA EL TIPO DE SERVICIO. Antes de mostrar días necesito saber qué tipo de cita quiere el cliente (${available}). Pregúntaselo, y cuando lo sepas vuelve a llamar a get_available_days con el parámetro 'service' relleno con el nombre EXACTO.`;
+        }
+
         const todayStr = new Date().toISOString().split('T')[0];
         const records = await base('Appointments').select({
             filterByFormula: `AND({Status} = 'Available', {Date} >= '${todayStr}')`,
             sort: [{ field: "Date", direction: "asc" }],
             maxRecords: 500
         }).all();
+
+        // Pre-cómputo de carga del taller por día (si hay tipo).
+        let blockedDays = new Set<string>();
+        if (tallerMin > 0) {
+            const cfg = await getTallerConfig();
+            const committed = await getCommittedTallerByDay({});
+            // Calculamos blockedDays sobre TODOS los días candidatos del fetch.
+            const candidateDays = new Set<string>();
+            for (const r of records) {
+                const dRaw = r.get('Date') as string;
+                if (dRaw) candidateDays.add(madridDayKey(dRaw));
+            }
+            for (const dayKey of candidateDays) {
+                const capacityMin = capacityTallerMinForDay(cfg, dayKey);
+                const reservedMin = reservedIncidentMinForDay(cfg, dayKey);
+                const previasMax = Math.max(0, capacityMin - reservedMin);
+                const dayCommitted = committed[dayKey] || { previa: 0, walkin: 0 };
+                if (dayCommitted.previa + tallerMin > previasMax) blockedDays.add(dayKey);
+            }
+        }
 
         const now = new Date();
         const uniqueDays = new Map<string, { dateStr: string, dayName: string }>();
@@ -3798,6 +4004,7 @@ async function getAvailableDays(agendaName?: string) {
 
             // Formato YYYY-MM-DD para identificar días únicos
             const dateKey = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+            if (blockedDays.has(dateKey)) return;  // taller lleno
 
             if (!uniqueDays.has(dateKey)) {
                 const dayName = d.toLocaleDateString('es-ES', {
@@ -3811,7 +4018,7 @@ async function getAvailableDays(agendaName?: string) {
         });
 
         if (uniqueDays.size === 0) {
-            return `No hay días con citas disponibles${agenda ? ` en la agenda "${agenda}"` : ''} en este momento.`;
+            return `No hay días con citas disponibles${agenda ? ` en la agenda "${agenda}"` : ''}${tallerMin > 0 ? ` para "${serviceKey}" (el taller está lleno los próximos días)` : ''} en este momento.`;
         }
 
         // Limitar a los próximos 7 días con disponibilidad
@@ -3920,14 +4127,43 @@ async function bookAppointment(optionIndex: number, clientPhone: string, clientN
                         if (svc.name !== service.trim()) {
                             console.warn(`⚠️ [Book] Servicio "${service}" normalizado a "${svc.name}" (canónico del catálogo).`);
                         }
+                    } else if (catalog.length > 0) {
+                        // Catálogo configurado pero el bot pasa un tipo desconocido — NO reservar.
+                        // Sin este guard la cita quedaría con DurationMin=0 y se saltaría el
+                        // check de capacidad de taller (paralelo al guard de getAvailableAppointments).
+                        const available = catalog.map(s => `"${s.name}"`).join(', ');
+                        console.warn(`⚠️ [Book] Servicio "${service}" no existe en el catálogo (${available}). Aborto.`);
+                        return `❌ El servicio "${service}" no está configurado. Tipos disponibles: ${available}. Pregúntale al cliente cuál de estos quiere y vuelve a llamar a book_appointment con el nombre EXACTO.`;
                     } else {
-                        console.warn(`⚠️ [Book] Servicio "${service}" no existe en el catálogo. Se guarda tal cual, sin horas de taller.`);
+                        console.warn(`⚠️ [Book] Servicio "${service}" no existe pero catálogo vacío — se guarda tal cual.`);
                     }
                 } catch (e: any) {
                     console.warn(`⚠️ [Book] No se pudo resolver el servicio: ${e.message}`);
                 }
             }
             const durationMin = tallerMin;  // horas de taller (minutos), NO nº de huecos
+
+            // CHECK DE CAPACIDAD DENTRO DEL LOCK. Otro cliente puede haber
+            // reservado un slot DISTINTO del mismo día mientras conversábamos
+            // (locks son por slot, no por día) y dejado el taller lleno.
+            // Laura SIEMPRE crea PREVIAS (isIncident=false) — el colchón de
+            // walk-ins es para citas a mano del mismo día desde el calendario.
+            // realId va como excludeId por defensa (no debería contar, este
+            // slot aún está Available, pero por si acaso).
+            if (durationMin > 0) {
+                const dateKey = madridDayKey(dateVal);
+                const cap = await checkTallerCapacity({
+                    dateKey,
+                    durationMin,
+                    isIncident: false,
+                    excludeId: realId,
+                });
+                if (!cap.ok) {
+                    console.warn(`📅 [Book] Taller lleno ${dateKey}: previa ${cap.committedPrevia}+${durationMin}min > ${cap.previasMax}min máx (capacidad ${cap.capacityMin}, reserva ${cap.reservedMin}). Aborto reserva.`);
+                    metrics.appointmentRaceLosses = (metrics.appointmentRaceLosses || 0) + 1;
+                    return `❌ Lo siento, ese día el taller acaba de quedarse sin horas disponibles para ${canonicalService || 'ese servicio'}. ¿Quieres que mire otro día?`;
+                }
+            }
 
             console.log(`📅 [Book] Cita en 1 hueco de recepción${canonicalService ? ` · servicio "${canonicalService}" → ${tallerMin}min de taller` : ''}`);
 
@@ -5141,7 +5377,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                 ],
                 tools: [{
                     functionDeclarations: [
-                        { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date. If the business has multiple agendas/service lines, pass the `agenda` parameter with the exact agenda name.", parameters: { type: SchemaType.OBJECT, properties: { agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line to filter slots. Only pass it if the business has multiple agendas; leave empty otherwise." } }, required: [] } },
+                        { name: "get_available_days", description: "Get the days of the week that have available appointment slots. Call this first when user asks for an appointment without specifying a date. If the business has multiple agendas/service lines, pass the `agenda` parameter. If service types are configured (catalog), you MUST also pass `service` with the exact service name — otherwise the tool will refuse and ask you to clarify the type with the client first. The day list is then filtered to exclude days where the workshop is already full for that service.", parameters: { type: SchemaType.OBJECT, properties: { agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line to filter slots. Only pass it if the business has multiple agendas; leave empty otherwise." }, service: { type: SchemaType.STRING, description: "Exact name of the service type the client wants (e.g. 'Avería', 'Revisión'). REQUIRED if services are configured; leave empty otherwise." } }, required: [] } },
                         { name: "get_available_appointments", description: "Search for available appointment slots for a specific date. Call this AFTER user selects a day. Pass `service` (exact service name) if the client mentioned a specific service type — this ensures only slots with enough consecutive availability are shown.", parameters: { type: SchemaType.OBJECT, properties: { date: { type: SchemaType.STRING, description: "Date in YYYY-MM-DD format (e.g. 2026-01-15)." }, agenda: { type: SchemaType.STRING, description: "Exact name of the agenda/service line. Only pass it if the business has multiple agendas; leave empty otherwise." }, service: { type: SchemaType.STRING, description: "Exact name of the service type the client wants (e.g. 'Avería', 'Revisión'). Leave empty if not specified or no services configured." } }, required: ["date"] } },
                         { name: "get_client_vehicles", description: "Get the vehicles already registered for this client. Call this when the client wants to book an appointment, BEFORE asking for the vehicle data — the client may already have one or more vehicles registered. A client can have multiple vehicles.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         {
@@ -5200,7 +5436,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                 const args = call.args as any;
                 let toolResult = "";
 
-                if (call.name === "get_available_days") toolResult = await getAvailableDays(args.agenda);
+                if (call.name === "get_available_days") toolResult = await getAvailableDays(args.agenda, args.service);
                 else if (call.name === "get_available_appointments") toolResult = await getAvailableAppointments(clean, originPhoneId, args.date, args.agenda, args.service);
                 else if (call.name === "get_client_vehicles") toolResult = await getClientVehicles(clean);
                 else if (call.name === "book_appointment") toolResult = await bookAppointment(
@@ -6201,6 +6437,7 @@ app.put('/api/appointments/:id', async (req, res) => {
         let preUpdateAgenda = '';
         let preUpdateDurationMin = 0;   // para liberar los secundarios del bloque al cancelar
         let preUpdateServiceType = '';  // para detectar cambio de tipo de servicio en edición
+        let preUpdateIncident = false;  // para reusar como default si el body no lo trae
         try {
             const before = await base('Appointments').find(req.params.id);
             preUpdateStatus = (before.get('Status') as string) || '';
@@ -6210,7 +6447,71 @@ app.put('/api/appointments/:id', async (req, res) => {
             preUpdateAgenda = (before.get('Agenda') as string) || '';
             preUpdateDurationMin = Number(before.get('DurationMin') || 0);
             preUpdateServiceType = (before.get('ServiceType') as string) || '';
+            preUpdateIncident = !!before.get('Incident');
         } catch (_) { /* no bloqueamos si no se puede leer */ }
+
+        // CHECK DE CAPACIDAD DEL TALLER (único, antes de cualquier rama).
+        // Si esta operación va a dejar la cita con DurationMin>0 en Booked, validamos
+        // que cabe en el taller del día. El frontend puede pasar forceOverride=true
+        // (el agente confirmó tras ver el warning del confirm) para sobrescribir.
+        // Determinamos finalDurationMin a partir de (en orden):
+        //   1) req.body.durationMin si vino (edición manual de horas)
+        //   2) si vino req.body.service, las horas del tipo en el catálogo
+        //   3) preUpdateDurationMin (no cambia)
+        const isManualOverride = req.body.forceOverride === true;
+        const finalStatus = (req.body.status as string) || preUpdateStatus;
+        let finalDurationMin = preUpdateDurationMin;
+        if (req.body.durationMin !== undefined) {
+            finalDurationMin = Math.max(0, Math.round(Number(req.body.durationMin) || 0));
+        } else if (req.body.service !== undefined) {
+            const svcStr = String(req.body.service || '').trim();
+            if (svcStr === '') {
+                finalDurationMin = 0;
+            } else {
+                try {
+                    const catalog = await getServiceCatalog();
+                    const svc = findServiceLoose(catalog, svcStr);
+                    if (svc) finalDurationMin = svc.durationMin;
+                } catch { /* ignoramos: usa preUpdate */ }
+            }
+        }
+        const finalDateISO = (req.body.date as string) || preUpdateDate;
+        const finalIncident = (req.body.incident !== undefined) ? !!req.body.incident : preUpdateIncident;
+        // Solo chequear si la operación CAMBIA algo relevante para la capacidad
+        // del taller. Editar solo clientName/matricula/notas/etc. en una cita ya
+        // Booked NO debe disparar 409 (la carga del día no cambia). Detectamos:
+        //   - Reserva nueva (Available → Booked)
+        //   - Cambio de durationMin (manual o por cambio de service)
+        //   - Cambio de fecha (mueve la carga a otro día)
+        //   - Cambio de incident (cambia entre bucket previa ↔ walkin)
+        const isCapacityRelevant =
+            (finalStatus === 'Booked' && preUpdateStatus !== 'Booked')
+            || (finalDurationMin !== preUpdateDurationMin)
+            || (!!req.body.date && req.body.date !== preUpdateDate)
+            || (req.body.incident !== undefined && !!req.body.incident !== preUpdateIncident);
+        if (isCapacityRelevant && finalStatus === 'Booked' && finalDurationMin > 0 && finalDateISO && !isManualOverride) {
+            const dateKey = madridDayKey(new Date(finalDateISO));
+            const cap = await checkTallerCapacity({
+                dateKey,
+                durationMin: finalDurationMin,
+                isIncident: finalIncident,
+                excludeId: req.params.id,
+            });
+            if (!cap.ok) {
+                console.warn(`[API] PUT capacity exceeded ${req.params.id} ${dateKey} (${cap.reason}): previa ${cap.committedPrevia}+walkin ${cap.committedWalkin}+new ${cap.requestedMin} vs cap ${cap.capacityMin} / previasMax ${cap.previasMax}`);
+                return res.status(409).json({
+                    error: 'CAPACITY_EXCEEDED',
+                    reason: cap.reason,
+                    dateKey,
+                    capacityMin: cap.capacityMin,
+                    reservedMin: cap.reservedMin,
+                    previasMax: cap.previasMax,
+                    committedPrevia: cap.committedPrevia,
+                    committedWalkin: cap.committedWalkin,
+                    requestedMin: cap.requestedMin,
+                });
+            }
+        }
 
         // RESERVA MANUAL CON TIPO DE SERVICIO (modelo 1 hueco).
         // Si el body lleva `service` Y es una creación real (Available→Booked),
@@ -6477,10 +6778,18 @@ app.put('/api/appointments/:id', async (req, res) => {
             if (isCancel) { action = 'appointment.cancel'; summary = `Cancelada cita de ${preUpdateClientName || preUpdateClientPhone || '?'}`; }
             else if (isBook) { action = 'appointment.create'; summary = `Reservada cita para ${req.body.clientName || preUpdateClientName || '?'}`; }
             else if (isReschedule) { summary = `Reprogramada cita de ${preUpdateClientName || preUpdateClientPhone || '?'} (${preUpdateDate} → ${req.body.date})`; }
+            // Marcar SIEMPRE que se usó override, no solo cuando cambian horas
+            // (un agente puede mandar forceOverride tras un 409 stale incluso si
+            // su edición no toca capacidad — queremos trazarlo igualmente).
+            if (isManualOverride) {
+                summary = `${summary} [SOBRECARGA TALLER]`;
+            }
             logAudit({
                 action, user: actor, targetType: 'appointment', targetId: req.params.id,
                 targetName: preUpdateClientName || (req.body.clientName as string) || '',
-                summary, changes: f, origin: 'web'
+                summary,
+                changes: isManualOverride ? { ...f, _capacityOverride: true } : f,
+                origin: 'web'
             }).catch(() => {});
         } catch (_) { /* nunca bloquear por audit */ }
 
@@ -7027,15 +7336,21 @@ app.post('/api/taller/config', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB' });
     try {
         const b = req.body || {};
+        const mechanics = (Number.isFinite(Number(b.mechanics)) && Number(b.mechanics) > 0) ? Math.round(Number(b.mechanics)) : TALLER_DEFAULTS.mechanics;
+        const hoursPerDay = (Number.isFinite(Number(b.hoursPerDay)) && Number(b.hoursPerDay) > 0) ? Number(b.hoursPerDay) : TALLER_DEFAULTS.hoursPerDay;
+        const dailyCapacityHours = mechanics * hoursPerDay;
         const cfg: TallerConfig = {
-            mechanics: (Number.isFinite(Number(b.mechanics)) && Number(b.mechanics) > 0) ? Math.round(Number(b.mechanics)) : TALLER_DEFAULTS.mechanics,
-            hoursPerDay: (Number.isFinite(Number(b.hoursPerDay)) && Number(b.hoursPerDay) > 0) ? Number(b.hoursPerDay) : TALLER_DEFAULTS.hoursPerDay,
+            mechanics,
+            hoursPerDay,
             workingDays: Array.isArray(b.workingDays) ? b.workingDays.map((d: any) => Number(d)).filter((d: number) => d >= 0 && d <= 6) : [...TALLER_DEFAULTS.workingDays],
             hoursByWeekday: (b.hoursByWeekday && typeof b.hoursByWeekday === 'object' && !Array.isArray(b.hoursByWeekday)) ? b.hoursByWeekday : {},
             holidays: Array.isArray(b.holidays) ? b.holidays.map((d: any) => String(d)).filter(Boolean) : [],
             services: Array.isArray(b.services)
                 ? b.services.filter((s: any) => s && s.name && String(s.name).trim()).map((s: any, i: number) => ({ id: String(s.id || `svc${i + 1}`), name: String(s.name).trim(), durationMin: sanitizeMinutes(s.durationMin, 60) }))
                 : [],
+            reservedIncidentHoursPerDay: (Number.isFinite(Number(b.reservedIncidentHoursPerDay)) && Number(b.reservedIncidentHoursPerDay) >= 0)
+                ? Math.min(dailyCapacityHours, Number(b.reservedIncidentHoursPerDay))
+                : TALLER_DEFAULTS.reservedIncidentHoursPerDay,
         };
         await saveTallerConfig(cfg);
         res.json({ success: true, config: cfg });

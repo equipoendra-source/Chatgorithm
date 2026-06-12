@@ -102,6 +102,76 @@ produciendo URLs como `https://chatgorithm-vubn.onrender.com/https://res.cloudin
 
 ---
 
+## Sesión 2026-06-11 — Modelo "1 hueco" + Panel Taller (carga de mecánicos)
+
+### Qué cambió
+La recepción pasa a ser de **1 solo hueco por cita** (avería/revisión incluidas). Se eliminaron los bloques multi-hueco (líder+secundarios) en reservas nuevas. El campo `Appointments.DurationMin` se **reaprovecha**: ya NO es el span de huecos de recepción, ahora guarda los **minutos de TALLER** (carga de mecánicos) del trabajo — por defecto los del tipo de servicio, editable por cita; sin tipo = 0.
+
+Nuevo **panel "Taller"** (botón junto a Averías/Buscar) con barra de carga por día: minutos de taller comprometidos vs. capacidad (`mecánicos × horas/día × días laborables`, con festivos). El **catálogo de tipos de servicio** se movió de *Ajustes de agenda* a un sub-panel de ajustes dentro del botón Taller (catálogo GLOBAL, independiente de las agendas).
+
+### Backend (`server/src/index.ts`)
+- `getTallerConfig()` / `saveTallerConfig()` / `getServiceCatalog()` → BotSettings `taller_config` (siembra perezosa desde las agendas). Endpoints `GET/POST /api/taller/config`.
+- `getAvailableAppointments`: `slotsNeeded` siempre 1; servicio validado contra el catálogo global.
+- `bookAppointment`: `DurationMin = minutos de taller del tipo` (0 sin tipo); no crea secundarios.
+- `PUT /api/appointments/:id`: bloques `wantsServiceBlock`/`isEditingBookedService` simplificados (solo ServiceType + DurationMin, sin multi-hueco). Acepta `durationMin` del body (edición manual de horas de taller).
+- **Compat averías viejas**: `cancelAppointment`, PUT-cancelar y DELETE liberan secundarios filtrando por `{ClientName}=''` (los secundarios reales no tienen nombre) → nunca liberan una cita real dentro de la ventana `DurationMin`.
+- Prompt del bot Laura: lee el catálogo global; reserva 1 hueco etiquetando el tipo.
+
+### Frontend (`client/src/components/CalendarDashboard.tsx`)
+- Render siempre 1 hueco (`formatTimeRange`/`renderChip`/`renderDaySlotRow` usan `slotDuration`, no `durationMin`). Se mantiene `collapseBookedBlocks` (oculta secundarios → averías viejas no se ven feas).
+- Ficha de cita: selector de tipo desde catálogo global + campo editable "Horas de taller".
+- Panel Taller (`computeTallerLoad`) + sub-panel de ajustes (capacidad, festivos, catálogo).
+
+### Airtable
+- **Nada que crear**: `DurationMin` se reaprovecha (una avería de 4h valía 240 y sigue valiendo 240, solo cambia el significado interno). `taller_config` va en BotSettings.
+- Recomendado: poner la granularidad de la agenda de recepción en **30 min** (campo "Grid slot" en Ajustes de agenda) para que cada cita se vea como 30 min.
+
+### Verificado
+4 agentes (booking/safety/frontend/regress). Backend `tsc` y frontend `tsc && vite build` sin errores. Las 3 alertas del agente de regresiones sobre la ventana `DurationMin` en la liberación de secundarios son falsos positivos: el guard `{ClientName}=''` evita liberar citas reales (de hecho corrige un bug latente del código anterior).
+
+---
+
+## Sesión 2026-06-12 — Colchón de walk-ins + check de capacidad del taller en booking
+
+### Qué cambió
+Nuevo campo `TallerConfig.reservedIncidentHoursPerDay` (horas/día reservadas para clientes que llegan al taller sin cita previa = walk-ins / incidencias). Estas horas se **descuentan automáticamente** de la disponibilidad que Laura puede ofrecer para citas previas. La bot ya no muestra días donde el taller estaría lleno (aunque haya hueco de recepción). El manual desde el calendario sigue pudiendo sobrecargar, ahora con `window.confirm` + flag `forceOverride: true`.
+
+**Buckets por día:**
+- PREVIAS = Booked con `ClientName!='' AND Incident!=true` → consumen `previasMax = capacityMin − reservedMin`
+- WALK-INS = Booked con `ClientName!='' AND Incident=true` → consumen el colchón `reservedMin` (luego total)
+- Laura SIEMPRE crea PREVIAS; el campo `Incident` se auto-pone en `POST /api/appointments` cuando la fecha es hoy (L6117), por eso "creado hoy para hoy" = walk-in.
+
+### Backend (`server/src/index.ts`)
+- `TallerConfig`: añadido `reservedIncidentHoursPerDay` con clamp a `mechanics × hoursPerDay`.
+- Helpers nuevos: `madridDayKey`, `capacityTallerMinForDay`, `reservedIncidentMinForDay`, `getCommittedTallerByDay({excludeId?})`, `checkTallerCapacity({dateKey, durationMin, isIncident, excludeId?})`.
+- `getAvailableAppointments`: si el catálogo tiene tipos, EXIGE `serviceName` (no muestra huecos sin tipo). Con tipo, descarta días donde `committedPrevia + tallerMin > previasMax`.
+- `getAvailableDays`: acepta `service` y aplica el mismo filtro de capacidad.
+- `bookAppointment`: re-validar capacidad DENTRO del lock antes del `updateAppointmentFields`. Rechaza también tipos desconocidos si catalog tiene entradas (paralelo a getAvailableAppointments).
+- `PUT /api/appointments/:id`: check único antes de las ramas. Si excede sin `forceOverride` → **409 CAPACITY_EXCEEDED** con detalles (`reason`, `committedPrevia`, `committedWalkin`, `previasMax`, etc.). El check solo se dispara si la operación es "capacity-relevant" (cambia durationMin, service, date, incident, o crea Booked nuevo). Audit log marca `[SOBRECARGA TALLER]` siempre que se use el override.
+- Filtro de fecha de `getCommittedTallerByDay` usa ventana UTC amplia + filtro estricto por `madridDayKey >= todayMadrid` (no más cuenta errónea cerca de medianoche).
+
+### Frontend (`client/src/components/CalendarDashboard.tsx`)
+- `TallerConfig` + `TALLER_FALLBACK`: añadido `reservedIncidentHoursPerDay`.
+- `handleSaveTaller`: clampa el campo a `mechanics × hoursPerDay`.
+- `tallerDayKey` (nueva): usa `Europe/Madrid` para que el frontend coincida exactamente con el backend.
+- `computeTallerLoad`: separa `committedPrevia` vs `committedWalkin`, expone `reservedMin`, `previasMax`. NO filtra por `selectedAccountId` (el taller es físico).
+- Sub-modal Ajustes Taller: input nuevo "Horas reservadas para sin-cita (walk-ins / incidencias)".
+- Barra de día: 3 segmentos (previas, walk-ins ya hechas, reserva restante). Color por `previasFull` (no por sobrecarga total). En sobrecarga, `reservedRemaining` se anula visualmente.
+- `handleUpdateAppt`: pre-check local antes del PUT con `window.confirm` si excedería. Branch nuevo para 409 CAPACITY_EXCEEDED (otro usuario llenó el día) → confirm + reintento con `forceOverride: true`.
+
+### Airtable
+- **Nada que crear**. `Incident` ya existe desde antes. `reservedIncidentHoursPerDay` va en `BotSettings.taller_config` (JSON).
+
+### Verificado
+4 agentes adversariales (lógica capacidad / manual override+audit / frontend confirm / regresiones). 12 findings totales: aplicados 4 high+medium críticos (TZ inconsistency, selectedAccountId divergence, false-positive en ediciones inocuas, audit log condición). Backend `tsc` y frontend `tsc && vite build` limpios.
+
+### Pendientes conocidos (fuera de scope, baja prioridad)
+- Race condition residual: dos reservas simultáneas en slots distintos del mismo día (probabilidad muy baja con tráfico actual; mitigado por re-check dentro del lock + frontend 409 branch).
+- Cancelación PUT desde calendario no limpia los campos de la cita (basura legacy preexistente, no introducido por este cambio).
+- `slotDuration` multi-agenda asume una sola granularidad (preexistente).
+
+---
+
 ## Notas generales
 
 - Los archivos subidos **antes** del fix de Cloudinary (guardados en disco de Render) están perdidos permanentemente. Los mensajes en Airtable que los referencian mostrarán 404. Es comportamiento esperado.
