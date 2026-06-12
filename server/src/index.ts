@@ -8167,6 +8167,22 @@ app.post('/webhook', async (req, res) => {
                 text = '🖼️ (Sticker)';
                 inboundMediaId = msg.sticker?.id;
                 inboundType = 'image';
+            } else if (msg.type === 'reaction') {
+                text = msg.reaction?.emoji
+                    ? `${msg.reaction.emoji} (reacción)`
+                    : '↩️ (reacción retirada)';
+                inboundType = 'text';
+            } else if (msg.type === 'location') {
+                const lat = msg.location?.latitude;
+                const lng = msg.location?.longitude;
+                const name = (msg.location?.name as string | undefined)?.trim();
+                const address = (msg.location?.address as string | undefined)?.trim();
+                const label = [name, address].filter(Boolean).join(' · ');
+                const mapsUrl = (lat !== undefined && lng !== undefined)
+                    ? `https://maps.google.com/?q=${lat},${lng}`
+                    : '';
+                text = `📍 Ubicación${label ? `: ${label}` : ''}${mapsUrl ? ` · ${mapsUrl}` : ''}`;
+                inboundType = 'text';
             }
 
             if (processedWebhookIds.has(msg.id)) {
@@ -8246,6 +8262,17 @@ app.post('/webhook', async (req, res) => {
                 console.log(`✅ [WEBHOOK] Opt-in marketing detectado de ${from}`);
                 try { await setContactMarketingOptIn(from, true, 'whatsapp_reply'); } catch (e: any) { console.error('[Campaigns] Error opt-in marketing:', e.message); }
                 // No retornamos: dejamos que siga el flujo normal para que la IA o el agente le confirme
+            }
+
+            // Reacciones (👍/❤️/etc.) y ubicaciones (📍) NO disparan IA. Un emoji
+            // o unas coordenadas no son una pregunta accionable — Laura las leía
+            // como "(Media)" y respondía frases sueltas tipo "Perfecto, le derivo
+            // a Taller" sin que el cliente hubiera pedido nada. El mensaje queda
+            // guardado en el historial y notificado al equipo (ya se hizo arriba
+            // en saveAndEmitMessage); solo evitamos encolarlo para Gemini.
+            if (msg.type === 'reaction' || msg.type === 'location') {
+                console.log(`💬 [Bot] ${msg.type === 'reaction' ? 'Reacción' : 'Ubicación'} de ${from} — guardada en historial, IA NO responde.`);
+                return res.sendStatus(200);
             }
 
             // Comprobar si hay sesión de reserva activa en Airtable (sobrevive reinicios)
