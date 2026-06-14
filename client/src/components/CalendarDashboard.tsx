@@ -55,6 +55,10 @@ interface Appointment {
     // aunque deliveredAt esté vacío. Y viceversa: si está en "Cerrado", la
     // cita NO sale verde aunque deliveredAt tenga fecha histórica.
     clientStatus?: string;
+    // Registro de carga del taller añadido manualmente desde el panel Taller.
+    // No es una cita de recepción: se oculta del calendario pero cuenta en
+    // la barra de carga de mecánicos.
+    tallerOnly?: boolean;
 }
 
 interface FieldLabelEntry { label: string; placeholder: string; key: string; description: string; }
@@ -226,6 +230,16 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [tallerSettingsOpen, setTallerSettingsOpen] = useState(false);
     const [savingTaller, setSavingTaller] = useState(false);
     const [expandedTallerDay, setExpandedTallerDay] = useState<string | null>(null);
+    // Formulario inline "Añadir coche" dentro del panel Taller
+    const [tallerFormOpenDay, setTallerFormOpenDay] = useState<string | null>(null);
+    const [tallerFormService, setTallerFormService] = useState('');
+    const [tallerFormName, setTallerFormName] = useState('');
+    const [tallerFormPhone, setTallerFormPhone] = useState('');
+    const [tallerFormPrefix, setTallerFormPrefix] = useState('34');
+    const [tallerFormDuration, setTallerFormDuration] = useState(0);
+    const [tallerFormTime, setTallerFormTime] = useState('');
+    const [tallerFormDurationTouched, setTallerFormDurationTouched] = useState(false);
+    const [tallerFormSaving, setTallerFormSaving] = useState(false);
 
     // Modal Edición
     const [selectedAppt, setSelectedAppt] = useState<Appointment | null>(null);
@@ -998,6 +1012,114 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         } catch (e) { alert("Error de conexión"); }
     };
 
+    const resetTallerForm = () => {
+        setTallerFormOpenDay(null);
+        setTallerFormService('');
+        setTallerFormName('');
+        setTallerFormPhone('');
+        setTallerFormPrefix('34');
+        setTallerFormDuration(0);
+        setTallerFormTime('');
+        setTallerFormDurationTouched(false);
+    };
+
+    const handleAddTallerCar = async (dayKey: string) => {
+        if (tallerFormDuration <= 0) return alert('Indica las horas de taller');
+
+        // Pre-check local de capacidad (igual que handleUpdateAppt)
+        const dayLoad = computeTallerLoad(90).find(d => d.key === dayKey);
+        const todayKey = tallerDayKey(new Date());
+        const isIncident = dayKey === todayKey;
+        let forceOverride = false;
+        if (dayLoad) {
+            const exceeds = isIncident
+                ? (dayLoad.committedPrevia + dayLoad.committedWalkin + tallerFormDuration > dayLoad.capacityMin)
+                : (dayLoad.committedPrevia + tallerFormDuration > dayLoad.previasMax);
+            if (!dayLoad.isWorking || exceeds) {
+                const reasonTxt = !dayLoad.isWorking
+                    ? `El taller está CERRADO ese día (capacidad 0h).`
+                    : isIncident
+                        ? `El taller quedaría sobrecargado: ${fmtHm(dayLoad.committedPrevia + dayLoad.committedWalkin + tallerFormDuration)} / ${fmtHm(dayLoad.capacityMin)} capacidad.`
+                        : `Quedarían más horas de citas previas (${fmtHm(dayLoad.committedPrevia + tallerFormDuration)}) que las disponibles (${fmtHm(dayLoad.previasMax)}), porque hay ${fmtHm(dayLoad.reservedMin)} reservadas para walk-ins.`;
+                if (!window.confirm(`${reasonTxt}\n\n¿Forzar el guardado igualmente?`)) return;
+                forceOverride = true;
+            }
+        }
+
+        // Hora: la indicada o 09:00 como referencia interna (no aparece en calendario)
+        const time = tallerFormTime || '09:00';
+        const isoDate = new Date(`${dayKey}T${time}:00`).toISOString();
+
+        setTallerFormSaving(true);
+        try {
+            // 1. Crear hueco
+            const postRes = await fetch(`${API_URL}/appointments`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date: isoDate, incident: isIncident })
+            });
+            if (!postRes.ok) {
+                const err = await postRes.json().catch(() => ({}));
+                alert((err as any).error || 'Error al crear el registro');
+                return;
+            }
+            const postData = await postRes.json();
+            const newId: string | undefined = postData.id;
+            if (!newId) { alert('Error interno: no se obtuvo el ID del registro'); return; }
+
+            const buildBody = (override: boolean) => ({
+                status: 'Booked',
+                clientName: tallerFormName.trim() || 'Sin nombre',
+                ...(tallerFormPhone.trim() ? { clientPhone: tallerFormPhone.trim(), phonePrefix: tallerFormPrefix } : {}),
+                ...(tallerFormService ? { service: tallerFormService } : {}),
+                durationMin: tallerFormDuration,
+                incident: isIncident,
+                tallerOnly: true,
+                actorUsername: getCurrentUsername(),
+                ...(override ? { forceOverride: true } : {}),
+            });
+
+            // 2. Reservar con todos los datos + tallerOnly
+            let putRes = await fetch(`${API_URL}/appointments/${newId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(buildBody(forceOverride))
+            });
+
+            // 3. 409 CAPACITY_EXCEEDED (otro usuario llenó el día en paralelo)
+            if (putRes.status === 409) {
+                const err = await putRes.json().catch(() => ({} as any));
+                if (err.error === 'CAPACITY_EXCEEDED') {
+                    const msg = err.reason === 'closed'
+                        ? `El taller está cerrado ese día.\n\n¿Forzar el guardado igualmente?`
+                        : err.reason === 'previas_full'
+                            ? `El taller acaba de llenarse: ${fmtHm(err.committedPrevia)} previas + ${fmtHm(err.requestedMin)} nuevas > ${fmtHm(err.previasMax)} máx.\n\n¿Forzar el guardado igualmente?`
+                            : `El taller acaba de llenarse.\n\n¿Forzar el guardado igualmente?`;
+                    if (!window.confirm(msg)) {
+                        await fetch(`${API_URL}/appointments/${newId}`, { method: 'DELETE' }).catch(() => {});
+                        return;
+                    }
+                    putRes = await fetch(`${API_URL}/appointments/${newId}`, {
+                        method: 'PUT',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(buildBody(true))
+                    });
+                }
+            }
+
+            if (!putRes.ok) {
+                const err = await putRes.json().catch(() => ({}));
+                await fetch(`${API_URL}/appointments/${newId}`, { method: 'DELETE' }).catch(() => {});
+                alert((err as any).error || 'Error al guardar el coche');
+                return;
+            }
+
+            resetTallerForm();
+            await fetchData();
+        } catch { alert('Error de conexión'); }
+        finally { setTallerFormSaving(false); }
+    };
+
     const handleCancelBooking = async () => {
         if (!selectedAppt) return;
         if (!window.confirm("¿Cancelar esta reserva? El hueco quedará libre para nuevas citas.")) return;
@@ -1087,6 +1209,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
     const getSlotsForDay = (day: number) => {
         return appointments.filter(a => {
+            if (a.tallerOnly) return false;  // solo-taller: no va al calendario
             const d = new Date(a.date);
             const sameDay = d.getDate() === day && d.getMonth() === currentDate.getMonth() && d.getFullYear() === currentDate.getFullYear();
             if (!sameDay) return false;
@@ -1152,6 +1275,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const breakdownAppointments = (() => {
         const now = Date.now();
         return appointments.filter(a => {
+            if (a.tallerOnly) return false;  // solo-taller: no es una cita real de recepción
             if (a.status !== 'Booked') return false;
             if (!isBreakdownService(a.serviceType)) return false;
             if (!a.clientName || !a.clientName.trim()) return false;
@@ -1181,6 +1305,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const pendingDeliveryAppointments = (() => {
         const now = Date.now();
         return appointments.filter(a => {
+            if (a.tallerOnly) return false;  // solo-taller: no tiene entrega de vehículo
             if (a.status !== 'Booked') return false;
             if (!a.clientName || !a.clientName.trim()) return false;
             if ((a.durationMin || 0) <= 0) return false;
@@ -1386,6 +1511,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const getSlotsForDate = (dateObj: Date) =>
         appointments
             .filter(a => {
+                if (a.tallerOnly) return false;  // solo-taller: no va al calendario
                 const d = new Date(a.date);
                 if (!isSameDay(d, dateObj)) return false;
                 if (agendaFilter && (a.agenda || '') !== agendaFilter) return false;
@@ -2648,7 +2774,8 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         const freeForPreviasMin = Math.max(0, day.previasMax - day.committedPrevia);
                                         return (
                                             <div key={day.key} className={`rounded-xl border p-2.5 ${isDark ? 'border-white/5 bg-slate-800/30' : 'border-slate-100 bg-white'}`}>
-                                                <button onClick={() => setExpandedTallerDay(expanded ? null : day.key)} className="w-full text-left">
+                                                {/* Cabecera clicable (como div para poder poner botón "+" dentro) */}
+                                                <div className="w-full cursor-pointer" onClick={() => setExpandedTallerDay(expanded ? null : day.key)}>
                                                     <div className="flex items-center justify-between mb-1">
                                                         <span className={`text-sm font-bold capitalize ${isDark ? 'text-white' : 'text-slate-800'}`}>{dayName}</span>
                                                         <span className={`text-xs font-semibold ${over ? 'text-red-500' : previasFull ? 'text-amber-500' : (isDark ? 'text-slate-300' : 'text-slate-600')}`}>
@@ -2676,19 +2803,124 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                             {day.reservedMin > 0 && day.isWorking ? ` · ${fmtHm(day.committedWalkin)}/${fmtHm(day.reservedMin)} walk-ins` : ''}
                                                             {day.jobs.length > 0 ? ` · ${day.jobs.length} trabajo${day.jobs.length === 1 ? '' : 's'}` : ''}
                                                         </span>
-                                                        {day.jobs.length > 0 && <ChevronDown size={14} className={`text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />}
+                                                        <div className="flex items-center gap-1.5">
+                                                            {!readOnly && (
+                                                                <button
+                                                                    onClick={e => { e.stopPropagation(); setTallerFormOpenDay(day.key); setExpandedTallerDay(day.key); }}
+                                                                    className={`p-0.5 rounded transition ${isDark ? 'text-cyan-400 hover:bg-cyan-900/40' : 'text-cyan-600 hover:bg-cyan-50'}`}
+                                                                    title="Añadir coche al taller"
+                                                                >
+                                                                    <Plus size={14} />
+                                                                </button>
+                                                            )}
+                                                            {day.jobs.length > 0 && <ChevronDown size={14} className={`text-slate-400 transition-transform ${expanded ? 'rotate-180' : ''}`} />}
+                                                        </div>
                                                     </div>
-                                                </button>
-                                                {expanded && day.jobs.length > 0 && (
-                                                    <div className="mt-2 space-y-1 border-t pt-2 border-dashed border-slate-300/30">
+                                                </div>
+                                                {/* Sección expandida: lista de trabajos + formulario añadir coche */}
+                                                {(expanded || tallerFormOpenDay === day.key) && (
+                                                    <div className="mt-2 border-t pt-2 border-dashed border-slate-300/30 space-y-1">
                                                         {day.jobs.map(j => (
-                                                            <div key={j.id} className="flex items-center justify-between text-xs cursor-pointer hover:opacity-80" onClick={() => { setShowTallerPanel(false); handleOpenEdit(j); }}>
-                                                                <span className={`truncate ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                                                            <div key={j.id} className={`flex items-center justify-between text-xs ${j.tallerOnly ? 'opacity-90' : 'cursor-pointer hover:opacity-80'}`}
+                                                                onClick={j.tallerOnly ? undefined : () => { setShowTallerPanel(false); handleOpenEdit(j); }}>
+                                                                <span className={`truncate flex items-center gap-1 ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                                                                    {j.tallerOnly && <span className={`text-[10px] font-bold px-1 py-0.5 rounded flex-shrink-0 ${isDark ? 'bg-cyan-900/60 text-cyan-300' : 'bg-cyan-100 text-cyan-700'}`}>🔧 solo taller</span>}
                                                                     <span className="font-mono text-slate-400">{fmtTime(j.date)}</span> · {j.clientName || 'Cliente'}{j.serviceType ? ` · ${j.serviceType}` : ''}
                                                                 </span>
                                                                 <span className="font-semibold flex-shrink-0 ml-2 text-cyan-500">{fmtHm(j.durationMin || 0)}</span>
                                                             </div>
                                                         ))}
+                                                        {!readOnly && (
+                                                            tallerFormOpenDay === day.key ? (
+                                                                <div className={`mt-2 p-3 rounded-xl border space-y-2 ${isDark ? 'border-cyan-800/50 bg-cyan-900/20' : 'border-cyan-200 bg-cyan-50'}`} onClick={e => e.stopPropagation()}>
+                                                                    {/* Tipo de servicio */}
+                                                                    {(tallerConfig?.services || []).filter(s => s.name && s.name.trim()).length > 0 && (
+                                                                        <select
+                                                                            value={tallerFormService}
+                                                                            onChange={e => {
+                                                                                const name = e.target.value;
+                                                                                setTallerFormService(name);
+                                                                                const svc = (tallerConfig?.services || []).find(s => s.name === name);
+                                                                                if (!tallerFormDurationTouched) setTallerFormDuration(svc ? svc.durationMin : 0);
+                                                                            }}
+                                                                            className={`w-full p-2 border rounded-lg text-xs outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'}`}
+                                                                        >
+                                                                            <option value="">— Tipo de servicio —</option>
+                                                                            {(tallerConfig?.services || []).filter(s => s.name && s.name.trim()).map(s => (
+                                                                                <option key={s.id || s.name} value={s.name}>{s.name} ({fmtHm(s.durationMin)})</option>
+                                                                            ))}
+                                                                        </select>
+                                                                    )}
+                                                                    {/* Matrícula/nombre */}
+                                                                    <input
+                                                                        type="text" placeholder="Matrícula o nombre del cliente"
+                                                                        value={tallerFormName}
+                                                                        onChange={e => setTallerFormName(e.target.value)}
+                                                                        className={`w-full p-2 border rounded-lg text-xs outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`}
+                                                                    />
+                                                                    {/* Teléfono */}
+                                                                    <div className="flex gap-1">
+                                                                        <input
+                                                                            type="text" placeholder="+34" value={tallerFormPrefix}
+                                                                            onChange={e => setTallerFormPrefix(e.target.value.replace(/\D/g, ''))}
+                                                                            list="taller-phone-prefixes"
+                                                                            className={`w-16 p-2 border rounded-lg text-xs outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'}`}
+                                                                        />
+                                                                        <datalist id="taller-phone-prefixes">
+                                                                            <option value="34">España</option>
+                                                                            <option value="1">EE.UU.</option>
+                                                                            <option value="44">UK</option>
+                                                                            <option value="49">Alemania</option>
+                                                                            <option value="33">Francia</option>
+                                                                        </datalist>
+                                                                        <input
+                                                                            type="tel" placeholder="Teléfono (opcional)"
+                                                                            value={tallerFormPhone}
+                                                                            onChange={e => setTallerFormPhone(e.target.value.replace(/\D/g, ''))}
+                                                                            className={`flex-1 p-2 border rounded-lg text-xs outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white placeholder-slate-500' : 'bg-white border-slate-200 placeholder-slate-400'}`}
+                                                                        />
+                                                                    </div>
+                                                                    {/* Horas de taller + hora de entrada */}
+                                                                    <div className="flex gap-2">
+                                                                        <div className="flex-1">
+                                                                            <label className={`text-[10px] font-bold uppercase block mb-0.5 ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Horas de taller *</label>
+                                                                            <div className="flex items-center gap-1">
+                                                                                <input
+                                                                                    type="number" min={0} step={15} placeholder="min"
+                                                                                    value={tallerFormDuration || ''}
+                                                                                    onChange={e => { setTallerFormDuration(Math.max(0, parseInt(e.target.value) || 0)); setTallerFormDurationTouched(true); }}
+                                                                                    className={`w-20 p-2 border rounded-lg text-xs text-center outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'}`}
+                                                                                />
+                                                                                <span className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>min{tallerFormDuration > 0 ? ` · ${fmtHm(tallerFormDuration)}` : ''}</span>
+                                                                            </div>
+                                                                        </div>
+                                                                        <div>
+                                                                            <label className={`text-[10px] font-bold uppercase block mb-0.5 ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Hora entrada</label>
+                                                                            <input
+                                                                                type="time" value={tallerFormTime}
+                                                                                onChange={e => setTallerFormTime(e.target.value)}
+                                                                                className={`p-2 border rounded-lg text-xs outline-none focus:ring-1 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200'}`}
+                                                                            />
+                                                                        </div>
+                                                                    </div>
+                                                                    <div className="flex gap-2 pt-1">
+                                                                        <button onClick={() => resetTallerForm()} className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition ${isDark ? 'bg-white/5 hover:bg-white/10 text-slate-300' : 'bg-slate-200 hover:bg-slate-300 text-slate-700'}`}>
+                                                                            Cancelar
+                                                                        </button>
+                                                                        <button onClick={() => handleAddTallerCar(day.key)} disabled={tallerFormSaving || tallerFormDuration <= 0} className="flex-1 px-3 py-1.5 rounded-lg text-xs font-semibold bg-cyan-600 hover:bg-cyan-700 text-white flex items-center justify-center gap-1 disabled:opacity-50">
+                                                                            {tallerFormSaving ? <Loader2 size={12} className="animate-spin" /> : <Plus size={12} />} Guardar
+                                                                        </button>
+                                                                    </div>
+                                                                </div>
+                                                            ) : (
+                                                                <button
+                                                                    onClick={e => { e.stopPropagation(); setTallerFormOpenDay(day.key); }}
+                                                                    className={`w-full mt-1 py-1.5 rounded-lg border-dashed border-2 text-xs font-semibold flex items-center justify-center gap-1 transition ${isDark ? 'border-cyan-700 text-cyan-400 hover:bg-cyan-900/30' : 'border-cyan-300 text-cyan-600 hover:bg-cyan-50'}`}
+                                                                >
+                                                                    <Plus size={12} /> Añadir coche
+                                                                </button>
+                                                            )
+                                                        )}
                                                     </div>
                                                 )}
                                             </div>
@@ -2857,6 +3089,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 const filtered = searchMode
                     ? appointments
                         .filter(a => {
+                            if (a.tallerOnly) return false;  // solo-taller: no tiene entrega de vehículo
                             // Líder Booked con datos del cliente
                             if (a.status !== 'Booked') return false;
                             if (!a.clientName || !a.clientName.trim()) return false;

@@ -2702,8 +2702,10 @@ async function runNotificationScheduler() {
         // Status=Booked + ClientPhone (sin ClientName). Sin este filtro, el
         // cliente recibiría 4 recordatorios para la misma cita y los 3
         // secundarios saldrían "Hola cliente" (sin nombre) con horas erróneas.
+        // TallerOnly=TRUE: registros de carga interna del taller — el cliente
+        // no tiene cita real de recepción, no debe recibir recordatorios.
         const bookedAppts = await base('Appointments').select({
-            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='', {ClientName}!='')`
+            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='', {ClientName}!='', NOT({TallerOnly}=TRUE()))`
         }).all();
 
         for (const appt of bookedAppts) {
@@ -6322,7 +6324,10 @@ app.get('/api/appointments', async (req, res) => {
                 // existe en la tabla Contacts (cita walk-in recién creada
                 // sin chat previo), queda vacío y la cita se pinta como
                 // "Reservada" normal.
-                clientStatus: cst
+                clientStatus: cst,
+                // Registro de carga del taller añadido manualmente: no aparece
+                // en el calendario de recepción, solo cuenta en la barra de carga.
+                tallerOnly: !!r.get('TallerOnly')
             };
         }));
     } catch (e: any) { console.error('[API] Error GET /appointments:', e.message); res.status(500).json({ error: "Error fetching appointments" }); }
@@ -6360,10 +6365,16 @@ app.post('/api/appointments', async (req, res) => {
         // Lo quitamos y reintentamos (hasta cubrir ambos). Cualquier otro error
         // se propaga. Sin esto, añadir Manual rompería la creación en bases que
         // no tengan ese campo todavía.
+        // TallerOnly: registro de carga del taller que NO aparece en el calendario de recepción.
+        // Tolerante: si el campo aún no existe en Airtable, se descarta y se reintenta.
+        let isTallerOnly = req.body.tallerOnly === true;
+        if (isTallerOnly) apptFields["TallerOnly"] = true;
         let created = false;
-        for (let attempt = 0; attempt < 3 && !created; attempt++) {
+        let createdId: string | undefined;
+        for (let attempt = 0; attempt < 4 && !created; attempt++) {
             try {
-                await base('Appointments').create([{ fields: apptFields }]);
+                const newRecords = await base('Appointments').create([{ fields: apptFields }]);
+                createdId = newRecords[0].id;
                 created = true;
             } catch (e: any) {
                 const msg = e.message || '';
@@ -6374,12 +6385,16 @@ app.post('/api/appointments', async (req, res) => {
                     console.warn('[API] El campo "Incident" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
                     delete apptFields.Incident;
                     isIncident = false;
+                } else if (apptFields.TallerOnly !== undefined && /talleronly/i.test(msg)) {
+                    console.warn('[API] El campo "TallerOnly" no existe en la tabla Appointments. Créalo como casilla (checkbox).');
+                    delete apptFields.TallerOnly;
+                    isTallerOnly = false;
                 } else {
                     throw e;
                 }
             }
         }
-        res.json({ success: true, incident: isIncident });
+        res.json({ success: true, incident: isIncident, id: createdId });
     } catch (e: any) { console.error('[API] Error POST /appointments:', e.message); res.status(400).json({ error: "Error creating" }); }
 });
 
@@ -6415,6 +6430,8 @@ app.put('/api/appointments/:id', async (req, res) => {
         if (req.body.field5 !== undefined) f["Notas"] = req.body.field5;
         // Marcar/desmarcar la cita como incidente manualmente desde el popup
         if (req.body.incident !== undefined) f["Incident"] = !!req.body.incident;
+        // Registro solo-taller: no aparece en el calendario de recepción
+        if (req.body.tallerOnly !== undefined) f["TallerOnly"] = !!req.body.tallerOnly;
         // Horas de TALLER editables (carga de mecánicos). NO es el tamaño del hueco
         // de recepción (siempre 30 min): por defecto vienen del tipo de servicio,
         // pero el agente puede ajustarlas a mano para ESTA cita concreta.
