@@ -261,6 +261,10 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Horas de TALLER de la cita (minutos). Por defecto las del tipo de servicio,
     // editable a mano. NO es el tamaño del hueco de recepción (siempre 1 hueco).
     const [editDurationMin, setEditDurationMin] = useState<number>(0);
+    // Flag: el agente ha tocado las horas de taller a mano en esta ficha. Si está
+    // activo, cambiar el TIPO de servicio NO pisa el valor manual (el usuario
+    // quiere "prolongar" un trabajo concreto, p.ej. una avería de 4h → 5h).
+    const [durationTouched, setDurationTouched] = useState<boolean>(false);
 
     // AUTOCOMPLETADO POR TELÉFONO al crear cita. Cuando el agente teclea el
     // teléfono del cliente en el modal, debounce 300ms y consulta:
@@ -716,6 +720,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         setSelectedVehicleId('');
         setEditService('');
         setEditDurationMin(0);
+        setDurationTouched(false);
         setLookingUpContact(false);
     }, []);
 
@@ -745,6 +750,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // Booked. Para slots Available recién abiertos viene vacío → "sin servicio".
         setEditService(appt.serviceType || '');
         setEditDurationMin(appt.durationMin || 0);
+        // Una cita ya reservada con horas se considera "tocada" para que cambiar
+        // de tipo por error no borre sus horas reales. Una cita nueva (0) no.
+        setDurationTouched((appt.durationMin || 0) > 0);
         setSelectedAppt(appt);
         setEditStatus(appt.status);
         setEditName(appt.clientName || '');
@@ -841,8 +849,17 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // El backend valida también (defensa en profundidad por race con otros
         // usuarios) y devuelve 409 con detalles; en ese caso reintentamos con
         // confirm de nuevo + forceOverride.
+        // Solo pre-chequeamos si la operación CAMBIA la carga del taller del día.
+        // Editar solo nombre/teléfono/matrícula de una cita ya reservada NO debe
+        // disparar el aviso de capacidad (la carga no cambia). Relevante si:
+        //   - es una reserva nueva (Available→Booked), o
+        //   - cambian las horas de taller, o
+        //   - cambia la marca de "Sin Cita" (incident) → cambia de bucket.
+        const durationChanged = (selectedAppt.durationMin || 0) !== editDurationMin;
+        const incidentChanged = (!!selectedAppt.incident) !== editIncident;
+        const capacityRelevant = isCreating || (isEditingBooked && (durationChanged || incidentChanged));
         let forceOverride = false;
-        if ((isCreating || isEditingBooked) && editDurationMin > 0) {
+        if (capacityRelevant && editDurationMin > 0) {
             const dayKey = tallerDayKey(selectedAppt.date);
             const dayLoad = computeTallerLoad(90).find(d => d.key === dayKey);
             if (dayLoad) {
@@ -2124,23 +2141,35 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                     {!readOnly && editStatus === 'Booked' && (() => {
                                         // Catálogo GLOBAL de tipos (panel Taller), independiente de la
                                         // agenda. Elegir un tipo precarga sus horas de taller por
-                                        // defecto; el agente puede ajustarlas. La cita SIEMPRE ocupa
-                                        // 1 hueco de recepción — las horas son solo carga de mecánicos.
+                                        // defecto SOLO si el agente no las ha tocado a mano; así
+                                        // "prolongar" un trabajo (editar horas) no se pisa al re-tocar
+                                        // el tipo. La cita SIEMPRE ocupa 1 hueco de recepción.
                                         const catalog = (tallerConfig?.services || []).filter(s => s.name && s.name.trim());
+                                        const selectedSvc = catalog.find(s => s.name === editService);
+                                        const fmtHoras = (m: number) => {
+                                            const h = Math.floor(m / 60); const r = m % 60;
+                                            if (m === 0) return '0';
+                                            return h > 0 ? (r > 0 ? `${h}h ${r}min` : `${h}h`) : `${r}min`;
+                                        };
                                         return (
-                                            <div className="space-y-3">
+                                            <div className={`rounded-xl border p-3 space-y-3 ${isDark ? 'bg-cyan-900/15 border-cyan-800/50' : 'bg-cyan-50 border-cyan-200'}`}>
+                                                <div className="flex items-center gap-1.5">
+                                                    <Clock size={14} className={isDark ? 'text-cyan-400' : 'text-cyan-600'} />
+                                                    <span className={`text-xs font-bold uppercase ${isDark ? 'text-cyan-300' : 'text-cyan-700'}`}>Carga de taller</span>
+                                                </div>
                                                 <div>
-                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Tipo de servicio (taller)</label>
+                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Tipo de servicio</label>
                                                     <select
                                                         value={editService}
                                                         onChange={(e) => {
                                                             const name = e.target.value;
                                                             setEditService(name);
-                                                            // Al cambiar de tipo, precargamos sus horas de taller por defecto.
+                                                            // Solo precargamos las horas del tipo si el agente NO ha
+                                                            // tocado el campo a mano (preserva "prolongaciones").
                                                             const svc = catalog.find(s => s.name === name);
-                                                            setEditDurationMin(svc ? svc.durationMin : 0);
+                                                            if (!durationTouched) setEditDurationMin(svc ? svc.durationMin : 0);
                                                         }}
-                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-cyan-500 outline-none ${isDark ? 'bg-slate-800 border-cyan-900 text-white' : 'border-cyan-200 bg-white'}`}
                                                     >
                                                         <option value="">— Sin servicio (0h taller) —</option>
                                                         {catalog.map(s => (
@@ -2156,17 +2185,43 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                     )}
                                                 </div>
                                                 <div>
-                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Horas de taller (min)</label>
+                                                    <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>
+                                                        Horas de taller (min){editDurationMin > 0 ? ` · ${fmtHoras(editDurationMin)}` : ''}
+                                                    </label>
                                                     <input
                                                         type="number"
                                                         min={0}
                                                         step={15}
                                                         value={editDurationMin}
-                                                        onChange={(e) => setEditDurationMin(Math.max(0, parseInt(e.target.value) || 0))}
-                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-purple-500 outline-none ${isDark ? 'bg-slate-800 border-purple-900 text-white' : 'border-purple-200 bg-white'}`}
+                                                        onChange={(e) => { setEditDurationMin(Math.max(0, parseInt(e.target.value) || 0)); setDurationTouched(true); }}
+                                                        className={`w-full p-2 border rounded-lg text-sm focus:ring-2 focus:ring-cyan-500 outline-none ${isDark ? 'bg-slate-800 border-cyan-900 text-white' : 'border-cyan-200 bg-white'}`}
                                                     />
-                                                    <p className={`text-[11px] mt-1 ${isDark ? 'text-purple-300' : 'text-purple-600'}`}>
-                                                        Carga de mecánicos de esta cita (uso interno). La recepción ocupa <strong>1 hueco</strong>; esto no cambia el calendario.
+                                                    {/* Botones rápidos para PROLONGAR un trabajo a mano */}
+                                                    <div className="flex flex-wrap gap-1.5 mt-2">
+                                                        {[15, 30, 60].map(inc => (
+                                                            <button key={inc} type="button"
+                                                                onClick={() => { setEditDurationMin(v => Math.max(0, v + inc)); setDurationTouched(true); }}
+                                                                className={`px-2 py-1 rounded-lg text-xs font-semibold transition ${isDark ? 'bg-cyan-900/40 text-cyan-200 hover:bg-cyan-900/70' : 'bg-cyan-100 text-cyan-700 hover:bg-cyan-200'}`}>
+                                                                +{inc < 60 ? `${inc}min` : '1h'}
+                                                            </button>
+                                                        ))}
+                                                        {[15, 30].map(dec => (
+                                                            <button key={`m${dec}`} type="button"
+                                                                onClick={() => { setEditDurationMin(v => Math.max(0, v - dec)); setDurationTouched(true); }}
+                                                                className={`px-2 py-1 rounded-lg text-xs font-semibold transition ${isDark ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                                                                −{dec}min
+                                                            </button>
+                                                        ))}
+                                                        {selectedSvc && editDurationMin !== selectedSvc.durationMin && (
+                                                            <button type="button"
+                                                                onClick={() => { setEditDurationMin(selectedSvc.durationMin); setDurationTouched(false); }}
+                                                                className={`px-2 py-1 rounded-lg text-xs font-semibold transition ${isDark ? 'bg-slate-700 text-cyan-300 hover:bg-slate-600' : 'bg-white text-cyan-700 border border-cyan-200 hover:bg-cyan-50'}`}>
+                                                                ↺ {selectedSvc.durationMin}min ({editService})
+                                                            </button>
+                                                        )}
+                                                    </div>
+                                                    <p className={`text-[11px] mt-2 ${isDark ? 'text-cyan-300/80' : 'text-cyan-600'}`}>
+                                                        Carga de mecánicos de esta cita (uso interno). Edítalas a mano si el trabajo se prolonga. La recepción ocupa <strong>1 hueco</strong>; esto no cambia el calendario.
                                                     </p>
                                                 </div>
                                             </div>
