@@ -5090,6 +5090,20 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
     } catch (e) { return []; }
 }
 
+// Cadenas "basura"/meta que el modelo emite a veces (sobre todo al cerrar la
+// conversación tras llamar a herramientas) y que NUNCA deben enviarse al cliente.
+// El caso real visto fue "No tool output" llegando como respuesta automática.
+// OJO: solo tokens claramente "de máquina". NO añadir palabras que un cliente o
+// Laura podrían usar de verdad en español ("na"=nada, "none", "void", "empty").
+const DEGENERATE_MODEL_TEXTS = new Set([
+    'no tool output', 'no tool outputs', 'tool output', 'no output',
+    'no content', 'no response', 'no text', 'no message',
+    'null', 'undefined', 'n/a', 'nan'
+]);
+function isDegenerateText(s: string): boolean {
+    return DEGENERATE_MODEL_TEXTS.has((s || '').toLowerCase().trim());
+}
+
 async function processJsonResponse(jsonText: string, phone: string, originId: string) {
     const FALLBACK_MSG = "En este momento no puedo procesar tu solicitud. Por favor, inténtalo de nuevo.";
 
@@ -5097,6 +5111,10 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
     try {
         const data = JSON.parse(jsonText.trim());
         if (data.customer_message) {
+            if (isDegenerateText(data.customer_message)) {
+                console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${data.customer_message}"`);
+                return;
+            }
             await sendWhatsAppText(phone, data.customer_message, originId);
             return;
         }
@@ -5109,6 +5127,10 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
         if (jsonMatch) {
             const data = JSON.parse(jsonMatch[0].trim());
             if (data.customer_message) {
+                if (isDegenerateText(data.customer_message)) {
+                    console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${data.customer_message}"`);
+                    return;
+                }
                 await sendWhatsAppText(phone, data.customer_message, originId);
                 return;
             }
@@ -5122,6 +5144,10 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
         const rxMsg = jsonText.match(/"customer_message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
         if (rxMsg && rxMsg[1]) {
             const msg = rxMsg[1].replace(/\\n/g, '\n').replace(/\\"/g, '"').replace(/\\\\/g, '\\');
+            if (isDegenerateText(msg)) {
+                console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${msg}"`);
+                return;
+            }
             await sendWhatsAppText(phone, msg, originId);
             return;
         }
@@ -5136,6 +5162,13 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
     // procesar tu solicitud".
     try {
         const plain = jsonText.replace(/```json/gi, '').replace(/```/g, '').trim();
+        // GUARD (Capa 1): texto degenerado/meta del modelo (p.ej. "No tool
+        // output"). NUNCA al cliente. No mandamos nada (el mensaje real, si lo
+        // hubo, ya se envió antes en el turno).
+        if (isDegenerateText(plain)) {
+            console.warn(`[Laura] Texto degenerado del modelo NO enviado al cliente: "${plain}"`);
+            return;
+        }
         const looksJson = /[{}]/.test(plain) || /"?(customer_message|internal_control|intent|status)"?\s*:/i.test(plain);
         const hasInternalId = /\brec[A-Za-z0-9]{8,}\b/.test(plain);
         if (plain && !looksJson && !hasInternalId && plain.length <= 1500) {
@@ -5577,6 +5610,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
             let toolRound = 0;
             let bookingConfirmedDirectly = false; // Si book_appointment ya envió mensaje, no duplicar texto final
             let assignmentMsgSent = false; // Si assign_department ya envió "te derivo a X", no duplicar
+            let stopRequested = false; // Laura llamó stop_conversation: cerramos el turno (evita la ronda extra que devolvía basura tipo "No tool output")
 
             while (toolRound < MAX_TOOL_ROUNDS) {
                 const calls = currentResponse.functionCalls();
@@ -5603,10 +5637,30 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                     if (call.name === "assign_department") {
                         assignmentMsgSent = true;
                     }
+                    // Capa 2: marcar cierre de conversación. Tras stop_conversation
+                    // NO debemos pedir otra ronda a Gemini — esa ronda extra era la
+                    // que devolvía texto basura ("No tool output") que se filtraba
+                    // al cliente.
+                    if (call.name === "stop_conversation") {
+                        stopRequested = true;
+                    }
 
                     functionResponses.push({
                         functionResponse: { name: call.name, response: { result: toolResult } }
                     });
+                }
+
+                // Capa 2: tras stop_conversation evitamos la ronda extra (la que
+                // devolvía basura tipo "No tool output") SOLO si esta misma
+                // respuesta ya trae el texto de cierre (customer_message): en ese
+                // caso salimos y se procesa abajo desde currentResponse, ahorrando
+                // una llamada a Gemini. Si la respuesta del stop NO trae texto,
+                // NO cortamos: dejamos que se pida una ronda más para recoger el
+                // mensaje de cierre y la Capa 1 (isDegenerateText) filtrará
+                // cualquier basura de esa ronda. Así nunca perdemos la confirmación.
+                if (stopRequested) {
+                    const stopRoundTxt = currentResponse.text();
+                    if (stopRoundTxt && stopRoundTxt.trim()) break;
                 }
 
                 // Pasar TODAS las respuestas de tools a Gemini en una sola llamada
@@ -5633,8 +5687,11 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                 } else {
                     await processJsonResponse(finalTxt, clean, originPhoneId);
                 }
-            } else if (!bookingConfirmedDirectly && !assignmentMsgSent) {
-                // Gemini se quedó mudo y no fue una reserva NI una derivación — avisar al cliente para no dejarlo sin respuesta
+            } else if (!bookingConfirmedDirectly && !assignmentMsgSent && !stopRequested) {
+                // Gemini se quedó mudo y no fue una reserva NI una derivación NI un
+                // cierre intencionado (stop_conversation) — avisar al cliente para
+                // no dejarlo sin respuesta. Si fue un stop deliberado, NO mandamos
+                // el "Disculpa, he tenido un problema" (sería un mensaje erróneo).
                 console.warn(`⚠️ [IA] Respuesta final vacía de Gemini tras ${toolRound} ronda(s) de tools. Enviando fallback.`);
                 await sendWhatsAppText(
                     clean,
