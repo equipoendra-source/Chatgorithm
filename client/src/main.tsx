@@ -2,6 +2,11 @@ import React from 'react'
 import ReactDOM from 'react-dom/client'
 import App from './App' // Importamos el componente principal
 import './index.css'    // Importamos los estilos
+import { installAuthFetch } from './config/authFetch' // [P0] interceptor de auth REST
+
+// Instalar el interceptor de fetch ANTES de montar la app, para que toda
+// llamada a nuestra API lleve el token de sesión automáticamente.
+installAuthFetch();
 
 console.log("🚀 Main.tsx se está ejecutando...");
 

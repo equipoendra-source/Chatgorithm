@@ -130,6 +130,60 @@ app.use(express.json({
     }
 }));
 
+// ==========================================================================
+// [P0 SEGURIDAD] Autenticación de la API REST por token de sesión.
+// Gobernado por ENFORCE_API_AUTH (default "false" → NO cambia nada al desplegar).
+// Cuando es "true": toda ruta /api/* exige un sessionToken válido (el MISMO
+// Map `sessionTokens` que ya usa Socket.IO) en el header `Authorization: Bearer`.
+// Excepciones públicas: login de empresa, health, clave VAPID y callback de
+// voz de Twilio. Los /api/admin/* además conservan su checkAdminToken.
+// Rollout seguro: desplegar con el flag en false → activarlo en Render
+// (ENFORCE_API_AUTH=true) cuando la web Y la APK ya envíen el token. Si algo
+// falla, ponerlo a false y todo vuelve al instante (sin redeploy).
+// ==========================================================================
+const ENFORCE_API_AUTH = (process.env.ENFORCE_API_AUTH ?? 'false').toLowerCase() === 'true';
+if (ENFORCE_API_AUTH) {
+    console.log('🔒 [SECURITY] ENFORCE_API_AUTH=true → la API REST exige sessionToken.');
+} else {
+    console.warn('⚠️ [SECURITY] ENFORCE_API_AUTH=false → la API REST está ABIERTA (sin auth). Actívalo en Render cuando los clientes envíen el token.');
+}
+// Rutas /api/* que DEBEN seguir siendo públicas (no requieren sesión de agente).
+const PUBLIC_API_PATHS = new Set<string>([
+    '/api/company-auth',       // login de empresa (1er nivel, aún sin sesión de agente)
+    '/api/health',             // monitoreo
+    '/api/webpush/vapid-key',  // clave pública VAPID (necesaria antes de suscribir)
+    // Callbacks de Twilio (servidor externo, NUNCA llevan sessionToken). Si se
+    // protegen, Twilio recibe 401 y se rompen las llamadas VoIP entrantes.
+    '/api/voice/xml',          // TwiML de llamada saliente
+    '/api/voice/status',       // estado de llamada (statusCallback)
+    '/api/voice/incoming',     // llamadas ENTRANTES
+    '/api/voice/dial-status',  // fin del dial entrante
+]);
+app.use((req: any, res, next) => {
+    if (!ENFORCE_API_AUTH) return next();
+    const p = req.path || '';
+    if (!p.startsWith('/api/')) return next();      // /, /webhook, /uploads, estáticos…
+    if (req.method === 'OPTIONS') return next();    // preflight CORS
+    if (PUBLIC_API_PATHS.has(p)) return next();
+    // Token de sesión (mismo mecanismo y mismo Map que Socket.IO).
+    const authHeader = req.headers['authorization'];
+    const token = (typeof authHeader === 'string' && authHeader.startsWith('Bearer '))
+        ? authHeader.slice(7).trim() : '';
+    if (token) {
+        const session = sessionTokens.get(token);
+        if (session && (Date.now() - session.createdAt) <= SESSION_TOKEN_TTL) {
+            req.auth = session;
+            return next();
+        }
+        if (session) sessionTokens.delete(token); // token caducado → limpiar
+    }
+    // El tooling de administración con x-admin-token también puede pasar
+    // (los /api/admin/* revalidan con checkAdminToken de todas formas).
+    const adminTok = req.headers['x-admin-token'];
+    if (adminTok && process.env.ADMIN_TOKEN && adminTok === process.env.ADMIN_TOKEN) return next();
+    return res.status(401).json({ error: 'No autenticado. Inicia sesión de nuevo.' });
+});
+
 // RUTA PING
 app.get('/', (req, res) => {
     res.send('🤖 Servidor Chatgorim (Gemini Powered) Online 🚀');
@@ -8478,7 +8532,14 @@ app.get('/webhook', (req, res) => { if (req.query['hub.mode'] === 'subscribe' &&
 // Si META_APP_SECRET no está configurado, se loguea warning pero se acepta (backward compat).
 function verifyMetaSignature(req: any): { ok: boolean, reason?: string } {
     if (!metaAppSecret) {
-        // No bloqueamos para no romper despliegues existentes, pero avisamos en cada llamada
+        // [P0 SEGURIDAD] Fail-OPEN cuando no hay secreto. El arreglo real es poner
+        // META_APP_SECRET en Render (con secreto presente SIEMPRE se verifica, abajo).
+        // WEBHOOK_REQUIRE_SIGNATURE=true convierte esto en fail-CLOSED: rechaza si
+        // falta el secreto. Default false para no romper WhatsApp en despliegues que
+        // aún no tengan la variable. Flag independiente de ENFORCE_API_AUTH.
+        if ((process.env.WEBHOOK_REQUIRE_SIGNATURE ?? 'false').toLowerCase() === 'true') {
+            return { ok: false, reason: 'no_secret_configured_strict' };
+        }
         return { ok: true, reason: 'no_secret_configured' };
     }
     const signature = req.headers['x-hub-signature-256'] as string | undefined;
@@ -8915,9 +8976,9 @@ io.on('connection', (socket) => {
     // recibimos una opción nueva (ej. "Recambios"), Airtable la crea sola en
     // lugar de rechazar el guardado con "Insufficient permissions" o similar.
     // Aplica también al create.
-    socket.on('create_agent', async (d) => { if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }], { typecast: true }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
-    socket.on('delete_agent', async (d) => { if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
-    socket.on('update_agent', async (d) => { if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }], { typecast: true }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
+    socket.on('create_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }], { typecast: true }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
+    socket.on('delete_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
+    socket.on('update_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }], { typecast: true }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
 
     // El usuario actualiza SOLO SUS preferencias (tour state, theme, etc.).
     // No requiere agentId del cliente — usamos socket.data.agentId (rellenado en login).
