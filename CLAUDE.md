@@ -19,7 +19,7 @@
 - **Mensajería en tiempo real:** Socket.IO
 - **Notificaciones push:** Firebase (FCM) + Web Push
 - **Llamadas VoIP:** Twilio Voice SDK
-- **IA:** Google Gemini 2.0 Flash (cambiado de 2.5-flash preview por cuota 20 req/día)
+- **IA:** Google Gemini 2.5 Flash oficial (`gemini-2.5-flash`, billing activo, sin límite de tier gratuito). Temperature fijada a 0.3 en `generationConfig` para evitar alucinaciones (palabras inventadas / idiomas mezclados tipo "l'os del gos"). Modelo en `server/src/index.ts` → `MODEL_NAME`.
 - **Repositorio:** https://github.com/equipoendra-source/Chatgorithm.git
 - **Servidor:** https://chatgorithm-vubn.onrender.com
 - **Frontend desplegado:** https://chatgorithm-frontend.onrender.com

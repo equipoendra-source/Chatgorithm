@@ -5400,6 +5400,21 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
             const model = genAI.getGenerativeModel({
                 model: MODEL_NAME,
                 systemInstruction: systemPrompt,
+                // Parámetros de generación. La CLAVE aquí es `temperature`:
+                // sin este bloque, Gemini 2.5-flash usa su temperatura por
+                // defecto (1.0), que es muy alta y hace que el modelo "se
+                // suelte" generando tokens de relleno aleatorios — palabras
+                // inventadas o en otros idiomas (catalán, italiano…), p. ej.
+                // el famoso "l'os del gos" al final de una respuesta normal.
+                // Bajarla a 0.3 mantiene el tono natural pero hace las
+                // respuestas mucho más consistentes, pegadas al system prompt
+                // y a los datos de las tools, eliminando esas alucinaciones.
+                // 0.3 es el valor estándar para atención al cliente con
+                // function-calling. Si se viera demasiado rígido, subir a 0.5;
+                // si aún apareciera ruido raro, bajar a 0.2.
+                generationConfig: {
+                    temperature: 0.3,
+                },
                 // Safety settings ajustados:
                 // - HARASSMENT: NONE — clientes pueden venir cabreados, no queremos cortar al primer taco.
                 // - El resto: LOW_AND_ABOVE para evitar que un atacante haga que Laura genere
