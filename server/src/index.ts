@@ -2758,8 +2758,12 @@ async function runNotificationScheduler() {
         // secundarios saldrían "Hola cliente" (sin nombre) con horas erróneas.
         // TallerOnly=TRUE: registros de carga interna del taller — el cliente
         // no tiene cita real de recepción, no debe recibir recordatorios.
+        // Incident=TRUE: citas SIN CITA (walk-ins) — el cliente ya está hoy
+        // físicamente en el taller, no tiene sentido recordarle "1 día/1 hora
+        // antes" (ni a él ni al equipo). Quedan fuera del bucle entero, así que
+        // no se programa ninguno de los 4 recordatorios (cita_24h/1h + team_24h/30m).
         const bookedAppts = await base('Appointments').select({
-            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='', {ClientName}!='', NOT({TallerOnly}=TRUE()))`
+            filterByFormula: `AND({Status}='Booked', {ClientPhone}!='', {ClientName}!='', NOT({TallerOnly}=TRUE()), NOT({Incident}=TRUE()))`
         }).all();
 
         for (const appt of bookedAppts) {
