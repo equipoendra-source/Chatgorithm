@@ -230,6 +230,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [tallerSettingsOpen, setTallerSettingsOpen] = useState(false);
     const [savingTaller, setSavingTaller] = useState(false);
     const [expandedTallerDay, setExpandedTallerDay] = useState<string | null>(null);
+    // Borrador del input de fecha para añadir festivos. Se confirma con el botón
+    // "Añadir" — NO se añade en cada onChange. Esto evita el bug por el que un
+    // input type=date dispara onChange con fechas a medio teclear (ej. año 0026)
+    // y colaba festivos inválidos en la lista.
+    const [holidayDraft, setHolidayDraft] = useState('');
     // Formulario inline "Añadir coche" dentro del panel Taller
     const [tallerFormOpenDay, setTallerFormOpenDay] = useState<string | null>(null);
     const [tallerFormService, setTallerFormService] = useState('');
@@ -482,11 +487,37 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const openTallerSettings = () => {
         const baseCfg = tallerConfig || TALLER_FALLBACK;
         setDraftTaller(JSON.parse(JSON.stringify(baseCfg)));
+        setHolidayDraft(''); // borrador de festivo limpio al abrir
         setTallerSettingsOpen(true);
     };
 
     const patchDraftTaller = (patch: Partial<TallerConfig>) => {
         setDraftTaller(prev => prev ? { ...prev, ...patch } : prev);
+    };
+
+    // Añade el festivo del borrador (holidayDraft) a la lista, validándolo.
+    // Solo se llama al pulsar el botón "Añadir" (no en cada tecla), y exige
+    // una fecha completa YYYY-MM-DD con un año razonable. Así no se cuelan
+    // fechas a medio escribir como "0026-01-24".
+    const addHoliday = () => {
+        const v = (holidayDraft || '').trim();
+        // Formato estricto YYYY-MM-DD y año >= 2024 (evita el 0026 y similares).
+        const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+        if (!m) { alert('Elige una fecha válida (día, mes y año completo).'); return; }
+        const year = Number(m[1]);
+        if (year < 2024 || year > 2100) {
+            alert(`El año "${m[1]}" no parece correcto. Escribe el año completo (ej. 2026).`);
+            return;
+        }
+        // Validar que sea una fecha real (no 31 de febrero, etc.)
+        const d = new Date(`${v}T00:00:00`);
+        if (isNaN(d.getTime())) { alert('Esa fecha no existe. Revísala.'); return; }
+        setDraftTaller(prev => {
+            if (!prev) return prev;
+            if ((prev.holidays || []).includes(v)) return prev; // ya estaba
+            return { ...prev, holidays: [...(prev.holidays || []), v].sort() };
+        });
+        setHolidayDraft('');
     };
 
     const toggleTallerWorkingDay = (day: number) => {
@@ -2705,14 +2736,28 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 {(d.holidays || []).length === 0 && <span className="text-xs text-slate-400 italic">Ninguno.</span>}
                                                 {(d.holidays || []).map(h => (
                                                     <span key={h} className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-semibold ${isDark ? 'bg-slate-800 text-slate-200 border border-slate-700' : 'bg-slate-100 text-slate-700'}`}>
-                                                        {h}
+                                                        {/* Mostrar DD/MM/YYYY (legible) aunque internamente se guarde YYYY-MM-DD */}
+                                                        {/^\d{4}-\d{2}-\d{2}$/.test(h) ? h.split('-').reverse().join('/') : h}
                                                         <button onClick={() => patchDraftTaller({ holidays: (d.holidays || []).filter(x => x !== h) })} className="text-red-400 hover:text-red-600"><X size={12} /></button>
                                                     </span>
                                                 ))}
                                             </div>
-                                            <input type="date"
-                                                onChange={e => { const v = e.target.value; if (v && !(d.holidays || []).includes(v)) patchDraftTaller({ holidays: [...(d.holidays || []), v].sort() }); e.target.value = ''; }}
-                                                className={`w-full p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`} />
+                                            {/* Input controlado por holidayDraft + botón "Añadir": la fecha NO se
+                                                añade hasta pulsar el botón (o Enter), validando que sea completa
+                                                y con año razonable. Evita el bug de colar fechas a medio teclear. */}
+                                            <div className="flex gap-2">
+                                                <input type="date"
+                                                    value={holidayDraft}
+                                                    min="2024-01-01"
+                                                    max="2100-12-31"
+                                                    onChange={e => setHolidayDraft(e.target.value)}
+                                                    onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addHoliday(); } }}
+                                                    className={`flex-1 p-2 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`} />
+                                                <button type="button" onClick={addHoliday} disabled={!holidayDraft}
+                                                    className={`px-3 py-2 rounded-lg text-sm font-semibold flex items-center gap-1 transition disabled:opacity-40 disabled:cursor-not-allowed ${isDark ? 'bg-cyan-900/40 text-cyan-200 hover:bg-cyan-900/70' : 'bg-cyan-100 text-cyan-700 hover:bg-cyan-200'}`}>
+                                                    <Plus size={14} /> Añadir
+                                                </button>
+                                            </div>
                                         </div>
 
                                         <div className={`rounded-xl border p-3 ${isDark ? 'border-white/10 bg-slate-800/40' : 'border-slate-200 bg-slate-50'}`}>
