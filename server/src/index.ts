@@ -8148,24 +8148,43 @@ app.get('/api/analytics', async (req, res) => {
         //   client_whatsapp → la inició el cliente.
         // Tolerante a que la tabla no exista todavía (queda todo en 0, sin
         // romper el resto del dashboard).
-        // Desglose por quién cogió la cita, respetando el periodo (filtramos
-        // los eventos booked por su createdAt — cuándo se reservó).
-        const appointmentsBySource = { bot: 0, manual: 0, client: 0, total: 0 };
+        // Desglose por QUIÉN cogió la cita.
+        // CLAVE: para que cuadre con "Sin/Con Cita", contamos EXACTAMENTE las
+        // mismas citas (las Booked con ClientName de appointmentsAll, que ya
+        // está filtrado por Date en el periodo). El origen (bot/manual/cliente)
+        // lo sacamos cruzando cada cita con su evento 'booked' del historial
+        // por appointmentId. Las citas sin evento (antiguas, anteriores al
+        // registro de origen) caen en 'unknown' → así el total = total de
+        // citas del periodo y los números cuadran entre ambas tarjetas.
+        const appointmentsBySource = { bot: 0, manual: 0, client: 0, unknown: 0, total: 0 };
         try {
             const bookedEvents = await base(TABLE_APPOINTMENT_EVENTS).select({
                 filterByFormula: "{type}='booked'",
-                fields: ['source', 'createdAt']
+                fields: ['source', 'appointmentId', 'createdAt']
             }).all();
+            // Mapa appointmentId → source (del evento 'booked' más reciente).
+            const sourceByApptId: Record<string, string> = {};
+            const newestByApptId: Record<string, number> = {};
             for (const ev of bookedEvents) {
+                const apptId = (ev.get('appointmentId') as string) || '';
+                if (!apptId) continue;
                 const createdAt = (ev.get('createdAt') as string) || '';
-                if (!inPeriod(createdAt)) continue; // respeta el periodo seleccionado
-                const src = (ev.get('source') as string) || '';
-                const bucket: 'bot' | 'manual' | 'client' | null =
-                    src === 'bot' ? 'bot' : src === 'manual' ? 'manual' : src === 'client_whatsapp' ? 'client' : null;
-                if (!bucket) continue;
-                appointmentsBySource[bucket]++;
+                const t = createdAt ? new Date(createdAt).getTime() : 0;
+                if (newestByApptId[apptId] === undefined || t >= newestByApptId[apptId]) {
+                    newestByApptId[apptId] = t;
+                    sourceByApptId[apptId] = (ev.get('source') as string) || '';
+                }
             }
-            appointmentsBySource.total = appointmentsBySource.bot + appointmentsBySource.manual + appointmentsBySource.client;
+            // Iterar las MISMAS citas que cuenta incidents (Booked + ClientName).
+            for (const a of appointmentsAll) {
+                if (a.get('Status') !== 'Booked' || !a.get('ClientName')) continue;
+                const src = sourceByApptId[a.id] || '';
+                if (src === 'bot') appointmentsBySource.bot++;
+                else if (src === 'manual') appointmentsBySource.manual++;
+                else if (src === 'client_whatsapp') appointmentsBySource.client++;
+                else appointmentsBySource.unknown++;
+            }
+            appointmentsBySource.total = appointmentsBySource.bot + appointmentsBySource.manual + appointmentsBySource.client + appointmentsBySource.unknown;
         } catch (e: any) {
             console.warn('[Analytics] No se pudo leer AppointmentEvents para el desglose por origen:', e?.message);
         }

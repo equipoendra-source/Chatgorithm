@@ -481,9 +481,13 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
         const sel = data.appointmentsBySource;
         const bot = Number(sel?.bot) || 0;
         const manual = Number(sel?.manual) || 0;
-        const denom = bot + manual;
-        const pctBot = denom > 0 ? Math.round((bot / denom) * 100) : 0;
-        const pctManual = denom > 0 ? 100 - pctBot : 0;
+        // "Sin registrar" = citas sin evento de origen (antiguas) + las que el
+        // cliente inició. Se incluyen para que el TOTAL cuadre con "Con/Sin Cita".
+        const unknown = (Number(sel?.unknown) || 0) + (Number(sel?.client) || 0);
+        const total = bot + manual + unknown;
+        const pctBot = total > 0 ? Math.round((bot / total) * 100) : 0;
+        const pctManual = total > 0 ? Math.round((manual / total) * 100) : 0;
+        const pctUnknown = total > 0 ? Math.max(0, 100 - pctBot - pctManual) : 0;
         return (
           <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
             <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
@@ -492,8 +496,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
               </h3>
               <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>{periodLabel(period)}</span>
             </div>
-            {denom === 0 ? (
-              <p className="text-sm text-slate-400 italic">No hay citas registradas con su origen en este periodo.</p>
+            {total === 0 ? (
+              <p className="text-sm text-slate-400 italic">No hay citas en este periodo.</p>
             ) : (
               <>
                 <div className="flex items-center justify-between mb-3 gap-4">
@@ -512,16 +516,18 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
                     <div className={`p-2.5 rounded-xl shrink-0 ${isDark ? 'bg-cyan-500/20 text-cyan-400' : 'bg-cyan-50 text-cyan-600'}`}><Users size={22} /></div>
                   </div>
                 </div>
-                {/* Barra de proporción Laura vs equipo */}
+                {/* Barra de proporción: Laura (indigo) · Equipo (cyan) · Sin registrar (gris) */}
                 <div className={`h-3 rounded-full overflow-hidden flex ${isDark ? 'bg-slate-700' : 'bg-slate-200'}`}>
                   <div className="h-full bg-indigo-500 transition-all duration-500" style={{ width: `${pctBot}%` }} title={`Laura: ${bot} citas`} />
                   <div className="h-full bg-cyan-500 transition-all duration-500" style={{ width: `${pctManual}%` }} title={`Equipo: ${manual} citas`} />
+                  {unknown > 0 && <div className="h-full bg-slate-400 transition-all duration-500" style={{ width: `${pctUnknown}%` }} title={`Sin registrar: ${unknown} citas`} />}
                 </div>
-                <div className="flex items-center justify-between mt-2 text-[11px] font-semibold">
+                <div className="flex items-center justify-between mt-2 text-[11px] font-semibold gap-2 flex-wrap">
                   <span className="text-indigo-500">🤖 Laura · {bot}</span>
-                  <span className={isDark ? 'text-slate-400' : 'text-slate-400'}>{denom} citas en total</span>
+                  {unknown > 0 && <span className="text-slate-400" title="Citas antiguas sin registro de quién las cogió">◽ Sin registrar · {unknown}</span>}
                   <span className="text-cyan-500">👤 Equipo · {manual}</span>
                 </div>
+                <p className={`text-center text-[11px] mt-1.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{total} citas en total{unknown > 0 ? ' · «Sin registrar» = citas antiguas, anteriores al registro de origen' : ''}</p>
               </>
             )}
           </div>
