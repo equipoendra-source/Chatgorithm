@@ -7867,19 +7867,84 @@ app.get('/api/analytics', async (req, res) => {
         // Paralelizar las 3 lecturas de Airtable (antes secuenciales). En bases
         // con >5k mensajes la versión secuencial se acercaba al timeout del
         // hosting (30s Render free tier).
-        const [contacts, messages, appointmentsAll] = await Promise.all([
+        const [contacts, messagesAll, appointmentsAllRaw] = await Promise.all([
             base('Contacts').select().all(),
             base('Messages').select().all(),
             base('Appointments').select().all()
         ]);
-        const totalContacts = contacts.length;
+
+        // --- PERIODO seleccionable -------------------------------------------
+        // period: 'all' (histórico) | 'month' (mes en curso) | '7d' (últimos 7
+        // días) | 'YYYY-MM' (un mes concreto). Filtramos las colecciones de
+        // ACTIVIDAD (mensajes y citas) por el periodo; los datos "snapshot"
+        // (estado de los chats) siguen reflejando el momento actual.
+        const period = String(req.query.period || 'all');
+        const nowD = new Date();
+        const currentMonthKey = madridDay(nowD).slice(0, 7);
+        const sevenDaysAgoMs = nowD.getTime() - 7 * 24 * 60 * 60 * 1000;
+        const inPeriod = (iso: string | undefined | null): boolean => {
+            if (period === 'all') return true;
+            if (!iso) return false;
+            const d = new Date(iso);
+            if (isNaN(d.getTime())) return false;
+            if (period === '7d') return d.getTime() >= sevenDaysAgoMs;
+            const targetMonth = period === 'month' ? currentMonthKey : period; // 'YYYY-MM'
+            return madridDay(d).slice(0, 7) === targetMonth;
+        };
+        // Colecciones filtradas por periodo (para métricas de actividad).
+        const messages = period === 'all' ? messagesAll : messagesAll.filter(m => inPeriod(m.get('timestamp') as string));
+        const appointmentsAll = period === 'all' ? appointmentsAllRaw : appointmentsAllRaw.filter(a => inPeriod(a.get('Date') as string));
+
+        // Meses con actividad de mensajes (para poblar el selector del front),
+        // de más reciente a más antiguo.
+        const monthSet = new Set<string>();
+        messagesAll.forEach(m => { const ts = m.get('timestamp') as string; if (ts) { const d = new Date(ts); if (!isNaN(d.getTime())) monthSet.add(madridDay(d).slice(0, 7)); } });
+        const availableMonths = Array.from(monthSet).sort().reverse();
+
+        const phoneReKpi = /^[+]?[0-9]{8,}$/;
+        // Total contactos: histórico = todos; en un periodo = clientes con
+        // actividad (que escribieron/recibieron) en ese periodo.
+        let totalContacts: number;
+        if (period === 'all') {
+            totalContacts = contacts.length;
+        } else {
+            const activePhones = new Set<string>();
+            messages.forEach(m => {
+                const s = (m.get('sender') as string) || '';
+                const r = (m.get('recipient') as string) || '';
+                if (phoneReKpi.test(s)) activePhones.add(cleanNumber(s).slice(-9));
+                else if (phoneReKpi.test(r)) activePhones.add(cleanNumber(r).slice(-9));
+            });
+            totalContacts = activePhones.size;
+        }
         const totalMessages = messages.length;
-        const newLeads = contacts.filter(c => c.get('status') === 'Nuevo').length;
+        // Nuevos leads: histórico = contactos con status 'Nuevo'; en un periodo
+        // = clientes cuyo PRIMER mensaje (en toda su historia) cae dentro del
+        // periodo (= clientes realmente nuevos en ese tramo).
+        let newLeads: number;
+        if (period === 'all') {
+            newLeads = contacts.filter(c => c.get('status') === 'Nuevo').length;
+        } else {
+            const firstInboundMs: Record<string, number> = {};
+            messagesAll.forEach(m => {
+                const s = (m.get('sender') as string) || '';
+                if (!phoneReKpi.test(s)) return;
+                const ts = m.get('timestamp') as string;
+                const t = ts ? new Date(ts).getTime() : 0;
+                if (!t || isNaN(t)) return;
+                const key = cleanNumber(s).slice(-9);
+                if (!firstInboundMs[key] || t < firstInboundMs[key]) firstInboundMs[key] = t;
+            });
+            newLeads = Object.values(firstInboundMs).filter(t => inPeriod(new Date(t).toISOString())).length;
+        }
         const last7Days = [...Array(7)].map((_, i) => { const d = new Date(); d.setDate(d.getDate() - i); return d.toISOString().split('T')[0]; }).reverse();
-        const activityData = last7Days.map(date => { const count = messages.filter(m => { const mDate = (m.get('timestamp') as string || "").split('T')[0]; return mDate === date; }).length; return { date, label: new Date(date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }), count }; });
+        // El gráfico de barras SIEMPRE muestra los últimos 7 días reales (es una
+        // tendencia reciente útil en cualquier periodo) → usa messagesAll.
+        const activityData = last7Days.map(date => { const count = messagesAll.filter(m => { const mDate = (m.get('timestamp') as string || "").split('T')[0]; return mDate === date; }).length; return { date, label: new Date(date).toLocaleDateString('es-ES', { day: 'numeric', month: 'short' }), count }; });
         const agentStats: Record<string, any> = {};
         messages.forEach(m => { const s = (m.get('sender') as string) || ""; const r = (m.get('recipient') as string) || ""; const isPhone = /^\d+$/.test(s.replace(/\D/g, '')); if (!isPhone && s.toLowerCase() !== 'sistema' && s.trim() !== '') { if (!agentStats[s]) agentStats[s] = { msgs: 0, uniqueChats: new Set() }; agentStats[s].msgs += 1; if (r) agentStats[s].uniqueChats.add(r); } });
         const agentPerformance = Object.entries(agentStats).map(([name, data]) => ({ name, msgCount: data.msgs, chatCount: data.uniqueChats.size })).sort((a, b) => b.msgCount - a.msgCount).slice(0, 5);
+        // Estado de los chats: SNAPSHOT (cómo están AHORA), no se filtra por periodo.
         const statusMap: Record<string, number> = {}; contacts.forEach(c => { const s = (c.get('status') as string) || 'Otros'; statusMap[s] = (statusMap[s] || 0) + 1; });
         const statusDistribution = Object.entries(statusMap).map(([name, count]) => ({ name, count }));
 
@@ -7889,23 +7954,17 @@ app.get('/api/analytics', async (req, res) => {
         let incidentStats = { monthLabel: '', count: 0, total: 0, percentage: 0 };
         const allAppts: readonly any[] = appointmentsAll;
         try {
-            const now = new Date();
-            const monthKey = madridDay(now).slice(0, 7); // YYYY-MM
-            const monthBooked = allAppts.filter(a => {
-                const d = a.get('Date') as string;
-                if (!d || a.get('Status') !== 'Booked') return false;
-                // Solo líderes de bloque (ClientName no vacío). Sin este filtro,
-                // una avería multi-slot contaría 4 veces en el total y deflataría
-                // el % de incidentes (que solo marca el líder).
-                if (!a.get('ClientName')) return false;
-                return madridDay(new Date(d)).slice(0, 7) === monthKey;
-            });
-            const incCount = monthBooked.filter(a => !!a.get('Incident')).length;
+            // allAppts ya viene filtrado por el periodo seleccionado. Contamos
+            // las citas Booked (solo líderes de bloque: ClientName no vacío, para
+            // que una avería multi-slot no cuente 4 veces) y cuántas son
+            // incidencias (sin cita previa).
+            const periodBooked = allAppts.filter(a => a.get('Status') === 'Booked' && !!a.get('ClientName'));
+            const incCount = periodBooked.filter(a => !!a.get('Incident')).length;
             incidentStats = {
-                monthLabel: now.toLocaleDateString('es-ES', { month: 'long', year: 'numeric', timeZone: 'Europe/Madrid' }),
+                monthLabel: '',
                 count: incCount,
-                total: monthBooked.length,
-                percentage: monthBooked.length > 0 ? Math.round((incCount / monthBooked.length) * 100) : 0
+                total: periodBooked.length,
+                percentage: periodBooked.length > 0 ? Math.round((incCount / periodBooked.length) * 100) : 0
             };
         } catch (e: any) { console.error('[API] Error calculando incidentes:', e.message); }
 
@@ -8021,12 +8080,10 @@ app.get('/api/analytics', async (req, res) => {
             }
         });
 
-        // Citas por cuenta (matching de teléfono tolerante con/sin prefijo)
-        // totalAppointments cuenta TODAS las citas Booked (histórico).
-        // incidentsByAccount filtra SOLO las del mes en curso (mismo criterio
-        // que incidentStats global), para que los números cuadren entre la
-        // card global y las cards por línea del dashboard.
-        const incidentMonthKey = madridDay(new Date()).slice(0, 7);
+        // Citas por cuenta (matching de teléfono tolerante con/sin prefijo).
+        // allAppts ya viene filtrado por el periodo seleccionado, así que tanto
+        // totalAppointments como incidentsByAccount reflejan ese periodo (los
+        // números cuadran entre la card global y las cards por línea).
         const incidentsByAccount: Record<string, { total: number, incidents: number }> = {};
         accountIds.forEach(id => { incidentsByAccount[id] = { total: 0, incidents: 0 }; });
         allAppts.forEach(a => {
@@ -8041,11 +8098,6 @@ app.get('/api/analytics', async (req, res) => {
             const oid = phoneToAccount[cp] || phoneToAccount[last9];
             if (!oid || !perAccount[oid]) return;
             perAccount[oid].totalAppointments++;
-            // Incidentes solo del mes en curso (Madrid timezone)
-            const dStr = a.get('Date') as string;
-            if (!dStr) return;
-            const apptMonthKey = madridDay(new Date(dStr)).slice(0, 7);
-            if (apptMonthKey !== incidentMonthKey) return;
             incidentsByAccount[oid].total++;
             if (a.get('Incident')) incidentsByAccount[oid].incidents++;
         });
@@ -8096,32 +8148,22 @@ app.get('/api/analytics', async (req, res) => {
         //   client_whatsapp → la inició el cliente.
         // Tolerante a que la tabla no exista todavía (queda todo en 0, sin
         // romper el resto del dashboard).
+        // Desglose por quién cogió la cita, respetando el periodo (filtramos
+        // los eventos booked por su createdAt — cuándo se reservó).
         const appointmentsBySource = { bot: 0, manual: 0, client: 0, total: 0 };
-        // Mismo desglose pero agrupado por MES (clave YYYY-MM en zona Madrid),
-        // según cuándo se COGIÓ la cita (createdAt del evento). Permite el
-        // filtro por mes en el frontend sin recargar.
-        const appointmentsBySourceByMonth: Record<string, { bot: number, manual: number, client: number }> = {};
         try {
             const bookedEvents = await base(TABLE_APPOINTMENT_EVENTS).select({
                 filterByFormula: "{type}='booked'",
                 fields: ['source', 'createdAt']
             }).all();
             for (const ev of bookedEvents) {
+                const createdAt = (ev.get('createdAt') as string) || '';
+                if (!inPeriod(createdAt)) continue; // respeta el periodo seleccionado
                 const src = (ev.get('source') as string) || '';
                 const bucket: 'bot' | 'manual' | 'client' | null =
                     src === 'bot' ? 'bot' : src === 'manual' ? 'manual' : src === 'client_whatsapp' ? 'client' : null;
                 if (!bucket) continue;
                 appointmentsBySource[bucket]++;
-                // Agrupar por mes según createdAt (cuándo se reservó)
-                const createdAt = (ev.get('createdAt') as string) || '';
-                if (createdAt) {
-                    const d = new Date(createdAt);
-                    if (!isNaN(d.getTime())) {
-                        const monthKey = madridDay(d).slice(0, 7); // YYYY-MM
-                        if (!appointmentsBySourceByMonth[monthKey]) appointmentsBySourceByMonth[monthKey] = { bot: 0, manual: 0, client: 0 };
-                        appointmentsBySourceByMonth[monthKey][bucket]++;
-                    }
-                }
             }
             appointmentsBySource.total = appointmentsBySource.bot + appointmentsBySource.manual + appointmentsBySource.client;
         } catch (e: any) {
@@ -8129,6 +8171,8 @@ app.get('/api/analytics', async (req, res) => {
         }
 
         res.json({
+            period,
+            availableMonths,
             kpis: { totalContacts, totalMessages, newLeads },
             activity: activityData,
             activityByAccount,
@@ -8137,7 +8181,6 @@ app.get('/api/analytics', async (req, res) => {
             incidents: incidentStats,
             accounts: accountsArr,
             appointmentsBySource,
-            appointmentsBySourceByMonth,
             conversion: computeConversionKpis(contacts, messages, allAppts)
         });
     } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }

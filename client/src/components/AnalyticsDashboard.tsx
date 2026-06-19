@@ -75,10 +75,10 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
   // Pestañas: 'general' (analíticas existentes) | 'audit' (módulo premium)
   const [activeTab, setActiveTab] = useState<'general' | 'audit'>('general');
 
-  // Mes seleccionado en el cuadro "Citas · quién las cogió". 'all' = histórico
-  // completo; o una clave 'YYYY-MM' para filtrar a ese mes (según cuándo se
-  // cogió la cita).
-  const [sourceMonth, setSourceMonth] = useState<string>('all');
+  // Periodo GLOBAL del dashboard. Afecta a todas las métricas de actividad.
+  // 'all' = histórico · 'month' = mes en curso · '7d' = últimos 7 días ·
+  // 'YYYY-MM' = un mes concreto. Se manda al backend como ?period=...
+  const [period, setPeriod] = useState<string>('all');
 
   // Filtro por línea de WhatsApp. null = todas; string = id de la cuenta.
   // Inicializa con el filtro del Sidebar si se pasó.
@@ -108,7 +108,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
   // loading=true cada vez que llega un evento de cita).
   const fetchAnalytics = useCallback((silent = false) => {
     if (!silent) setLoading(true);
-    fetch(`${API_URL}/analytics`)
+    fetch(`${API_URL}/analytics?period=${encodeURIComponent(period)}`)
       .then(async res => {
         const json = await res.json();
         if (!res.ok) throw new Error(json.error || "Error al cargar datos");
@@ -130,7 +130,7 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
           setLoading(false);
         }
       });
-  }, []);
+  }, [period]);
 
   useEffect(() => {
     fetchAnalytics();
@@ -303,6 +303,20 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
     return rem === 0 ? `${h} h` : `${h}h ${rem}min`;
   };
 
+  // "2026-06" → "Junio 2026"
+  const fmtMonthLabel = (ym: string) => {
+    const [y, mo] = ym.split('-').map(Number);
+    const s = new Date(y, (mo || 1) - 1, 1).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+    return s.charAt(0).toUpperCase() + s.slice(1);
+  };
+  // Etiqueta legible del periodo seleccionado.
+  const periodLabel = (p: string) => {
+    if (p === 'all') return 'Histórico';
+    if (p === 'month') return 'Este mes';
+    if (p === '7d') return 'Últimos 7 días';
+    return fmtMonthLabel(p); // 'YYYY-MM'
+  };
+
   return (
     <div className="max-w-6xl mx-auto space-y-8 pb-10">
 
@@ -316,8 +330,35 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
               <BarChart3 className="text-indigo-600" /> Dashboard de Rendimiento
             </h1>
             <p className={`mt-1 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
-              Resumen de actividad de los últimos 7 días{selectedAccount ? ` · línea ${selectedAccount.name}` : (multiAccount ? ' · todas las líneas' : '')}.
+              Resumen de actividad · <strong>{periodLabel(period)}</strong>{selectedAccount ? ` · línea ${selectedAccount.name}` : (multiAccount ? ' · todas las líneas' : '')}.
             </p>
+            {/* Selector de PERIODO global: afecta a todas las métricas de
+                actividad del panel. */}
+            <div className="mt-3 flex items-center gap-2 flex-wrap">
+              {([['all', 'Histórico'], ['month', 'Este mes'], ['7d', 'Últimos 7 días']] as [string, string][]).map(([val, lbl]) => (
+                <button
+                  key={val}
+                  onClick={() => setPeriod(val)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold transition-all ${period === val
+                    ? (isDark ? 'bg-indigo-600 text-white shadow' : 'bg-indigo-600 text-white shadow-sm')
+                    : (isDark ? 'bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700' : 'bg-white text-slate-500 hover:text-slate-700 border border-slate-200')}`}
+                >
+                  {lbl}
+                </button>
+              ))}
+              {Array.isArray(data?.availableMonths) && data.availableMonths.length > 0 && (
+                <select
+                  value={(period === 'all' || period === 'month' || period === '7d') ? '' : period}
+                  onChange={e => { if (e.target.value) setPeriod(e.target.value); }}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer ${(period !== 'all' && period !== 'month' && period !== '7d')
+                    ? (isDark ? 'bg-indigo-600 text-white border-indigo-500' : 'bg-indigo-600 text-white border-indigo-600')
+                    : (isDark ? 'bg-slate-800 text-slate-400 border-slate-700' : 'bg-white text-slate-500 border-slate-200')}`}
+                >
+                  <option value="">Un mes…</option>
+                  {data.availableMonths.map((m: string) => <option key={m} value={m}>{fmtMonthLabel(m)}</option>)}
+                </select>
+              )}
+            </div>
           </div>
           {multiAccount && (
             <div className={`flex flex-wrap gap-1 p-1 rounded-xl ${isDark ? 'bg-slate-800/60 border border-slate-700' : 'bg-slate-100 border border-slate-200'}`}>
@@ -433,46 +474,26 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
       </div>
 
       {/* Citas · quién las cogió (Laura/bot vs equipo/manual). Dato GLOBAL
-          (todas las líneas) — viene de AppointmentEvents type='booked'.
-          Filtrable por mes (según cuándo se cogió la cita). La barra reparte
-          la proporción entre los dos. */}
+          (todas las líneas) — viene de AppointmentEvents type='booked' y ya
+          respeta el periodo global seleccionado arriba. La barra reparte la
+          proporción entre los dos. */}
       {data?.appointmentsBySource && (() => {
-        const byMonth: Record<string, { bot: number; manual: number; client: number }> = data.appointmentsBySourceByMonth || {};
-        // Meses con datos, de más reciente a más antiguo.
-        const months = Object.keys(byMonth).sort().reverse();
-        // Si el mes seleccionado ya no existe (cambió la data), caer a 'all'.
-        const effMonth = sourceMonth !== 'all' && byMonth[sourceMonth] ? sourceMonth : 'all';
-        const sel = effMonth === 'all' ? data.appointmentsBySource : byMonth[effMonth];
+        const sel = data.appointmentsBySource;
         const bot = Number(sel?.bot) || 0;
         const manual = Number(sel?.manual) || 0;
         const denom = bot + manual;
         const pctBot = denom > 0 ? Math.round((bot / denom) * 100) : 0;
         const pctManual = denom > 0 ? 100 - pctBot : 0;
-        // "2026-06" → "junio 2026"
-        const fmtMonth = (ym: string) => {
-          const [y, mo] = ym.split('-').map(Number);
-          const s = new Date(y, (mo || 1) - 1, 1).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
-          return s.charAt(0).toUpperCase() + s.slice(1);
-        };
         return (
           <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
             <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
               <h3 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>
                 <CalendarCheck size={16} className="text-indigo-400" /> Citas · quién las cogió
               </h3>
-              {months.length > 0 && (
-                <select
-                  value={effMonth}
-                  onChange={e => setSourceMonth(e.target.value)}
-                  className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer ${isDark ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-600'}`}
-                >
-                  <option value="all">Todo (histórico)</option>
-                  {months.map(m => <option key={m} value={m}>{fmtMonth(m)}</option>)}
-                </select>
-              )}
+              <span className={`text-[11px] font-semibold px-2 py-0.5 rounded-full ${isDark ? 'bg-slate-800 text-slate-400' : 'bg-slate-100 text-slate-500'}`}>{periodLabel(period)}</span>
             </div>
             {denom === 0 ? (
-              <p className="text-sm text-slate-400 italic">Aún no hay citas registradas con su origen.</p>
+              <p className="text-sm text-slate-400 italic">No hay citas registradas con su origen en este periodo.</p>
             ) : (
               <>
                 <div className="flex items-center justify-between mb-3 gap-4">
@@ -703,8 +724,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
                       <Clock size={11} /> Resp. media: <span className={`font-bold ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{formatMinutes(acc.avgResponseTimeMin)}</span>
                     </span>
                     {acc.incidents && acc.incidents.total > 0 && (
-                      <span className="flex items-center gap-1" title={`${acc.incidents.count} incidencia(s) sobre ${acc.incidents.total} citas de ${incidents.monthLabel || 'este mes'}`}>
-                        <Zap size={11} className={isDark ? 'text-amber-400' : 'text-amber-500'} /> Incid.{incidents.monthLabel ? ` ${incidents.monthLabel}` : ' (mes)'}: <span className={`font-bold ${acc.incidents.percentage > 20 ? 'text-amber-500' : (isDark ? 'text-slate-200' : 'text-slate-700')}`}>{acc.incidents.count}<span className="opacity-60"> ({acc.incidents.percentage}%)</span></span>
+                      <span className="flex items-center gap-1" title={`${acc.incidents.count} incidencia(s) sobre ${acc.incidents.total} citas · ${periodLabel(period)}`}>
+                        <Zap size={11} className={isDark ? 'text-amber-400' : 'text-amber-500'} /> Incid.: <span className={`font-bold ${acc.incidents.percentage > 20 ? 'text-amber-500' : (isDark ? 'text-slate-200' : 'text-slate-700')}`}>{acc.incidents.count}<span className="opacity-60"> ({acc.incidents.percentage}%)</span></span>
                       </span>
                     )}
                   </div>
@@ -749,7 +770,8 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
 
         {/* Distribución Estados */}
         <div className={`p-6 rounded-2xl border shadow-sm h-fit ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
-          <h3 className={`font-bold mb-4 ${isDark ? 'text-white' : 'text-slate-700'}`}>Estado de los Chats</h3>
+          <h3 className={`font-bold mb-1 ${isDark ? 'text-white' : 'text-slate-700'}`}>Estado de los Chats</h3>
+          <p className={`text-[11px] mb-4 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Foto de ahora mismo (no depende del periodo)</p>
           <div className="space-y-4">
             {statuses.length > 0 ? statuses.map((st: any, i: number) => (
               <div key={i}>
