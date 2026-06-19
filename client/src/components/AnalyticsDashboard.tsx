@@ -427,6 +427,57 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
         )}
       </div>
 
+      {/* Citas · quién las cogió (Laura/bot vs equipo/manual). Dato GLOBAL
+          (todas las líneas) — viene de AppointmentEvents type='booked'. La
+          barra reparte la proporción entre los dos. */}
+      {data?.appointmentsBySource && (() => {
+        const src = data.appointmentsBySource;
+        const bot = Number(src.bot) || 0;
+        const manual = Number(src.manual) || 0;
+        const denom = bot + manual;
+        const pctBot = denom > 0 ? Math.round((bot / denom) * 100) : 0;
+        const pctManual = denom > 0 ? 100 - pctBot : 0;
+        return (
+          <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
+            <h3 className={`text-xs font-bold uppercase tracking-wider mb-4 flex items-center gap-2 ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>
+              <CalendarCheck size={16} className="text-indigo-400" /> Citas · quién las cogió
+            </h3>
+            {denom === 0 ? (
+              <p className="text-sm text-slate-400 italic">Aún no hay citas registradas con su origen.</p>
+            ) : (
+              <>
+                <div className="flex items-center justify-between mb-3 gap-4">
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className={`p-2.5 rounded-xl shrink-0 ${isDark ? 'bg-indigo-500/20 text-indigo-400' : 'bg-indigo-50 text-indigo-600'}`}><Bot size={22} /></div>
+                    <div className="min-w-0">
+                      <p className={`text-[11px] font-bold uppercase ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>Laura (bot)</p>
+                      <h4 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{bot} <span className="text-sm font-bold text-indigo-500">{pctBot}%</span></h4>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3 min-w-0">
+                    <div className="text-right min-w-0">
+                      <p className={`text-[11px] font-bold uppercase ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>Equipo</p>
+                      <h4 className={`text-2xl font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>{manual} <span className="text-sm font-bold text-cyan-500">{pctManual}%</span></h4>
+                    </div>
+                    <div className={`p-2.5 rounded-xl shrink-0 ${isDark ? 'bg-cyan-500/20 text-cyan-400' : 'bg-cyan-50 text-cyan-600'}`}><Users size={22} /></div>
+                  </div>
+                </div>
+                {/* Barra de proporción Laura vs equipo */}
+                <div className={`h-3 rounded-full overflow-hidden flex ${isDark ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                  <div className="h-full bg-indigo-500 transition-all duration-500" style={{ width: `${pctBot}%` }} title={`Laura: ${bot} citas`} />
+                  <div className="h-full bg-cyan-500 transition-all duration-500" style={{ width: `${pctManual}%` }} title={`Equipo: ${manual} citas`} />
+                </div>
+                <div className="flex items-center justify-between mt-2 text-[11px] font-semibold">
+                  <span className="text-indigo-500">🤖 Laura · {bot}</span>
+                  <span className={isDark ? 'text-slate-400' : 'text-slate-400'}>{denom} citas en total</span>
+                  <span className="text-cyan-500">👤 Equipo · {manual}</span>
+                </div>
+              </>
+            )}
+          </div>
+        );
+      })()}
+
       {/* Gráfico de Barras (7 días) — simple cuando hay cuenta filtrada, apilado por línea cuando "Todas" */}
       <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
         <div className="flex items-center justify-between flex-wrap gap-2 mb-4">

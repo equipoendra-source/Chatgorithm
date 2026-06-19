@@ -8090,6 +8090,29 @@ app.get('/api/analytics', async (req, res) => {
             };
         });
 
+        // --- Desglose de citas por QUIÉN las reservó (Laura vs equipo) ---
+        // Fuente: AppointmentEvents type='booked' con su `source`:
+        //   bot → la cogió Laura · manual → la cogió el equipo a mano ·
+        //   client_whatsapp → la inició el cliente.
+        // Tolerante a que la tabla no exista todavía (queda todo en 0, sin
+        // romper el resto del dashboard).
+        const appointmentsBySource = { bot: 0, manual: 0, client: 0, total: 0 };
+        try {
+            const bookedEvents = await base(TABLE_APPOINTMENT_EVENTS).select({
+                filterByFormula: "{type}='booked'",
+                fields: ['source']
+            }).all();
+            for (const ev of bookedEvents) {
+                const src = (ev.get('source') as string) || '';
+                if (src === 'bot') appointmentsBySource.bot++;
+                else if (src === 'manual') appointmentsBySource.manual++;
+                else if (src === 'client_whatsapp') appointmentsBySource.client++;
+            }
+            appointmentsBySource.total = appointmentsBySource.bot + appointmentsBySource.manual + appointmentsBySource.client;
+        } catch (e: any) {
+            console.warn('[Analytics] No se pudo leer AppointmentEvents para el desglose por origen:', e?.message);
+        }
+
         res.json({
             kpis: { totalContacts, totalMessages, newLeads },
             activity: activityData,
@@ -8098,6 +8121,7 @@ app.get('/api/analytics', async (req, res) => {
             statuses: statusDistribution,
             incidents: incidentStats,
             accounts: accountsArr,
+            appointmentsBySource,
             conversion: computeConversionKpis(contacts, messages, allAppts)
         });
     } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }
