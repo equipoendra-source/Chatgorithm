@@ -47,6 +47,7 @@ import sharp from 'sharp';
 import { v2 as cloudinary } from 'cloudinary';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import * as XLSX from 'xlsx'; // Parseo de Excel (.xls/.xlsx) en la importación de contactos
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
@@ -11807,6 +11808,26 @@ function parseCsvText(text: string): { headers: string[]; rows: string[][]; sepa
     return { headers, rows: dataRows, separator };
 }
 
+// Parsea un Excel binario (.xls 97-2003 o .xlsx) a la MISMA forma que parseCsvText
+// ({headers, rows}), para que el resto del pipeline de importación no cambie.
+// - Lee SIEMPRE la primera hoja del libro.
+// - raw:false → SheetJS devuelve el texto tal como se VE en la celda. Esto evita
+//   que un teléfono guardado como número salga en notación científica (6,0012E+8).
+// - defval:'' → celdas vacías como cadena vacía (no undefined).
+function parseExcelBuffer(buffer: Buffer): { headers: string[]; rows: string[][]; separator: string } {
+    const wb = XLSX.read(buffer, { type: 'buffer' });
+    const firstSheetName = wb.SheetNames[0];
+    if (!firstSheetName) return { headers: [], rows: [], separator: 'excel' };
+    const sheet = wb.Sheets[firstSheetName];
+    const aoa: any[][] = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: '', blankrows: false });
+    // Descartar filas completamente vacías (igual que hace parseCsvText con el CSV)
+    const nonEmpty = aoa.filter(row => Array.isArray(row) && row.some(c => String(c ?? '').trim() !== ''));
+    if (nonEmpty.length === 0) return { headers: [], rows: [], separator: 'excel' };
+    const headers = (nonEmpty[0] || []).map((h: any) => String(h ?? '').trim());
+    const dataRows = nonEmpty.slice(1).map(row => row.map((c: any) => String(c ?? '')));
+    return { headers, rows: dataRows, separator: 'excel' };
+}
+
 // Sinónimos aceptados para mapear cabeceras (todas en lower y sin acentos)
 const HEADER_ALIASES: Record<string, string[]> = {
     name: ['nombre', 'name', 'cliente', 'contacto', 'nombrecompleto', 'nombre completo', 'nombre_completo', 'fullname', 'full name'],
@@ -11867,19 +11888,42 @@ app.get('/api/contacts/import-template', (_req, res) => {
 app.post('/api/contacts/import-preview', upload.single('file'), async (req: any, res: any) => {
     try {
         if (!req.file) return res.status(400).json({ error: 'No se recibió archivo' });
-        let text: string;
-        try {
-            text = req.file.buffer.toString('utf-8');
-            // Si vemos caracteres raros típicos de doble-encoding, probar latin1
-            if (/[�]/.test(text) || /Ã[¡©­³º±]/.test(text)) {
-                text = req.file.buffer.toString('latin1');
-            }
-        } catch {
-            text = req.file.buffer.toString('latin1');
-        }
 
-        const { headers, rows, separator } = parseCsvText(text);
-        if (headers.length === 0) return res.status(400).json({ error: 'CSV vacío o ilegible' });
+        // Detectar si es Excel binario por "magic bytes" (más fiable que la
+        // extensión o el mimetype del navegador): .xlsx empieza por 'PK\x03\x04'
+        // (es un ZIP/OOXML) y .xls 97-2003 por 'D0CF11E0' (OLE2). Un CSV/TXT
+        // nunca empieza por esos bytes, así que cero falsos positivos.
+        const buf: Buffer = req.file.buffer;
+        const isXlsx = buf.length >= 4 && buf[0] === 0x50 && buf[1] === 0x4B && buf[2] === 0x03 && buf[3] === 0x04;
+        const isXls = buf.length >= 8 && buf[0] === 0xD0 && buf[1] === 0xCF && buf[2] === 0x11 && buf[3] === 0xE0;
+
+        let headers: string[];
+        let rows: string[][];
+        let separator: string;
+
+        if (isXlsx || isXls) {
+            try {
+                ({ headers, rows, separator } = parseExcelBuffer(buf));
+            } catch (xe: any) {
+                console.error('[Import preview] Error leyendo Excel:', xe?.message);
+                return res.status(400).json({ error: 'No se pudo leer el archivo Excel. Asegúrate de que no esté protegido con contraseña y que tenga datos en la primera hoja.' });
+            }
+            if (headers.length === 0) return res.status(400).json({ error: 'El Excel está vacío o la primera hoja no tiene datos.' });
+        } else {
+            // CSV / TXT: leer como texto (utf-8 con fallback a latin1)
+            let text: string;
+            try {
+                text = buf.toString('utf-8');
+                // Si vemos caracteres raros típicos de doble-encoding, probar latin1
+                if (/[�]/.test(text) || /Ã[¡©­³º±]/.test(text)) {
+                    text = buf.toString('latin1');
+                }
+            } catch {
+                text = buf.toString('latin1');
+            }
+            ({ headers, rows, separator } = parseCsvText(text));
+            if (headers.length === 0) return res.status(400).json({ error: 'CSV vacío o ilegible' });
+        }
 
         const { mapping, unknown } = mapHeaders(headers);
         if (mapping.phone === undefined) {

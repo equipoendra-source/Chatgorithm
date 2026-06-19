@@ -207,7 +207,7 @@ export default function ContactImportWizard() {
                     <div className={`p-4 rounded-xl border flex gap-3 items-start ${isDark ? 'bg-blue-900/20 border-blue-800/50' : 'bg-blue-50 border-blue-200'}`}>
                         <FileText className={`shrink-0 mt-0.5 ${isDark ? 'text-blue-400' : 'text-blue-600'}`} size={20} />
                         <div className={`text-sm ${isDark ? 'text-blue-200' : 'text-blue-800'}`}>
-                            <p className="mb-2"><strong>Acepta CSV con cabecera</strong>, separador <code>,</code> o <code>;</code> (Excel español).</p>
+                            <p className="mb-2"><strong>Acepta CSV o Excel (.xls / .xlsx)</strong> con cabecera. CSV con separador <code>,</code> o <code>;</code> (Excel español); del Excel se lee la primera hoja.</p>
                             <p className="mb-2">Cabeceras reconocidas (cualquier sinónimo):</p>
                             <ul className="text-xs space-y-1 ml-4 list-disc">
                                 <li><strong>Nombre</strong> (también: name, cliente, contacto)</li>
@@ -224,7 +224,7 @@ export default function ContactImportWizard() {
                     </div>
 
                     <label className={`block p-8 rounded-xl border-2 border-dashed text-center cursor-pointer transition-all ${file ? (isDark ? 'border-emerald-600 bg-emerald-500/5' : 'border-emerald-400 bg-emerald-50/50') : (isDark ? 'border-slate-600 hover:border-slate-500 bg-slate-800/30' : 'border-slate-300 hover:border-emerald-400 bg-slate-50')}`}>
-                        <input ref={fileRef} type="file" accept=".csv,.txt" onChange={(e) => { setFile(e.target.files?.[0] || null); setErrorMsg(''); }} className="hidden" />
+                        <input ref={fileRef} type="file" accept=".csv,.txt,.xls,.xlsx" onChange={(e) => { setFile(e.target.files?.[0] || null); setErrorMsg(''); }} className="hidden" />
                         {file ? (
                             <div className="flex items-center justify-center gap-3">
                                 <FileText className="text-emerald-600" size={28} />
@@ -236,7 +236,7 @@ export default function ContactImportWizard() {
                         ) : (
                             <div>
                                 <Upload size={32} className={`mx-auto mb-2 ${isDark ? 'text-slate-500' : 'text-slate-400'}`} />
-                                <div className={`font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Pulsa para elegir un archivo CSV</div>
+                                <div className={`font-semibold ${isDark ? 'text-slate-300' : 'text-slate-700'}`}>Pulsa para elegir un archivo CSV o Excel</div>
                                 <div className="text-xs text-slate-500 mt-1">o arrástralo aquí</div>
                             </div>
                         )}
