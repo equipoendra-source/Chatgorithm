@@ -11830,16 +11830,43 @@ function parseExcelBuffer(buffer: Buffer): { headers: string[]; rows: string[][]
 
 // Sinónimos aceptados para mapear cabeceras (todas en lower y sin acentos)
 const HEADER_ALIASES: Record<string, string[]> = {
-    name: ['nombre', 'name', 'cliente', 'contacto', 'nombrecompleto', 'nombre completo', 'nombre_completo', 'fullname', 'full name'],
-    phone: ['telefono', 'teléfono', 'phone', 'movil', 'móvil', 'mobile', 'celular', 'whatsapp', 'numero', 'número', 'tel', 'tlf', 'tfno'],
+    name: ['nombre', 'name', 'cliente', 'contacto', 'nombrecompleto', 'nombre completo', 'nombre_completo', 'fullname', 'full name', 'nombre cliente'],
+    phone: ['telefono', 'teléfono', 'phone', 'numero', 'número', 'tel', 'tlf', 'tfno', 'fijo'],
+    // phone2 = segunda columna de teléfono (móvil). Si phone queda vacío se usa éste como fallback.
+    phone2: ['movil', 'móvil', 'mobile', 'celular', 'whatsapp', 'tel2', 'telefono2', 'telefono movil', 'teléfono móvil'],
     email: ['email', 'correo', 'e-mail', 'mail', 'correo electronico', 'correo electrónico'],
     address: ['direccion', 'dirección', 'address', 'domicilio', 'direccion postal'],
     department: ['departamento', 'department', 'depto', 'dpto', 'area', 'área', 'seccion', 'sección'],
     tags: ['etiquetas', 'tags', 'etiqueta', 'tag', 'categoria', 'categoría'],
+    matricula: ['matricula', 'matrícula', 'plate', 'license', 'licencia', 'placa', 'mat'],
+    marca: ['marca', 'brand', 'fabricante', 'mar', 'fabricante vehiculo', 'fabricante vehículo'],
+    modelo: ['modelo', 'model', 'mod', 'tipo vehiculo', 'tipo vehículo'],
 };
 
 const stripAccents = (s: string) => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
 const normalizeHeader = (h: string) => stripAccents(h.toLowerCase().trim());
+
+// Expande abreviaturas de marca de taller (2-3 letras) a nombre completo.
+// Si no coincide ninguna, devuelve el valor original para no perder información.
+const BRAND_ABBR: Record<string, string> = {
+    FO: 'Ford', VW: 'Volkswagen', OP: 'Opel', SE: 'Seat', PE: 'Peugeot',
+    RN: 'Renault', RE: 'Renault', CI: 'Citroën', CT: 'Citroën',
+    TO: 'Toyota', HO: 'Honda', NI: 'Nissan', HY: 'Hyundai', KI: 'Kia',
+    MB: 'Mercedes-Benz', BM: 'BMW', AU: 'Audi', SK: 'Škoda', FI: 'Fiat',
+    AL: 'Alfa Romeo', AR: 'Alfa Romeo', JE: 'Jeep', LR: 'Land Rover',
+    VO: 'Volvo', MA: 'Mazda', MI: 'Mitsubishi', SU: 'Subaru', DA: 'Dacia',
+    SS: 'Ssangyong', MG: 'MG', DF: 'DFSK', CH: 'Chery', GW: 'Great Wall',
+    PO: 'Porsche', LA: 'Lamborghini', FE: 'Ferrari', MS: 'Maserati',
+    IN: 'Infiniti', LE: 'Lexus', AC: 'Acura', LI: 'Lincoln', CA: 'Cadillac',
+    CR: 'Chrysler', DO: 'Dodge', JA: 'Jaguar', TT: 'Tesla', LT: 'Lancia',
+    SA: 'Saab', RO: 'Rover', BU: 'Buick', HU: 'Hummer', SM: 'Smart',
+    MN: 'MINI', VI: 'Viessmann',
+};
+function expandBrand(raw: string): string {
+    if (!raw) return '';
+    const up = raw.trim().toUpperCase();
+    return BRAND_ABBR[up] || raw.trim();
+}
 
 function mapHeaders(headers: string[]): { mapping: Record<string, number>; unknown: string[] } {
     const mapping: Record<string, number> = {};
@@ -11940,7 +11967,8 @@ app.post('/api/contacts/import-preview', upload.single('file'), async (req: any,
 
         rows.forEach((row, idx) => {
             const get = (key: string) => mapping[key] !== undefined ? (row[mapping[key]] || '').trim() : '';
-            const rawPhone = get('phone');
+            // Fallback: si la columna "phone" está vacía, usar "phone2" (móvil)
+            const rawPhone = get('phone') || get('phone2');
             const norm = normalizePhoneStrict(rawPhone);
             const name = get('name');
             const email = get('email');
@@ -11948,6 +11976,9 @@ app.post('/api/contacts/import-preview', upload.single('file'), async (req: any,
             const department = get('department');
             const tagsRaw = get('tags');
             const tags = tagsRaw ? tagsRaw.split(/[;,|]/).map(t => t.trim()).filter(Boolean) : [];
+            const matricula = get('matricula').replace(/\s+/g, '').toUpperCase();
+            const marca = expandBrand(get('marca'));
+            const modelo = get('modelo');
 
             const lineNum = idx + 2; // +1 por header, +1 porque empezamos en 1
             if (!norm.ok) {
@@ -11963,7 +11994,7 @@ app.post('/api/contacts/import-preview', upload.single('file'), async (req: any,
                 return; // saltar duplicados dentro del mismo CSV
             }
             seenPhones.add(norm.phone);
-            valid.push({ line: lineNum, name, phone: norm.phone, email, address, department, tags });
+            valid.push({ line: lineNum, name, phone: norm.phone, email, address, department, tags, matricula, marca, modelo });
         });
 
         // Comprobar cuáles ya existen en Airtable (en lotes para no saturar)
@@ -12044,6 +12075,9 @@ app.post('/api/contacts/import', async (req: any, res: any) => {
     // Separar en buckets de creación / actualización
     const toCreate: any[] = [];
     const toUpdate: any[] = [];
+    // Filas con vehículo (matrícula presente) para insertar en Vehicles tras los contactos
+    const vehicleRows: Array<{ phone: string; matricula: string; marca: string; modelo: string }> = [];
+
     rows.forEach((r: any) => {
         const phone = String(r.phone || '').trim();
         if (!phone) { failed++; errors.push({ phone: r.phone || '(vacío)', name: r.name || '', reason: 'Teléfono vacío' }); return; }
@@ -12069,6 +12103,16 @@ app.post('/api/contacts/import', async (req: any, res: any) => {
             // Sólo en creación añadimos status por defecto
             if (!fields.status) fields.status = 'Nuevo';
             toCreate.push({ fields });
+        }
+        // Registrar vehículo si viene matrícula (sea contacto nuevo o actualizado)
+        const matricula = String(r.matricula || '').replace(/\s+/g, '').toUpperCase();
+        if (matricula) {
+            vehicleRows.push({
+                phone,
+                matricula,
+                marca: expandBrand(String(r.marca || '')),
+                modelo: String(r.modelo || ''),
+            });
         }
     });
 
@@ -12105,7 +12149,21 @@ app.post('/api/contacts/import', async (req: any, res: any) => {
         if (i + BATCH < toUpdate.length) await sleep(PAUSE_MS);
     }
 
-    res.json({ success: true, created, updated, skipped, failed, errors });
+    // Upsert vehículos: uno a uno con pausa para no saturar Airtable.
+    // upsertVehicle ya maneja create vs update internamente.
+    let vehiclesUpserted = 0;
+    for (const v of vehicleRows) {
+        try {
+            await upsertVehicle(v.phone, v.matricula, v.marca, v.modelo, '', '');
+            vehiclesUpserted++;
+        } catch {
+            // No contamos como fallo de contacto — el vehículo es secundario
+        }
+        await sleep(150);
+    }
+    if (vehiclesUpserted > 0) console.log(`🚗 [Import] ${vehiclesUpserted} vehículo(s) upsertados desde importación`);
+
+    res.json({ success: true, created, updated, skipped, failed, errors, vehiclesUpserted });
 });
 
 // GET /api/contacts/:phone — datos básicos del contacto (estado actual + nombre).
