@@ -75,6 +75,11 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
   // Pestañas: 'general' (analíticas existentes) | 'audit' (módulo premium)
   const [activeTab, setActiveTab] = useState<'general' | 'audit'>('general');
 
+  // Mes seleccionado en el cuadro "Citas · quién las cogió". 'all' = histórico
+  // completo; o una clave 'YYYY-MM' para filtrar a ese mes (según cuándo se
+  // cogió la cita).
+  const [sourceMonth, setSourceMonth] = useState<string>('all');
+
   // Filtro por línea de WhatsApp. null = todas; string = id de la cuenta.
   // Inicializa con el filtro del Sidebar si se pasó.
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(initialAccountId || null);
@@ -428,20 +433,44 @@ const AnalyticsDashboard: React.FC<AnalyticsDashboardProps> = ({ initialAccountI
       </div>
 
       {/* Citas · quién las cogió (Laura/bot vs equipo/manual). Dato GLOBAL
-          (todas las líneas) — viene de AppointmentEvents type='booked'. La
-          barra reparte la proporción entre los dos. */}
+          (todas las líneas) — viene de AppointmentEvents type='booked'.
+          Filtrable por mes (según cuándo se cogió la cita). La barra reparte
+          la proporción entre los dos. */}
       {data?.appointmentsBySource && (() => {
-        const src = data.appointmentsBySource;
-        const bot = Number(src.bot) || 0;
-        const manual = Number(src.manual) || 0;
+        const byMonth: Record<string, { bot: number; manual: number; client: number }> = data.appointmentsBySourceByMonth || {};
+        // Meses con datos, de más reciente a más antiguo.
+        const months = Object.keys(byMonth).sort().reverse();
+        // Si el mes seleccionado ya no existe (cambió la data), caer a 'all'.
+        const effMonth = sourceMonth !== 'all' && byMonth[sourceMonth] ? sourceMonth : 'all';
+        const sel = effMonth === 'all' ? data.appointmentsBySource : byMonth[effMonth];
+        const bot = Number(sel?.bot) || 0;
+        const manual = Number(sel?.manual) || 0;
         const denom = bot + manual;
         const pctBot = denom > 0 ? Math.round((bot / denom) * 100) : 0;
         const pctManual = denom > 0 ? 100 - pctBot : 0;
+        // "2026-06" → "junio 2026"
+        const fmtMonth = (ym: string) => {
+          const [y, mo] = ym.split('-').map(Number);
+          const s = new Date(y, (mo || 1) - 1, 1).toLocaleDateString('es-ES', { month: 'long', year: 'numeric' });
+          return s.charAt(0).toUpperCase() + s.slice(1);
+        };
         return (
           <div className={`p-6 rounded-2xl border shadow-sm ${isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200'}`}>
-            <h3 className={`text-xs font-bold uppercase tracking-wider mb-4 flex items-center gap-2 ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>
-              <CalendarCheck size={16} className="text-indigo-400" /> Citas · quién las cogió
-            </h3>
+            <div className="flex items-center justify-between gap-3 mb-4 flex-wrap">
+              <h3 className={`text-xs font-bold uppercase tracking-wider flex items-center gap-2 ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>
+                <CalendarCheck size={16} className="text-indigo-400" /> Citas · quién las cogió
+              </h3>
+              {months.length > 0 && (
+                <select
+                  value={effMonth}
+                  onChange={e => setSourceMonth(e.target.value)}
+                  className={`text-xs font-semibold px-2.5 py-1.5 rounded-lg border outline-none focus:ring-2 focus:ring-indigo-500 cursor-pointer ${isDark ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-600'}`}
+                >
+                  <option value="all">Todo (histórico)</option>
+                  {months.map(m => <option key={m} value={m}>{fmtMonth(m)}</option>)}
+                </select>
+              )}
+            </div>
             {denom === 0 ? (
               <p className="text-sm text-slate-400 italic">Aún no hay citas registradas con su origen.</p>
             ) : (

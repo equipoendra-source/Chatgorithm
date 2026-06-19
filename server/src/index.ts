@@ -8097,16 +8097,31 @@ app.get('/api/analytics', async (req, res) => {
         // Tolerante a que la tabla no exista todavía (queda todo en 0, sin
         // romper el resto del dashboard).
         const appointmentsBySource = { bot: 0, manual: 0, client: 0, total: 0 };
+        // Mismo desglose pero agrupado por MES (clave YYYY-MM en zona Madrid),
+        // según cuándo se COGIÓ la cita (createdAt del evento). Permite el
+        // filtro por mes en el frontend sin recargar.
+        const appointmentsBySourceByMonth: Record<string, { bot: number, manual: number, client: number }> = {};
         try {
             const bookedEvents = await base(TABLE_APPOINTMENT_EVENTS).select({
                 filterByFormula: "{type}='booked'",
-                fields: ['source']
+                fields: ['source', 'createdAt']
             }).all();
             for (const ev of bookedEvents) {
                 const src = (ev.get('source') as string) || '';
-                if (src === 'bot') appointmentsBySource.bot++;
-                else if (src === 'manual') appointmentsBySource.manual++;
-                else if (src === 'client_whatsapp') appointmentsBySource.client++;
+                const bucket: 'bot' | 'manual' | 'client' | null =
+                    src === 'bot' ? 'bot' : src === 'manual' ? 'manual' : src === 'client_whatsapp' ? 'client' : null;
+                if (!bucket) continue;
+                appointmentsBySource[bucket]++;
+                // Agrupar por mes según createdAt (cuándo se reservó)
+                const createdAt = (ev.get('createdAt') as string) || '';
+                if (createdAt) {
+                    const d = new Date(createdAt);
+                    if (!isNaN(d.getTime())) {
+                        const monthKey = madridDay(d).slice(0, 7); // YYYY-MM
+                        if (!appointmentsBySourceByMonth[monthKey]) appointmentsBySourceByMonth[monthKey] = { bot: 0, manual: 0, client: 0 };
+                        appointmentsBySourceByMonth[monthKey][bucket]++;
+                    }
+                }
             }
             appointmentsBySource.total = appointmentsBySource.bot + appointmentsBySource.manual + appointmentsBySource.client;
         } catch (e: any) {
@@ -8122,6 +8137,7 @@ app.get('/api/analytics', async (req, res) => {
             incidents: incidentStats,
             accounts: accountsArr,
             appointmentsBySource,
+            appointmentsBySourceByMonth,
             conversion: computeConversionKpis(contacts, messages, allAppts)
         });
     } catch (e: any) { console.error('[API] Error GET /analytics:', e.message); res.status(500).json({ error: "Error" }); }
