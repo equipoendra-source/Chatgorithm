@@ -11991,10 +11991,19 @@ app.post('/api/contacts/import-preview', upload.single('file'), async (req: any,
             }
             if (seenPhones.has(norm.phone)) {
                 duplicatesInFile++;
-                return; // saltar duplicados dentro del mismo CSV
+                // El contacto ya existe en valid, pero puede traer un vehículo
+                // DIFERENTE (cliente con 2 coches en el fichero). Lo acumulamos
+                // en el array vehicles del entry ya registrado.
+                if (matricula) {
+                    const existing = valid.find((v: any) => v.phone === norm.phone);
+                    if (existing) existing.vehicles.push({ matricula, marca, modelo });
+                }
+                return;
             }
             seenPhones.add(norm.phone);
-            valid.push({ line: lineNum, name, phone: norm.phone, email, address, department, tags, matricula, marca, modelo });
+            // vehicles como array desde el principio para soportar multi-vehículo
+            const vehicles = matricula ? [{ matricula, marca, modelo }] : [];
+            valid.push({ line: lineNum, name, phone: norm.phone, email, address, department, tags, vehicles });
         });
 
         // Comprobar cuáles ya existen en Airtable (en lotes para no saturar)
@@ -12104,15 +12113,11 @@ app.post('/api/contacts/import', async (req: any, res: any) => {
             if (!fields.status) fields.status = 'Nuevo';
             toCreate.push({ fields });
         }
-        // Registrar vehículo si viene matrícula (sea contacto nuevo o actualizado)
-        const matricula = String(r.matricula || '').replace(/\s+/g, '').toUpperCase();
-        if (matricula) {
-            vehicleRows.push({
-                phone,
-                matricula,
-                marca: expandBrand(String(r.marca || '')),
-                modelo: String(r.modelo || ''),
-            });
+        // Registrar TODOS los vehículos del cliente (array — puede tener 2+ coches)
+        const rvehicles: any[] = Array.isArray(r.vehicles) ? r.vehicles : [];
+        for (const v of rvehicles) {
+            const mat = String(v.matricula || '').replace(/\s+/g, '').toUpperCase();
+            if (mat) vehicleRows.push({ phone, matricula: mat, marca: expandBrand(String(v.marca || '')), modelo: String(v.modelo || '') });
         }
     });
 
