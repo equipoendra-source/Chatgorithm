@@ -108,6 +108,20 @@ const isClientStatusDelivered = (clientStatus?: string | null): boolean => {
 const shouldPaintDelivered = (s: { clientStatus?: string | null; deliveredAt?: string | null }): boolean =>
     isClientStatusDelivered(s.clientStatus) && !!s.deliveredAt;
 
+// Rosa en el calendario si el Estado del Cliente es "Abierto" (el cliente
+// está en proceso, todavía no se le ha entregado el coche). Útil para
+// distinguir de un vistazo los que están "en marcha" de las reservas
+// normales (naranja) y los entregados (verde). Mismo patrón normalizado
+// que isClientStatusDelivered.
+const isClientStatusOpen = (clientStatus?: string | null): boolean => {
+    const norm = (s: string) => (s || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
+    return norm(clientStatus || '') === 'abierto';
+};
+// Solo se pinta rosa cuando la cita SIGUE reservada (Booked) y el cliente
+// está en "Abierto". Si ya está entregada, manda el verde (delivered).
+const shouldPaintOpen = (s: { clientStatus?: string | null; deliveredAt?: string | null; status: string }): boolean =>
+    !shouldPaintDelivered(s) && s.status === 'Booked' && isClientStatusOpen(s.clientStatus);
+
 // Tipo de servicio con duración variable dentro de una agenda
 interface AgendaService {
     id: string;
@@ -1598,9 +1612,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             onClick={() => handleOpenEdit(s)}
             className={`text-xs md:text-[10px] px-3 py-2 md:px-2 md:py-1.5 rounded-lg md:rounded cursor-pointer transition flex justify-between items-center border ${shouldPaintDelivered(s)
                 ? (isDark ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90' : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
-                : s.status === 'Booked'
-                    ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
-                    : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
+                : shouldPaintOpen(s)
+                    ? (isDark ? 'bg-pink-700/80 border-pink-400 text-white hover:bg-pink-600/90' : 'bg-pink-400 border-pink-600 text-pink-950 hover:bg-pink-500')
+                    : s.status === 'Booked'
+                        ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
+                        : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
                 }`}
         >
             <div className="flex flex-col md:flex-row md:items-center gap-1">
@@ -1617,7 +1633,9 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 {s.status === 'Booked' && (
                     <span className={`md:hidden text-[10px] font-medium truncate max-w-[120px] ${shouldPaintDelivered(s)
                         ? (isDark ? 'text-emerald-400' : 'text-emerald-500')
-                        : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
+                        : shouldPaintOpen(s)
+                            ? (isDark ? 'text-pink-400' : 'text-pink-500')
+                            : (isDark ? 'text-amber-400' : 'text-amber-500')}`}>
                         • {s.clientName || 'Cliente'}
                     </span>
                 )}
@@ -1645,6 +1663,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // deliveredAt. Así si después de entregar el coche el compañero cambia el
         // status a "Cerrado", la cita deja de mostrarse en verde.
         const isDelivered = shouldPaintDelivered(s);
+        const isOpen = shouldPaintOpen(s);
         const isBooked = s.status === 'Booked';
         return (
             <div
@@ -1652,9 +1671,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 onClick={() => handleOpenEdit(s)}
                 className={`text-xs px-2.5 py-1.5 rounded-lg cursor-pointer transition flex items-center gap-1.5 border ${isDelivered
                     ? (isDark ? 'bg-emerald-700/80 border-emerald-400 text-white hover:bg-emerald-600/90' : 'bg-emerald-400 border-emerald-600 text-emerald-950 hover:bg-emerald-500')
-                    : isBooked
-                        ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
-                        : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
+                    : isOpen
+                        ? (isDark ? 'bg-pink-700/80 border-pink-400 text-white hover:bg-pink-600/90' : 'bg-pink-400 border-pink-600 text-pink-950 hover:bg-pink-500')
+                        : isBooked
+                            ? (isDark ? 'bg-amber-700/80 border-amber-400 text-white hover:bg-amber-600/90' : 'bg-amber-400 border-amber-600 text-amber-950 hover:bg-amber-500')
+                            : (isDark ? 'bg-sky-700/70 border-sky-400 text-white hover:bg-sky-600/80' : 'bg-sky-400 border-sky-600 text-sky-950 hover:bg-sky-500')
                     }`}
             >
                 {agendas.length > 1 && s.agenda && (
