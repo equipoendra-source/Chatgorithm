@@ -2689,6 +2689,35 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
             console.error('❌ [PostVenta] Error cancelando secuencia:', e)
         );
     }
+
+    // Cambio a "Abierto" → el cliente YA está en el taller (dejó el coche),
+    // así que los recordatorios automáticos de su cita más próxima (24h y 1h
+    // antes) no tienen sentido y le llegarían como spam ("recuerda tu cita de
+    // las 12h" cuando ya está aquí). Los cancelamos QUIRÚRGICAMENTE: solo de
+    // la próxima cita Booked, no de otras citas futuras que pueda tener.
+    if (newStatus === 'Abierto' && oldStatus !== 'Abierto') {
+        try {
+            const nowIso = new Date().toISOString();
+            // Próxima cita Booked del cliente (líder de bloque: ClientName!='').
+            // Buscamos por phoneMatch (sufijo 9 dígitos) tras leer, porque
+            // ClientPhone se guarda sin prefijo y clean viene con prefijo.
+            const nextAppts = await base('Appointments').select({
+                filterByFormula: `AND({Status}='Booked', {ClientName}!='', {Date}>='${nowIso}')`,
+                sort: [{ field: 'Date', direction: 'asc' }],
+                maxRecords: 50,
+                fields: ['Date', 'ClientPhone']
+            }).all();
+            const next = nextAppts.find(a => phoneMatch(a.get('ClientPhone') as string, clean));
+            if (next) {
+                const cancelled = await cancelRemindersForAppointment(next.id);
+                if (cancelled > 0) {
+                    console.log(`🛎️ [Abierto] ${cancelled} recordatorio(s) de cita cancelado(s) para ${clean} (cita ${next.id})`);
+                }
+            }
+        } catch (e: any) {
+            console.error('[Abierto] Error cancelando recordatorios al abrir:', e?.message);
+        }
+    }
 }
 
 // --- Opt-out: cliente escribe BAJA ---
@@ -4626,6 +4655,30 @@ async function cancelAppointment(clientPhone: string, source: 'bot' | 'manual' |
     } catch (e: any) {
         console.error(`❌ [Cancel] Error:`, e.message);
         return "Error técnico al cancelar.";
+    }
+}
+
+// Cancela los recordatorios de cita pendientes de UNA cita concreta
+// (por appointmentId). Usado al pasar a "Abierto": el cliente ya está en
+// el taller, así que cita_24h/cita_1h (y los team_*) ya no tienen sentido.
+// Quirúrgico: solo toca los recordatorios DE ESA cita, no los de otras
+// citas futuras del mismo cliente.
+async function cancelRemindersForAppointment(appointmentId: string): Promise<number> {
+    if (!base || !appointmentId) return 0;
+    try {
+        const pend = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND({appointmentId}='${escAt(appointmentId)}', {status}='pending', FIND('cita', {type})>0)`
+        }).all();
+        for (let i = 0; i < pend.length; i += 10) {
+            await base(TABLE_SCHEDULED_NOTIFICATIONS).update(
+                pend.slice(i, i + 10).map(r => ({ id: r.id, fields: { status: 'cancelled' as const } }))
+            );
+            await delay(200);
+        }
+        return pend.length;
+    } catch (e: any) {
+        console.error('[CancelByAppt] Error cancelando recordatorios de la cita:', e?.message);
+        return 0;
     }
 }
 
