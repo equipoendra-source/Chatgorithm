@@ -2690,12 +2690,18 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
         );
     }
 
-    // Cambio a "Abierto" → el cliente YA está en el taller (dejó el coche),
-    // así que los recordatorios automáticos de su cita más próxima (24h y 1h
-    // antes) no tienen sentido y le llegarían como spam ("recuerda tu cita de
-    // las 12h" cuando ya está aquí). Los cancelamos QUIRÚRGICAMENTE: solo de
-    // la próxima cita Booked, no de otras citas futuras que pueda tener.
-    if (newStatus === 'Abierto' && oldStatus !== 'Abierto') {
+    // Cambio a "En taller" → el cliente YA está físicamente en el taller
+    // (dejó el coche), así que los recordatorios automáticos de su cita más
+    // próxima (24h y 1h antes) no tienen sentido y le llegarían como spam
+    // ("recuerda tu cita de las 12h" cuando ya está aquí). Los cancelamos
+    // QUIRÚRGICAMENTE: solo de la próxima cita Booked, no de otras citas
+    // futuras que pueda tener.
+    //
+    // OJO: este disparador es por CAMBIO de estado a "En taller". El equipo
+    // debe cambiarlo manualmente cuando reciba el coche; no se autosetea.
+    // ("Abierto" se autosetea cuando alguien responde al cliente y por eso
+    //  NO sirve como señal de "ya está en el taller hoy".)
+    if (newStatus === 'En taller' && oldStatus !== 'En taller') {
         try {
             const nowIso = new Date().toISOString();
             // Próxima cita Booked del cliente (líder de bloque: ClientName!='').
@@ -2711,11 +2717,11 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
             if (next) {
                 const cancelled = await cancelRemindersForAppointment(next.id);
                 if (cancelled > 0) {
-                    console.log(`🛎️ [Abierto] ${cancelled} recordatorio(s) de cita cancelado(s) para ${clean} (cita ${next.id})`);
+                    console.log(`🛎️ [EnTaller] ${cancelled} recordatorio(s) de cita cancelado(s) para ${clean} (cita ${next.id})`);
                 }
             }
         } catch (e: any) {
-            console.error('[Abierto] Error cancelando recordatorios al abrir:', e?.message);
+            console.error('[EnTaller] Error cancelando recordatorios:', e?.message);
         }
     }
 }

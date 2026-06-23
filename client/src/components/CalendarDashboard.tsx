@@ -108,19 +108,19 @@ const isClientStatusDelivered = (clientStatus?: string | null): boolean => {
 const shouldPaintDelivered = (s: { clientStatus?: string | null; deliveredAt?: string | null }): boolean =>
     isClientStatusDelivered(s.clientStatus) && !!s.deliveredAt;
 
-// Rosa en el calendario si el Estado del Cliente es "Abierto" (el cliente
-// está en proceso, todavía no se le ha entregado el coche). Útil para
-// distinguir de un vistazo los que están "en marcha" de las reservas
+// Rosa en el calendario si el Estado del Cliente es "En taller" (el cliente
+// ya dejó el coche, está siendo atendido). Útil para distinguir de un
+// vistazo los que están físicamente en el taller hoy de las reservas
 // normales (naranja) y los entregados (verde). Mismo patrón normalizado
 // que isClientStatusDelivered.
-const isClientStatusOpen = (clientStatus?: string | null): boolean => {
+const isClientStatusEnTaller = (clientStatus?: string | null): boolean => {
     const norm = (s: string) => (s || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '').trim().toLowerCase();
-    return norm(clientStatus || '') === 'abierto';
+    return norm(clientStatus || '') === 'en taller';
 };
 // Solo se pinta rosa cuando la cita SIGUE reservada (Booked) y el cliente
-// está en "Abierto". Si ya está entregada, manda el verde (delivered).
+// está en "En taller". Si ya está entregada, manda el verde (delivered).
 const shouldPaintOpen = (s: { clientStatus?: string | null; deliveredAt?: string | null; status: string }): boolean =>
-    !shouldPaintDelivered(s) && s.status === 'Booked' && isClientStatusOpen(s.clientStatus);
+    !shouldPaintDelivered(s) && s.status === 'Booked' && isClientStatusEnTaller(s.clientStatus);
 
 // Tipo de servicio con duración variable dentro de una agenda
 interface AgendaService {
