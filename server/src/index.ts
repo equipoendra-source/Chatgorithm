@@ -2988,15 +2988,16 @@ async function runNotificationScheduler() {
             }).firstPage();
             // Excluido de recordatorios (opted_out_notifications = campo antiguo, respaldo)
             if (contact.length > 0 && (contact[0].get('opted_out_reminders') || contact[0].get('opted_out_notifications'))) continue;
-            // Cliente "En taller": ya está físicamente en el taller con el coche,
-            // los recordatorios 24h/1h no tienen sentido y serían spam.
-            if (contact.length > 0 && ((contact[0].get('status') as string) || '').trim().toLowerCase() === 'en taller') continue;
             await delay(100);
 
             const clientName = (appt.get('ClientName') as string) || 'cliente';
             const originId = (contact.length > 0 && contact[0].get('origin_phone_id') as string) || waPhoneId || 'default';
             const dateStr = apptDate.toLocaleDateString('es-ES', { weekday: 'long', day: 'numeric', month: 'long', timeZone: 'Europe/Madrid' });
             const timeStr = apptDate.toLocaleTimeString('es-ES', { hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Madrid' });
+
+            // Cliente "En taller": ya dejó el coche, los recordatorios WhatsApp
+            // 24h/1h al cliente son spam. Los del equipo sí se siguen creando.
+            const isEnTaller = contact.length > 0 && ((contact[0].get('status') as string) || '').trim().toLowerCase() === 'en taller';
 
             // T-24h: programamos cuando quedan ≤26h. scheduledFor = apptDate - 24h
             // exactos para que el scheduler dispare el envío 24h antes de la cita,
@@ -3006,7 +3007,7 @@ async function runNotificationScheduler() {
             // scheduleNotification crea el registro y el scheduler lo deja
             // pendiente hasta que llegue su fecha real.
             // Idempotencia por type+phone+appointmentId evita duplicar.
-            if (hoursUntil <= 26 && hoursUntil >= 1) {
+            if (!isEnTaller && hoursUntil <= 26 && hoursUntil >= 1) {
                 const sf24 = new Date(apptDate.getTime() - 24 * 60 * 60 * 1000).toISOString();
                 await scheduleNotification({
                     type: 'cita_24h', phone: clientPhone, appointmentId: appt.id,
@@ -3019,7 +3020,7 @@ async function runNotificationScheduler() {
 
             // T-1h: programamos cuando quedan ≤75 min. scheduledFor = apptDate - 1h
             // exactos por el mismo motivo que T-24h.
-            if (minutesUntil <= 75 && minutesUntil >= 5) {
+            if (!isEnTaller && minutesUntil <= 75 && minutesUntil >= 5) {
                 const sf1 = new Date(apptDate.getTime() - 60 * 60 * 1000).toISOString();
                 await scheduleNotification({
                     type: 'cita_1h', phone: clientPhone, appointmentId: appt.id,
