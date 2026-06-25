@@ -6,10 +6,10 @@ export interface HumanAttentionNotification {
     id: string;                  // único (phone + timestamp) para evitar duplicados
     phone: string;               // teléfono normalizado del cliente
     clientName: string;
-    reason: 'human_request' | 'customer_upset';
-    reasonLabel: string;         // texto legible: "pide hablar con una persona" / "parece molesto/a"
-    snippet?: string;            // fragmento del mensaje del cliente que disparó
-    source: 'keyword' | 'bot';   // de dónde vino la detección (interno)
+    reason: 'human_request' | 'customer_upset' | 'assigned_to_dept';
+    reasonLabel: string;         // texto legible: "pide hablar con una persona" / "parece molesto/a" / "derivado al equipo"
+    snippet?: string;            // fragmento del mensaje del cliente que disparó / contexto del aviso
+    source: 'keyword' | 'bot' | 'department';   // de dónde vino la detección (interno)
     accountId?: string;
     accountName?: string;
     createdAt: string;           // ISO de cuándo se generó

@@ -1677,7 +1677,7 @@ async function notifyClientOfManualCancellation(data: {
 // Idempotente "soft": si se dispara dos veces para el mismo phone en menos
 // de 30s, suprime el aviso duplicado (evita spam si el cliente escribe
 // "quiero hablar con persona quiero hablar con persona" en 2 mensajes).
-type AttentionReason = 'human_request' | 'customer_upset';
+type AttentionReason = 'human_request' | 'customer_upset' | 'assigned_to_dept';
 const recentAttentionAlerts = new Map<string, number>();
 const ATTENTION_DEDUP_MS = 30_000;
 async function notifyHumanAttention(data: {
@@ -1686,7 +1686,7 @@ async function notifyHumanAttention(data: {
     reason: AttentionReason;
     snippet: string;            // fragmento del mensaje del cliente que disparó (max ~120 chars)
     originPhoneId?: string;
-    source: 'keyword' | 'bot';  // de dónde vino la detección
+    source: 'keyword' | 'bot' | 'department';  // de dónde vino la detección
 }) {
     const clean = cleanNumber(data.clientPhone);
     if (!clean) return;
@@ -1719,6 +1719,7 @@ async function notifyHumanAttention(data: {
     const reasonText: Record<AttentionReason, string> = {
         human_request: 'pide hablar con una persona',
         customer_upset: 'parece molesto/a',
+        assigned_to_dept: 'derivado al equipo',
     };
     const title = `🚨 URGENTE — ${data.clientName || 'Cliente'} ${reasonText[data.reason]}`;
     const body = data.snippet ? `"${truncate(data.snippet, 120)}"` : 'Atiéndelo cuanto antes.';
@@ -5900,6 +5901,17 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                             ? `Te he derivado al equipo de ${deptName}. En unos minutos un compañero te atenderá por aquí 🙏`
                             : `Te he derivado al equipo de ${deptName}. En cuanto haya alguien disponible te contactaremos.`;
                         await sendWhatsAppText(clean, msg, originPhoneId);
+                        // 🚨 Alarma roja al equipo: cliente derivado a un dpto,
+                        // hay que atenderle por aquí. Igual UI que human_request /
+                        // customer_upset (toast rojo + sonido + push urgente).
+                        notifyHumanAttention({
+                            clientPhone: clean,
+                            clientName: contactName || 'Cliente',
+                            reason: 'assigned_to_dept',
+                            snippet: `Derivado a "${deptName}" por Laura. ${hasAgent ? 'Hay un agente asignado.' : 'Sin agente asignado todavía.'}`,
+                            originPhoneId,
+                            source: 'department'
+                        });
                     } else {
                         // assignDepartment devolvió "Contacto no encontrado.",
                         // "Error asignando." o similar → el cliente seguiría
