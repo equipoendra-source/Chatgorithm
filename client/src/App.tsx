@@ -766,9 +766,15 @@ function App() {
             <HumanAttentionToast
                 notifications={humanAttentionNotifs}
                 onOpen={(n) => {
-                    // Llevar al chat del cliente que necesita atención.
-                    setView('chat');
-                    try { sessionStorage.setItem('focusPhone', n.phone); } catch (_) { /* no-op */ }
+                    // Llevar al chat del cliente que necesita atención. Reusa
+                    // la misma función que GlobalSearch para abrir contactos
+                    // a partir solo del teléfono — reconstruye el Contact y
+                    // actualiza selectedContact + view='chat'.
+                    handleSearchSelectContact({
+                        phone: n.phone,
+                        name: n.clientName,
+                        origin_phone_id: n.accountId || undefined,
+                    });
                     setHumanAttentionNotifs(prev => prev.filter(x => x.id !== n.id));
                 }}
                 onDismiss={(id) => setHumanAttentionNotifs(prev => prev.filter(x => x.id !== id))}
