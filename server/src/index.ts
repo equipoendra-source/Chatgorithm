@@ -2988,6 +2988,9 @@ async function runNotificationScheduler() {
             }).firstPage();
             // Excluido de recordatorios (opted_out_notifications = campo antiguo, respaldo)
             if (contact.length > 0 && (contact[0].get('opted_out_reminders') || contact[0].get('opted_out_notifications'))) continue;
+            // Cliente "En taller": ya está físicamente en el taller con el coche,
+            // los recordatorios 24h/1h no tienen sentido y serían spam.
+            if (contact.length > 0 && ((contact[0].get('status') as string) || '').trim().toLowerCase() === 'en taller') continue;
             await delay(100);
 
             const clientName = (appt.get('ClientName') as string) || 'cliente';
