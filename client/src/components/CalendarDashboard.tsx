@@ -1522,9 +1522,19 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                 <div className="flex-1 min-w-0 flex flex-col justify-center">
                     {isBooked ? (
                         <>
-                            <span className={`font-bold text-sm truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
-                                {s.clientName || 'Cliente'}
-                            </span>
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <span className={`font-bold text-sm truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                    {s.clientName || 'Cliente'}
+                                </span>
+                                {s.serviceType && (
+                                    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wide border flex-shrink-0 ${isBreakdownService(s.serviceType)
+                                        ? (isDark ? 'bg-amber-900/40 text-amber-300 border-amber-700' : 'bg-amber-100 text-amber-800 border-amber-300')
+                                        : (isDark ? 'bg-blue-900/40 text-blue-300 border-blue-700' : 'bg-blue-100 text-blue-800 border-blue-300')}`}>
+                                        {isBreakdownService(s.serviceType) ? <Wrench size={10} /> : <CalendarIcon size={10} />}
+                                        {s.serviceType}
+                                    </span>
+                                )}
+                            </div>
                             <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5 flex-wrap">
                                 {s.clientPhone && <span className="flex items-center gap-1"><Phone size={11} />{s.clientPhone}</span>}
                                 {agendas.length > 1 && s.agenda && (
