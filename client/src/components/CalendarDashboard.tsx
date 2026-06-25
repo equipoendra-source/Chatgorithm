@@ -1496,15 +1496,18 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         const end = new Date(start.getTime() + dur * 60000);
         const isBooked = s.status === 'Booked';
         const isDelivered = shouldPaintDelivered(s);
+        const isOpen = shouldPaintOpen(s);   // cliente "En taller" → rosa (igual que Semana/Mes)
         return (
             <div
                 key={s.id}
                 onClick={() => handleOpenEdit(s)}
                 className={`flex items-stretch gap-3 p-3 rounded-2xl border-2 cursor-pointer transition ${isDelivered
                     ? (isDark ? 'bg-emerald-700/70 border-emerald-400 hover:bg-emerald-600/80' : 'bg-emerald-300 border-emerald-600 hover:bg-emerald-400')
-                    : isBooked
-                        ? (isDark ? 'bg-amber-700/70 border-amber-400 hover:bg-amber-600/80' : 'bg-amber-300 border-amber-600 hover:bg-amber-400')
-                        : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
+                    : isOpen
+                        ? (isDark ? 'bg-pink-700/70 border-pink-400 hover:bg-pink-600/80' : 'bg-pink-300 border-pink-600 hover:bg-pink-400')
+                        : isBooked
+                            ? (isDark ? 'bg-amber-700/70 border-amber-400 hover:bg-amber-600/80' : 'bg-amber-300 border-amber-600 hover:bg-amber-400')
+                            : (isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-white border-slate-200 hover:bg-slate-50')
                     }`}
             >
                 <div className="flex flex-col items-center justify-center min-w-[64px]">
@@ -1544,9 +1547,11 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     )}
                     {isDelivered
                         ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-emerald-600/90 text-white border-emerald-300' : 'bg-emerald-600 text-white border-emerald-800'}`}><PackageCheck size={11} />Entregado</span>
-                        : isBooked
-                            ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/90 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><User size={11} />Reservada</span>
-                            : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-600/90 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700'}`}>Libre</span>}
+                        : isOpen
+                            ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-pink-600/90 text-white border-pink-300' : 'bg-pink-500 text-white border-pink-700'}`}><Wrench size={11} />En taller</span>
+                            : isBooked
+                                ? <span className={`text-[10px] font-bold px-2 py-1 rounded-full flex items-center gap-1 border ${isDark ? 'bg-amber-600/90 text-white border-amber-300' : 'bg-amber-500 text-white border-amber-700'}`}><User size={11} />Reservada</span>
+                                : <span className={`text-[10px] font-bold px-2 py-1 rounded-full border ${isDark ? 'bg-sky-600/90 text-white border-sky-300' : 'bg-sky-500 text-white border-sky-700'}`}>Libre</span>}
                 </div>
             </div>
         );
