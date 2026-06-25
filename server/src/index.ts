@@ -1660,6 +1660,177 @@ async function notifyClientOfManualCancellation(data: {
     }
 }
 
+// =====================================================================
+// AVISO URGENTE AL EQUIPO — cliente pide hablar con humano / está molesto
+// =====================================================================
+// Se dispara desde dos sitios:
+//  1) Detección por palabras clave en el webhook (antes de gastar Gemini)
+//  2) La propia Laura llamando a la tool flag_human_attention
+//
+// Hace 3 cosas:
+//  - Emite socket 'team_human_attention' → toast rojo con alarma + sonido
+//    persistente en la app (no se cierra solo).
+//  - Push al móvil con tag URGENTE.
+//  - DESACTIVA Laura para ese chat (sale de activeAiChats).
+//  - Audit log.
+//
+// Idempotente "soft": si se dispara dos veces para el mismo phone en menos
+// de 30s, suprime el aviso duplicado (evita spam si el cliente escribe
+// "quiero hablar con persona quiero hablar con persona" en 2 mensajes).
+type AttentionReason = 'human_request' | 'customer_upset';
+const recentAttentionAlerts = new Map<string, number>();
+const ATTENTION_DEDUP_MS = 30_000;
+async function notifyHumanAttention(data: {
+    clientPhone: string;
+    clientName: string;
+    reason: AttentionReason;
+    snippet: string;            // fragmento del mensaje del cliente que disparó (max ~120 chars)
+    originPhoneId?: string;
+    source: 'keyword' | 'bot';  // de dónde vino la detección
+}) {
+    const clean = cleanNumber(data.clientPhone);
+    if (!clean) return;
+
+    // Dedup soft
+    const lastT = recentAttentionAlerts.get(clean) || 0;
+    const nowMs = Date.now();
+    if (nowMs - lastT < ATTENTION_DEDUP_MS) {
+        console.log(`🔕 [HumanAttention] Suprimido (duplicado en ${Math.round((nowMs - lastT) / 1000)}s): ${clean}`);
+        return;
+    }
+    recentAttentionAlerts.set(clean, nowMs);
+
+    // 1) DESACTIVAR Laura para ese chat (igual que assign_department).
+    //    El agente humano toma el chat sin que el bot moleste por encima.
+    try {
+        activeAiChats.delete(clean);
+        io.emit('ai_active_change', { phone: clean, active: false });
+    } catch (_) { /* nunca bloquear */ }
+
+    // 2) Resolver accountId/accountName para colorear el toast por línea
+    let accountId = data.originPhoneId || '';
+    let accountName = '';
+    try {
+        if (accountId && BUSINESS_ACCOUNTS[accountId]) {
+            accountName = ACCOUNT_META[accountId]?.name || `Línea ${accountId.slice(-4)}`;
+        }
+    } catch (_) { /* opcional */ }
+
+    const reasonText: Record<AttentionReason, string> = {
+        human_request: 'pide hablar con una persona',
+        customer_upset: 'parece molesto/a',
+    };
+    const title = `🚨 URGENTE — ${data.clientName || 'Cliente'} ${reasonText[data.reason]}`;
+    const body = data.snippet ? `"${truncate(data.snippet, 120)}"` : 'Atiéndelo cuanto antes.';
+
+    // 3) Socket → toast rojo persistente en la app
+    try {
+        io.emit('team_human_attention', {
+            phone: clean,
+            clientName: data.clientName || 'Cliente',
+            reason: data.reason,
+            reasonLabel: reasonText[data.reason],
+            snippet: truncate(data.snippet || '', 200),
+            title,
+            body,
+            source: data.source,
+            accountId,
+            accountName,
+            createdAt: new Date().toISOString()
+        });
+    } catch (e: any) {
+        console.warn('[HumanAttention] Socket emit falló:', e?.message);
+    }
+
+    // 4) Push al móvil (FCM + WebPush) — broadcast a todo el equipo
+    try {
+        sendFCMNotification({
+            title, body,
+            data: { type: 'human_attention', clientPhone: clean, reason: data.reason, accountId, accountName }
+        });
+        broadcastPushNotification({
+            title, body,
+            icon: '/logo.png',
+            url: `/?phone=${clean}`,
+            phone: clean,
+            tag: `human-attention-${clean}`
+        });
+    } catch (e: any) {
+        console.warn('[HumanAttention] Push falló:', e?.message);
+    }
+
+    // 5) Audit (acción genérica contact.update; el detalle real va en summary/changes)
+    try {
+        logAudit({
+            action: 'contact.update',
+            user: 'bot',
+            targetType: 'contact',
+            targetId: clean,
+            targetName: data.clientName || clean,
+            summary: `🚨 ATENCIÓN HUMANA — ${reasonText[data.reason]} (${data.source})${data.snippet ? ` — "${truncate(data.snippet, 100)}"` : ''}`,
+            changes: {
+                attention_reason: { to: data.reason },
+                attention_source: { to: data.source },
+                attention_snippet: { to: truncate(data.snippet || '', 200) }
+            },
+            origin: 'bot'
+        }).catch(() => {});
+    } catch (_) { /* nunca bloquear */ }
+
+    console.log(`🚨 [HumanAttention] ${data.reason} (${data.source}) → ${clean} (${data.clientName})`);
+}
+
+// Detección por PALABRAS CLAVE — primera red de seguridad antes incluso
+// de gastar tokens de Gemini. Devuelve el motivo si detecta, o null si no.
+// Comparación normalizada (sin acentos, minúsculas) para tolerar variaciones.
+function detectHumanAttention(text: string): { reason: AttentionReason, snippet: string } | null {
+    const raw = (text || '').toString();
+    if (!raw.trim()) return null;
+    const norm = raw.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase();
+
+    // 1) "Quiero hablar con una persona / humano / agente". Frases concretas
+    //    para no levantar el aviso si dice cosas neutras como "hablar con tu compañero".
+    const humanRequestPatterns = [
+        /\bquiero hablar con (?:una |un )?(?:persona|humano|humana|agente|operador|operadora|trabajador|trabajadora|alguien)\b/,
+        /\bnecesito hablar con (?:una |un )?(?:persona|humano|humana|agente|alguien)\b/,
+        /\b(?:p[aá]same|p[aá]sale|paseme|paselo) con (?:una |un )?(?:persona|humano|humana|agente|alguien|tu jefe|el jefe|el encargado|alguien real)\b/,
+        /\bquiero (?:una |un )?(?:persona|humano|agente) real\b/,
+        /\bno quiero (?:hablar )?(?:con el|al) (?:bot|robot|ordenador|chatbot|m[aá]quina)\b/,
+        /\beres un bot\b/,
+        /\bque me atienda una persona\b/,
+        /\bque me llame alguien\b/,
+        /\bquiero que me llame\b.*\b(persona|alguien|humano|encargado)\b/,
+    ];
+    for (const re of humanRequestPatterns) {
+        if (re.test(norm)) return { reason: 'human_request', snippet: raw.trim() };
+    }
+
+    // 2) Cliente molesto / queja. Igual: frases / palabras suficientes para
+    //    NO levantar falsos positivos con cabreos suaves o sarcasmo trivial.
+    const upsetPatterns = [
+        /\b(?:una )?vergu?enza\b/,
+        /\b(?:estoy|estamos) hartos?\b/,
+        /\bno puede ser\b/,
+        /\b(?:una )?queja\b/,
+        /\b(?:una )?reclamaci[oó]n\b/,
+        /\bvoy a (?:poner una )?(?:queja|reclamaci[oó]n|denuncia)\b/,
+        /\b(?:os |le |les |me )?denuncio\b/,
+        /\bes (?:una )?(?:mierda|porqueria|porquer[ií]a|estafa|verguenza|vergu?enza)\b/,
+        /\bp[eé]simo (?:servicio|trato|atencion|atenci[oó]n)\b/,
+        /\bme estais? (?:tomando el pelo|engañando|robando|estafando)\b/,
+        /\btomarme el pelo\b/,
+        /\bno me pod[eé]is tratar as[ií]\b/,
+        /\bsois (?:unos )?(?:ladrones|estafadores|sinvergu?enzas)\b/,
+        /\bquiero (?:cancelar todo|denunciaros|hablar con tu jefe enfadado)\b/,
+        /\b(?:estoy|me siento) (?:engañado|estafado|enfadad[oa]|cabread[oa] muy|enojad[oa] mucho)\b/,
+    ];
+    for (const re of upsetPatterns) {
+        if (re.test(norm)) return { reason: 'customer_upset', snippet: raw.trim() };
+    }
+
+    return null;
+}
+
 // Registra un evento de cita (reserva o cancelación) en Airtable para tener
 // historial persistente, y lo emite por socket para refresco en tiempo real.
 // Tolerante: si la tabla AppointmentEvents aún no existe, lo avisa una vez y
@@ -3034,6 +3205,21 @@ Analiza el mensaje del cliente:
 - **Ventas / Comprar / Precio de un vehículo** → Llama assign_department("Ventas")
 - **Avería urgente / Taller** → Llama assign_department("Taller")
 - **Otro tema** → Saluda amablemente y pregunta en qué puedes ayudarle
+
+### 🚨 ATENCIÓN HUMANA URGENTE (flag_human_attention)
+Hay un sistema de palabras clave que ya detecta lo más obvio ("quiero hablar con una persona", "esto es una vergüenza", etc.). TU trabajo es la SEGUNDA capa: detectar lo que se le escapa al filtro.
+
+LLAMA a flag_human_attention(reason, summary) CUANDO:
+- (a) reason="human_request" → El cliente pide hablar con una persona de forma INDIRECTA o sutil que el filtro no pillaría. Ejemplos: "¿podrías pasarme con tu encargado?", "preferiría que me llamara alguien", "esto no me lo resuelves tú", "no te entiendo, ¿quién más hay?".
+- (b) reason="customer_upset" → El cliente está REALMENTE enfadado o decepcionado, no solo siendo borde un momento. Señales: lleva varios mensajes mostrando frustración, dice que ha tenido un problema serio con vosotros, amenaza con dejaros, expresa decepción real con el servicio. NO uses esto por un comentario suelto sarcástico.
+
+NO uses flag_human_attention para:
+- Preguntas normales que tú puedes resolver (citas, info, etc.).
+- Bromas o sarcasmo casual.
+- Clientes que solo están preguntando precios o consultando — usa assign_department si encaja.
+- Si dudas → NO lo llames. Es preferible no dispararlo que dispararlo de más.
+
+Tras llamarla, NO escribas nada más al cliente (la tool ya manda un mensaje de cortesía). El equipo recibe una alerta roja y atiende.
 
 ### C. FLUJO DE CANCELACIÓN
 - Llama cancel_appointment() directamente
@@ -5356,6 +5542,27 @@ async function processAIInner(
     // y peticiones excesivas. 4000 chars son ~3 mensajes de WhatsApp largos.
     text = truncate(text, 4000);
 
+    // 🚨 ATENCIÓN HUMANA — primera red de seguridad por palabras clave.
+    // Si el cliente PIDE explícitamente hablar con persona o se ve cabreado,
+    // disparamos el aviso AHORA, antes de gastar tokens de Gemini, y
+    // ABORTAMOS el procesamiento del bot. Laura se calla y el equipo recibe
+    // el toast rojo + push urgente.
+    {
+        const detected = detectHumanAttention(text);
+        if (detected) {
+            notifyHumanAttention({
+                clientPhone: clean,
+                clientName: contactName || 'Cliente',
+                reason: detected.reason,
+                snippet: detected.snippet,
+                originPhoneId,
+                source: 'keyword'
+            });
+            console.log(`🚨 [IA] Abortado para ${clean}: detectado ${detected.reason} por keyword.`);
+            return;
+        }
+    }
+
     const mediaTag = inboundMedia ? ` [+${inboundMedia.type}:${inboundMedia.mediaId}]` : '';
     console.log(`🧠 [IA] Start: ${clean}: "${text}"${mediaTag}`);
     metrics.geminiCalls++;
@@ -5594,6 +5801,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                         },
                         { name: "cancel_appointment", description: "Cancel the client's next upcoming booked appointment. Call this when the client wants to cancel or annul their appointment.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } },
                         { name: "assign_department", description: "Assign chat to a human department and stop AI. Use when user needs to talk to a human about the specific topics listed in the system prompt for each department.", parameters: { type: SchemaType.OBJECT, properties: { department: { type: SchemaType.STRING, enum: departmentLabels.map(d => d.name), format: "enum" } }, required: ["department"] } },
+                        { name: "flag_human_attention", description: "URGENT: trigger a red alert to the team and stop the bot. Call this when the client clearly needs a human RIGHT NOW: (a) explicitly asks for a person/human in a non-trivial way the keyword filter missed (e.g. sarcasm, indirect requests, frustration after several attempts), or (b) shows real anger, complaint, or distress (not casual sass — actual upset). Pass `reason` and a short `summary` explaining why. After calling this, the bot stops replying and the team gets a red notification. DO NOT call for normal requests (booking, info questions, polite conversation).", parameters: { type: SchemaType.OBJECT, properties: { reason: { type: SchemaType.STRING, enum: ['human_request', 'customer_upset'], format: 'enum', description: "human_request = client wants a person · customer_upset = client is angry/has a complaint" }, summary: { type: SchemaType.STRING, description: "Short summary (1 sentence) of why you triggered the alert, for the team to see." } }, required: ["reason", "summary"] } },
                         { name: "stop_conversation", description: "Stop the AI from replying. ALWAYS call this after booking, cancelling an appointment or assigning a department.", parameters: { type: SchemaType.OBJECT, properties: {}, required: [] } }
                     ]
                 }]
@@ -5647,6 +5855,22 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                 }
                 else if (call.name === "cancel_appointment") toolResult = await cancelAppointment(clean);
                 else if (call.name === "assign_department") toolResult = await assignDepartment(clean, String(args.department));
+                else if (call.name === "flag_human_attention") {
+                    // Aviso urgente al equipo + parar Laura.
+                    const reason: AttentionReason = (args.reason === 'customer_upset') ? 'customer_upset' : 'human_request';
+                    const summary = String(args.summary || '').trim();
+                    notifyHumanAttention({
+                        clientPhone: clean,
+                        clientName: contactName || 'Cliente',
+                        reason,
+                        snippet: summary || text,  // si Laura no resumió, usamos el último mensaje del cliente
+                        originPhoneId,
+                        source: 'bot'
+                    });
+                    // Igual que stop_conversation: Laura calla y dejamos al equipo entrar.
+                    await stopConversation(clean);
+                    toolResult = `Alerta enviada al equipo (${reason}). Detente y no respondas más.`;
+                }
                 else if (call.name === "stop_conversation") toolResult = await stopConversation(clean);
                 else {
                     console.warn(`⚠️ Tool desconocida: ${call.name}`);
@@ -5691,6 +5915,17 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                             { phone: clean, department: deptName, toolResult }
                         );
                     }
+                }
+
+                // flag_human_attention: igual que assign_department, mandamos un
+                // mensaje de cortesía al cliente para que no quede mudo mientras
+                // espera al humano. El aviso al equipo ya lo lanzó la tool.
+                if (call.name === "flag_human_attention") {
+                    await sendWhatsAppText(
+                        clean,
+                        'En seguida un compañero del equipo te atiende por aquí. Disculpa la espera 🙏',
+                        originPhoneId
+                    );
                 }
 
                 return toolResult;

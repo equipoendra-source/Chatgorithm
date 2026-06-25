@@ -22,6 +22,7 @@ import { ThemeSelectionModal } from './components/ThemeSelectionModal';
 import { startProductTour, shouldShowTour, markTourAsComplete, migrateTourStateFromLocalStorage } from './components/ProductTour';
 import { AlertCenter } from './components/AlertCenter';
 import { AppointmentToast, AppointmentNotification } from './components/AppointmentToast';
+import { HumanAttentionToast, HumanAttentionNotification } from './components/HumanAttentionToast';
 import GlobalSearch from './components/GlobalSearch';
 
 import { Capacitor } from '@capacitor/core';
@@ -105,6 +106,9 @@ function App() {
 
     // NUEVAS CITAS — toasts in-app + fecha a la que saltar al pinchar
     const [appointmentNotifs, setAppointmentNotifs] = useState<AppointmentNotification[]>([]);
+    // Avisos URGENTES de atención humana (cliente pide persona / molesto).
+    // Vienen por el socket 'team_human_attention'.
+    const [humanAttentionNotifs, setHumanAttentionNotifs] = useState<HumanAttentionNotification[]>([]);
     const [calendarInitialDate, setCalendarInitialDate] = useState<string | null>(null);
 
     // TEAM CHAT STATE
@@ -382,6 +386,33 @@ function App() {
         };
         socket.on('new_appointment', onNewAppointment);
 
+        // 🚨 ATENCIÓN HUMANA URGENTE — cliente pide hablar con persona / está molesto.
+        // Disparado por detección de keywords o por la tool flag_human_attention de Laura.
+        // Muestra un toast ROJO persistente con sonido, hasta que alguien lo atienda.
+        const onHumanAttention = (data: any) => {
+            if (!data || !data.phone) return;
+            const notif: HumanAttentionNotification = {
+                id: `${data.phone}-attn-${Date.now()}`,
+                phone: data.phone,
+                clientName: data.clientName || 'Cliente',
+                reason: data.reason || 'human_request',
+                reasonLabel: data.reasonLabel || 'necesita atención',
+                snippet: data.snippet || '',
+                source: data.source || 'keyword',
+                accountId: data.accountId || '',
+                accountName: data.accountName || '',
+                createdAt: data.createdAt || new Date().toISOString()
+            };
+            // Dedup soft por phone: si ya hay un aviso para ese mismo phone,
+            // lo reemplazamos en vez de duplicar (el backend ya tiene su dedup
+            // de 30s, esto es solo defensa extra de UI).
+            setHumanAttentionNotifs(prev => {
+                const filtered = prev.filter(x => x.phone !== data.phone);
+                return [notif, ...filtered].slice(0, 10);
+            });
+        };
+        socket.on('team_human_attention', onHumanAttention);
+
         // Cita cancelada (Laura, cliente vía WhatsApp, o trabajador desde calendario)
         // → toast rojo in-app, con el mismo comportamiento que las reservas.
         const onCancelledAppointment = (data: any) => {
@@ -535,6 +566,7 @@ function App() {
             socket.off('remote_typing');
             socket.off('quick_replies_list');
             socket.off('new_appointment', onNewAppointment);
+            socket.off('team_human_attention', onHumanAttention);
             socket.off('appointment_cancelled', onCancelledAppointment);
             socket.off('appointment_event', onAppointmentEvent);
             socket.off('chat_assigned', onChatAssigned);
@@ -721,15 +753,27 @@ function App() {
     );
 
     const appointmentToastNode = (
-        <AppointmentToast
-            notifications={appointmentNotifs}
-            onOpen={(n) => {
-                setCalendarInitialDate(n.dateISO.slice(0, 10));
-                setView('calendar');
-                setAppointmentNotifs(prev => prev.filter(x => x.id !== n.id));
-            }}
-            onDismiss={(id) => setAppointmentNotifs(prev => prev.filter(x => x.id !== id))}
-        />
+        <>
+            <AppointmentToast
+                notifications={appointmentNotifs}
+                onOpen={(n) => {
+                    setCalendarInitialDate(n.dateISO.slice(0, 10));
+                    setView('calendar');
+                    setAppointmentNotifs(prev => prev.filter(x => x.id !== n.id));
+                }}
+                onDismiss={(id) => setAppointmentNotifs(prev => prev.filter(x => x.id !== id))}
+            />
+            <HumanAttentionToast
+                notifications={humanAttentionNotifs}
+                onOpen={(n) => {
+                    // Llevar al chat del cliente que necesita atención.
+                    setView('chat');
+                    try { sessionStorage.setItem('focusPhone', n.phone); } catch (_) { /* no-op */ }
+                    setHumanAttentionNotifs(prev => prev.filter(x => x.id !== n.id));
+                }}
+                onDismiss={(id) => setHumanAttentionNotifs(prev => prev.filter(x => x.id !== id))}
+            />
+        </>
     );
 
     // Settings view
