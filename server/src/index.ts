@@ -2737,7 +2737,7 @@ async function cancelPendingPostSale(phone: string): Promise<number> {
     }
 }
 
-async function schedulePostSaleSequence(phone: string, clientName: string, vehicleDesc: string, originPhoneId: string): Promise<void> {
+async function schedulePostSaleSequence(phone: string, clientName: string, vehicleDesc: string, originPhoneId: string, skipReview: boolean = false): Promise<void> {
     const now = new Date();
     const clean = cleanNumber(phone);
 
@@ -2774,26 +2774,32 @@ async function schedulePostSaleSequence(phone: string, clientName: string, vehic
     // Tipo "postventa_resena": el prefijo "postventa" hace que se re-ancle y se
     // cancele junto con el resto de la secuencia post-venta (cancelPendingPostSale).
     // La plantilla "solicitud_resena" solo lleva 1 variable: el nombre del cliente.
-    const reviewDate = new Date(now);
-    reviewDate.setDate(reviewDate.getDate() + 10);
-    reviewDate.setHours(10, 0, 0, 0);
-    await scheduleNotification({
-        type: 'postventa_resena',
-        phone: clean,
-        templateName: 'solicitud_resena',
-        variables: JSON.stringify([clientName]),
-        scheduledFor: reviewDate.toISOString(),
-        originPhoneId
-    });
-    await delay(200);
+    //
+    // skipReview: si el trabajador marcó "no pedir reseña" al entregar (cliente con
+    // mala experiencia), NO programamos esta petición. El resto de la secuencia
+    // postventa se programa igual.
+    if (!skipReview) {
+        const reviewDate = new Date(now);
+        reviewDate.setDate(reviewDate.getDate() + 10);
+        reviewDate.setHours(10, 0, 0, 0);
+        await scheduleNotification({
+            type: 'postventa_resena',
+            phone: clean,
+            templateName: 'solicitud_resena',
+            variables: JSON.stringify([clientName]),
+            scheduledFor: reviewDate.toISOString(),
+            originPhoneId
+        });
+        await delay(200);
+    }
 
-    console.log(`📋 [PostVenta] Secuencia completa programada para ${clean} desde ${now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' })} (4 hitos + reseña a 10 días)`);
+    console.log(`📋 [PostVenta] Secuencia completa programada para ${clean} desde ${now.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid' })} (4 hitos${skipReview ? ', SIN reseña' : ' + reseña a 10 días'})`);
 }
 
 // Aplica los efectos secundarios de un cambio de estado de contacto (secuencia postventa).
 // Se llama desde el socket update_contact_info (chat) y desde el endpoint HTTP del calendario,
 // para que marcar "Vehículo Entregado" funcione igual en ambos sitios.
-async function handleContactStatusChange(contactRec: any, oldStatus: string, newStatus: string | undefined, clean: string): Promise<void> {
+async function handleContactStatusChange(contactRec: any, oldStatus: string, newStatus: string | undefined, clean: string, skipReview: boolean = false): Promise<void> {
     if (!base) return;
     // Marcar entrega → programar secuencia postventa anclada a este momento
     if (newStatus === 'Vehículo Entregado' && oldStatus !== 'Vehículo Entregado') {
@@ -2832,7 +2838,7 @@ async function handleContactStatusChange(contactRec: any, oldStatus: string, new
             }
         } catch (e) { /* usar defaults */ }
 
-        schedulePostSaleSequence(clean, clientName, vehicleDesc, originId).catch(e =>
+        schedulePostSaleSequence(clean, clientName, vehicleDesc, originId, skipReview).catch(e =>
             console.error('❌ [PostVenta] Error programando secuencia:', e)
         );
 
@@ -7270,6 +7276,8 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
         const actor = String(req.body.actorUsername || 'system');
+        // skipReview: no programar la solicitud de reseña (cliente con mala experiencia).
+        const skipReview = req.body?.skipReview === true;
         const rec = await base('Appointments').find(req.params.id);
         const status = (rec.get('Status') as string) || '';
         const existingDelivered = rec.get('DeliveredAt') as string;
@@ -7330,7 +7338,7 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
                             fields: { status: 'Vehículo Entregado' }
                         }], { typecast: true });
                         // Dispara delivery_date + secuencia postventa
-                        await handleContactStatusChange(contactRec, oldStatus, 'Vehículo Entregado', clientPhone);
+                        await handleContactStatusChange(contactRec, oldStatus, 'Vehículo Entregado', clientPhone, skipReview);
                         io.emit('contact_updated_notification');
                     }
                 }
@@ -12528,6 +12536,9 @@ app.put('/api/contacts/:phone/status', async (req, res) => {
     const clean = cleanNumber(req.params.phone);
     const newStatus = (req.body?.status ?? '').toString().trim();
     const incomingName = (req.body?.name ?? '').toString().trim();
+    // skipReview: al marcar "Vehículo Entregado" el trabajador puede pedir que NO
+    // se envíe la solicitud de reseña (cliente con mala experiencia).
+    const skipReview = req.body?.skipReview === true;
     if (!clean) return res.status(400).json({ error: 'Teléfono inválido' });
     if (!newStatus) return res.status(400).json({ error: 'Falta el estado' });
     try {
@@ -12547,7 +12558,7 @@ app.put('/api/contacts/:phone/status', async (req, res) => {
             }], { typecast: true });
             const newRec = created[0];
             io.emit('contact_updated_notification');
-            await handleContactStatusChange(newRec, '', newStatus, clean);
+            await handleContactStatusChange(newRec, '', newStatus, clean, skipReview);
             return res.json({ success: true, status: newStatus, created: true });
         }
         const oldStatus = (r[0].get('status') as string) || '';
@@ -12555,7 +12566,7 @@ app.put('/api/contacts/:phone/status', async (req, res) => {
         await base('Contacts').update([{ id: r[0].id, fields: { status: newStatus } }], { typecast: true });
         io.emit('contact_updated_notification');
         // Efectos secundarios (secuencia postventa) — misma función que usa el chat
-        await handleContactStatusChange(r[0], oldStatus, newStatus, clean);
+        await handleContactStatusChange(r[0], oldStatus, newStatus, clean, skipReview);
         res.json({ success: true, status: newStatus });
     } catch (e: any) {
         console.error('[Contacts] Error actualizando estado:', e.message);

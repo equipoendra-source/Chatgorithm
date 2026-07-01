@@ -277,6 +277,12 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     // Permite marcar "Vehículo Entregado" y demás estados desde el calendario.
     const [editContactStatus, setEditContactStatus] = useState('');
     const [originalContactStatus, setOriginalContactStatus] = useState('');
+    // Al marcar "Vehículo Entregado": si se marca, NO se enviará la solicitud de
+    // reseña de Google (cliente con mala experiencia). Por defecto false = sí se envía.
+    const [skipReview, setSkipReview] = useState(false);
+    // Misma opción en el modal "Pendientes de entrega": por fila (Set de apptIds
+    // cuya reseña se debe omitir). Se limpia el id tras marcar la entrega.
+    const [deliverSkipReviewIds, setDeliverSkipReviewIds] = useState<Set<string>>(new Set());
     const [loadingContactStatus, setLoadingContactStatus] = useState(false);
     // Factura del cliente adjunta a la cita (se envía al marcar entregado).
     const [invoiceUrl, setInvoiceUrl] = useState('');
@@ -838,6 +844,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         // Cargar el estado del contacto (cliente) asociado a esta cita
         setEditContactStatus('');
         setOriginalContactStatus('');
+        setSkipReview(false);   // por defecto: sí se pide reseña
         if (appt.clientPhone) {
             setLoadingContactStatus(true);
             fetch(`${API_URL}/contacts/${encodeURIComponent(appt.clientPhone)}`)
@@ -1009,7 +1016,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     const resStatus = await fetch(`${API_URL}/contacts/${encodeURIComponent(selectedAppt.clientPhone)}/status`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ status: editContactStatus, name: editName || selectedAppt.clientName || '' })
+                        body: JSON.stringify({ status: editContactStatus, name: editName || selectedAppt.clientName || '', skipReview })
                     });
                     if (!resStatus.ok) {
                         const err = await resStatus.json().catch(() => ({}));
@@ -1039,7 +1046,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     await fetch(`${API_URL}/appointments/${selectedAppt.id}/deliver`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ actorUsername: getCurrentUsername() })
+                        body: JSON.stringify({ actorUsername: getCurrentUsername(), skipReview })
                     });
                 } catch (_) { /* tolerante: si falla, el color no se actualiza pero el resto sí */ }
             } else if (wasDelivered && !nowDelivered) {
@@ -2438,9 +2445,26 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                 ))}
                                             </select>
                                             {editContactStatus === 'Vehículo Entregado' && originalContactStatus !== 'Vehículo Entregado' && (
-                                                <p className="text-[11px] text-emerald-500 mt-1 font-medium">
-                                                    ✓ Al guardar se programarán los recordatorios de postventa desde hoy.
-                                                </p>
+                                                <>
+                                                    <p className="text-[11px] text-emerald-500 mt-1 font-medium">
+                                                        ✓ Al guardar se programarán los recordatorios de postventa desde hoy.
+                                                    </p>
+                                                    <label className={`flex items-start gap-2 mt-2 p-2 rounded-lg cursor-pointer select-none border ${isDark ? 'bg-slate-800 border-slate-700 hover:bg-slate-700/60' : 'bg-amber-50 border-amber-200 hover:bg-amber-100'}`}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={skipReview}
+                                                            onChange={(e) => setSkipReview(e.target.checked)}
+                                                            disabled={readOnly}
+                                                            className="mt-0.5 accent-amber-500"
+                                                        />
+                                                        <span className={`text-[11px] font-medium ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+                                                            No pedir reseña a este cliente
+                                                            <span className={`block font-normal ${isDark ? 'text-slate-400' : 'text-amber-600/80'}`}>
+                                                                Marca esto si no conviene solicitarle una reseña (p. ej. mala experiencia). El resto de recordatorios de postventa sí se envían.
+                                                            </span>
+                                                        </span>
+                                                    </label>
+                                                </>
                                             )}
                                         </div>
                                     )}
@@ -3195,18 +3219,26 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     : pendingDeliveryAppointments;
 
                 const markDelivered = async (apptId: string, clientName: string) => {
-                    if (!confirm(`¿Confirmas que has entregado el vehículo de ${clientName}?\n\nEsto disparará la secuencia postventa (encuesta + recordatorios).`)) return;
+                    const skip = deliverSkipReviewIds.has(apptId);
+                    const reviewNote = skip
+                        ? '\n\n⚠️ NO se le pedirá reseña a este cliente.'
+                        : '';
+                    if (!confirm(`¿Confirmas que has entregado el vehículo de ${clientName}?\n\nEsto disparará la secuencia postventa (encuesta + recordatorios).${reviewNote}`)) return;
                     setDeliveringId(apptId);
                     try {
                         const r = await fetch(`${API_URL}/appointments/${apptId}/deliver`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({ actorUsername: getCurrentUsername() })
+                            body: JSON.stringify({ actorUsername: getCurrentUsername(), skipReview: skip })
                         });
                         const data = await r.json();
                         if (!r.ok) {
                             alert(`No se pudo marcar como entregada:\n${data.error || 'Error desconocido'}`);
                         } else {
+                            // Limpiar la marca de esta fila para no arrastrarla
+                            setDeliverSkipReviewIds(prev => {
+                                const next = new Set(prev); next.delete(apptId); return next;
+                            });
                             await fetchData();
                         }
                     } catch (e: any) {
@@ -3427,16 +3459,31 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                                                     Cita futura
                                                                 </span>
                                                             ) : (
-                                                                <button
-                                                                    onClick={() => markDelivered(b.id, b.clientName || 'este cliente')}
-                                                                    disabled={deliveringId === b.id}
-                                                                    className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
-                                                                    title="Marcar vehículo como entregado al cliente"
-                                                                >
-                                                                    {deliveringId === b.id
-                                                                        ? (<><Loader2 size={13} className="animate-spin" />Marcando...</>)
-                                                                        : (<><CheckCircle size={13} />Marcar entregado</>)}
-                                                                </button>
+                                                                <>
+                                                                    <label className={`flex items-start gap-1.5 cursor-pointer select-none text-[10px] font-medium leading-tight px-1 ${isDark ? 'text-amber-300' : 'text-amber-700'}`} title="No pedir reseña a este cliente (p. ej. mala experiencia)">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={deliverSkipReviewIds.has(b.id)}
+                                                                            onChange={(e) => setDeliverSkipReviewIds(prev => {
+                                                                                const next = new Set(prev);
+                                                                                if (e.target.checked) next.add(b.id); else next.delete(b.id);
+                                                                                return next;
+                                                                            })}
+                                                                            className="mt-0.5 accent-amber-500"
+                                                                        />
+                                                                        Sin reseña
+                                                                    </label>
+                                                                    <button
+                                                                        onClick={() => markDelivered(b.id, b.clientName || 'este cliente')}
+                                                                        disabled={deliveringId === b.id}
+                                                                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold transition flex items-center gap-1.5 disabled:opacity-50 disabled:cursor-not-allowed ${isDark ? 'bg-emerald-600 hover:bg-emerald-500 text-white' : 'bg-emerald-600 hover:bg-emerald-700 text-white'}`}
+                                                                        title="Marcar vehículo como entregado al cliente"
+                                                                    >
+                                                                        {deliveringId === b.id
+                                                                            ? (<><Loader2 size={13} className="animate-spin" />Marcando...</>)
+                                                                            : (<><CheckCircle size={13} />Marcar entregado</>)}
+                                                                    </button>
+                                                                </>
                                                             )}
                                                             <button
                                                                 onClick={() => {
