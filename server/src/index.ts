@@ -3234,6 +3234,12 @@ Analiza el mensaje del cliente:
 - **Avería urgente / Taller** → Llama assign_department("Taller")
 - **Otro tema** → Saluda amablemente y pregunta en qué puedes ayudarle
 
+### 🚫 REGLA IMPORTANTE — CITAS PARA HOY
+NUNCA propongas HOY como día de cita. La primera fecha que puedes ofrecer es SIEMPRE MAÑANA en adelante. Si el cliente pide expresamente "hoy" o "para hoy mismo", respóndele algo como:
+> "Por WhatsApp no puedo darte cita para hoy — la primera fecha disponible es mañana. ¿Te va bien mañana o prefieres otro día? Si es urgente (avería o cliente ya en el taller), llámanos al teléfono del taller o pásate directamente."
+
+Esta regla aplica a todos los servicios (averías, revisiones, todos).
+
 ### 🚨 ATENCIÓN HUMANA URGENTE (flag_human_attention)
 Hay un sistema de palabras clave que ya detecta lo más obvio ("quiero hablar con una persona", "esto es una vergüenza", etc.). TU trabajo es la SEGUNDA capa: detectar lo que se le escapa al filtro.
 
@@ -4066,6 +4072,13 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
     try {
         if (cleanPhone) appointmentOptionsCache.delete(cleanPhone);
 
+        // 🚫 REGLA GLOBAL: si el cliente pide huecos PARA HOY, Laura nunca da
+        // slots del día actual. Le devolvemos un mensaje claro para que el bot
+        // sepa que debe proponer otro día (mañana en adelante).
+        if (dateFilter && dateFilter === madridDayKey(new Date())) {
+            return `⚠️ No se ofrecen citas para HOY por WhatsApp. Explícale al cliente que la primera fecha disponible es MAÑANA y ofrécele el día siguiente. Si es urgente (avería, cliente ya en el taller), dile que llame al teléfono del taller o pase directamente.`;
+        }
+
         // Determinar cuántos slots consecutivos necesita este servicio
         const allAgendas = await getAgendas();
 
@@ -4119,12 +4132,16 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
         }).all();
 
         const now = new Date();
+        // 🚫 REGLA GLOBAL: Laura nunca ofrece HOY. El primer día que puede ofrecer
+        // es SIEMPRE mañana en adelante. Igual criterio que getAvailableDays.
+        const todayKey = madridDayKey(now);
         let filtered = records.filter(r => {
             const d = new Date(r.get('Date') as string);
             if (d <= now) return false;
             if (agenda && ((r.get('Agenda') as string) || '') !== agenda) return false;
+            const slotDateStr = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+            if (slotDateStr === todayKey) return false;
             if (dateFilter) {
-                const slotDateStr = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
                 return slotDateStr === dateFilter;
             }
             return true;
@@ -4289,6 +4306,11 @@ async function getAvailableDays(agendaName?: string, serviceName?: string) {
 
         // Pre-cómputo de carga del taller por día (si hay tipo).
         let blockedDays = new Set<string>();
+        // 🚫 REGLA GLOBAL: Laura NUNCA ofrece HOY como día de cita. El primer
+        // día disponible es SIEMPRE mañana en adelante. Si un cliente aparece
+        // hoy en el taller o llama por teléfono, el equipo puede meterle la
+        // cita a mano desde el calendario — este filtro solo aplica al bot.
+        blockedDays.add(madridDayKey(new Date()));
         if (tallerMin > 0) {
             const cfg = await getTallerConfig();
             const committed = await getCommittedTallerByDay({});
