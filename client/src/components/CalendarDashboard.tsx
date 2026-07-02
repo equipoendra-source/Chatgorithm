@@ -151,6 +151,7 @@ interface TallerConfig {
     holidays: string[];         // festivos 'YYYY-MM-DD' (capacidad 0)
     services: AgendaService[];  // catálogo global de tipos con minutos de taller
     reservedIncidentHoursPerDay: number;  // colchón/día para walk-ins (incident=true)
+    breakdownBlockedDays?: string[];  // días 'YYYY-MM-DD' bloqueados para averías (Laura no las ofrece)
 }
 
 // Días de la semana para el selector (etiqueta + valor getDay)
@@ -371,12 +372,22 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         socket.on('new_appointment', scheduleRefresh);
         socket.on('appointment_cancelled', scheduleRefresh);
         socket.on('appointment_event', scheduleRefresh);
+        // Cambio de bloqueo de averías por día: otro compañero pulsó el botón
+        // "No averías" en otra pestaña. Actualizamos el estado local para que
+        // los colores/toggle reflejen el cambio al instante, sin refetch pesado.
+        const onTallerConfigChanged = (data: any) => {
+            if (data && Array.isArray(data.breakdownBlockedDays)) {
+                setTallerConfig(prev => prev ? { ...prev, breakdownBlockedDays: data.breakdownBlockedDays } : prev);
+            }
+        };
+        socket.on('taller_config_changed', onTallerConfigChanged);
         return () => {
             if (timer) clearTimeout(timer);
             socket.off('appointment_changed', scheduleRefresh);
             socket.off('new_appointment', scheduleRefresh);
             socket.off('appointment_cancelled', scheduleRefresh);
             socket.off('appointment_event', scheduleRefresh);
+            socket.off('taller_config_changed', onTallerConfigChanged);
         };
     }, [socket]);
 
@@ -502,7 +513,7 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     };
 
     // ---- Taller: ajustes (capacidad + catálogo) ----
-    const TALLER_FALLBACK: TallerConfig = { mechanics: 1, hoursPerDay: 8, workingDays: [1, 2, 3, 4, 5], hoursByWeekday: {}, holidays: [], services: [], reservedIncidentHoursPerDay: 0 };
+    const TALLER_FALLBACK: TallerConfig = { mechanics: 1, hoursPerDay: 8, workingDays: [1, 2, 3, 4, 5], hoursByWeekday: {}, holidays: [], services: [], reservedIncidentHoursPerDay: 0, breakdownBlockedDays: [] };
 
     const openTallerSettings = () => {
         const baseCfg = tallerConfig || TALLER_FALLBACK;
@@ -513,6 +524,42 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
 
     const patchDraftTaller = (patch: Partial<TallerConfig>) => {
         setDraftTaller(prev => prev ? { ...prev, ...patch } : prev);
+    };
+
+    // Toggle rápido del bloqueo de averías para un día del calendario.
+    // Llama al endpoint dedicado /taller/breakdown-block (no reenvía toda la
+    // config). El socket 'taller_config_changed' actualiza el resto de
+    // pestañas abiertas automáticamente.
+    const [togglingBlockDay, setTogglingBlockDay] = useState<string | null>(null);
+    const toggleBreakdownBlock = async (dateKey: string) => {
+        if (togglingBlockDay) return;
+        const currentSet = new Set(tallerConfig?.breakdownBlockedDays || []);
+        const wasBlocked = currentSet.has(dateKey);
+        // Optimistic update: cambio la UI ya, y si falla, revierto al recibir error.
+        const nextList = wasBlocked
+            ? (tallerConfig?.breakdownBlockedDays || []).filter(d => d !== dateKey)
+            : [...(tallerConfig?.breakdownBlockedDays || []), dateKey].sort();
+        setTallerConfig(prev => prev ? { ...prev, breakdownBlockedDays: nextList } : prev);
+        setTogglingBlockDay(dateKey);
+        try {
+            const res = await fetch(`${API_URL}/taller/breakdown-block`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ date: dateKey, blocked: !wasBlocked })
+            });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const data = await res.json();
+            if (Array.isArray(data?.breakdownBlockedDays)) {
+                setTallerConfig(prev => prev ? { ...prev, breakdownBlockedDays: data.breakdownBlockedDays } : prev);
+            }
+        } catch (e) {
+            // Revertir cambio optimista
+            console.error('[BreakdownBlock] Error:', e);
+            setTallerConfig(prev => prev ? { ...prev, breakdownBlockedDays: Array.from(currentSet) } : prev);
+            alert('No se pudo actualizar el bloqueo. Reintenta.');
+        } finally {
+            setTogglingBlockDay(null);
+        }
     };
 
     // Añade el festivo del borrador (holidayDraft) a la lista, validándolo.
@@ -1893,11 +1940,18 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             const total = slots.length;
                             const dayName = getDayOfWeekName(day); // Para móvil
                             const hoursInfo = computeDayHours(slots);
+                            // Clave YYYY-MM-DD de este día para el bloqueo de averías.
+                            const dateKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+                            const breakdownBlocked = (tallerConfig?.breakdownBlockedDays || []).includes(dateKey);
 
                             return (
-                                <div key={day} className={`rounded-2xl md:rounded-none shadow-sm md:shadow-none border md:border-0 md:border-b md:border-r p-4 md:p-2 min-h-auto md:min-h-[140px] transition-colors group relative ${isDark
-                                    ? 'bg-slate-800 md:bg-transparent border-slate-700 md:border-slate-700 hover:bg-slate-700/50'
-                                    : 'bg-white md:bg-transparent border-slate-200 md:border-slate-100 hover:bg-slate-50'
+                                <div key={day} className={`rounded-2xl md:rounded-none shadow-sm md:shadow-none border md:border-0 md:border-b md:border-r p-4 md:p-2 min-h-auto md:min-h-[140px] transition-colors group relative ${breakdownBlocked
+                                    ? (isDark
+                                        ? 'bg-rose-950/40 md:bg-rose-950/25 border-rose-900/50 md:border-rose-900/40 hover:bg-rose-900/40'
+                                        : 'bg-rose-50 md:bg-rose-50/70 border-rose-200 md:border-rose-100 hover:bg-rose-100/70')
+                                    : (isDark
+                                        ? 'bg-slate-800 md:bg-transparent border-slate-700 md:border-slate-700 hover:bg-slate-700/50'
+                                        : 'bg-white md:bg-transparent border-slate-200 md:border-slate-100 hover:bg-slate-50')
                                     }`}>
 
                                     {/* Cabecera del Día */}
@@ -1911,6 +1965,21 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                             </span>
                                             {/* Nombre del día (Solo visible en Móvil) */}
                                             <span className={`md:hidden text-sm font-bold ${isDark ? 'text-slate-400' : 'text-slate-600'}`}>{dayName}</span>
+                                            {/* 🚫 Botón "No averías": si está activo, el día no acepta averías
+                                                por Laura (revisiones sí). Toggle rápido: solo llama al endpoint,
+                                                sin abrir modales. */}
+                                            {!readOnly && (
+                                                <button
+                                                    onClick={(e) => { e.stopPropagation(); toggleBreakdownBlock(dateKey); }}
+                                                    disabled={togglingBlockDay === dateKey}
+                                                    title={breakdownBlocked ? 'Averías bloqueadas hoy — pulsa para permitir' : 'Bloquear averías este día (revisiones sí se pueden)'}
+                                                    className={`inline-flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-md border transition disabled:opacity-50 disabled:cursor-wait ${breakdownBlocked
+                                                        ? (isDark ? 'bg-rose-900/60 text-rose-200 border-rose-700 hover:bg-rose-800/60' : 'bg-rose-200 text-rose-800 border-rose-300 hover:bg-rose-300')
+                                                        : (isDark ? 'bg-slate-700/50 text-slate-400 border-slate-600 hover:bg-slate-600/60 hover:text-slate-200' : 'bg-slate-100 text-slate-500 border-slate-200 hover:bg-rose-50 hover:text-rose-700 hover:border-rose-300')}`}
+                                                >
+                                                    <Wrench size={10} /> <span className="hidden md:inline">{breakdownBlocked ? 'Sin averías' : 'Averías'}</span>
+                                                </button>
+                                            )}
                                         </div>
 
                                         {total > 0 && (

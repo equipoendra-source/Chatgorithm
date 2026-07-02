@@ -2143,6 +2143,10 @@ interface TallerConfig {
     holidays: string[];         // festivos 'YYYY-MM-DD' (capacidad 0)
     services: AgendaService[];  // catálogo global de tipos con sus minutos de taller
     reservedIncidentHoursPerDay: number;  // colchón/día reservado para walk-ins (Incident=true)
+    // Días 'YYYY-MM-DD' en los que NO se aceptan averías (el equipo los ha marcado
+    // a mano desde el calendario). Otros servicios (revisiones, etc.) SÍ se pueden
+    // seguir reservando. Laura filtra estos días cuando el cliente pide una avería.
+    breakdownBlockedDays: string[];
 }
 
 const TALLER_DEFAULTS: Omit<TallerConfig, 'services'> = {
@@ -2152,6 +2156,7 @@ const TALLER_DEFAULTS: Omit<TallerConfig, 'services'> = {
     hoursByWeekday: {},
     holidays: [],
     reservedIncidentHoursPerDay: 0,
+    breakdownBlockedDays: [],
 };
 
 // Une los servicios de todas las agendas (deduplicados por nombre canónico),
@@ -2198,6 +2203,9 @@ async function getTallerConfig(): Promise<TallerConfig> {
         reservedIncidentHoursPerDay: (Number.isFinite(Number(raw.reservedIncidentHoursPerDay)) && Number(raw.reservedIncidentHoursPerDay) >= 0)
             ? Math.min(dailyCapacityHours, Number(raw.reservedIncidentHoursPerDay))
             : TALLER_DEFAULTS.reservedIncidentHoursPerDay,
+        breakdownBlockedDays: Array.isArray(raw.breakdownBlockedDays)
+            ? raw.breakdownBlockedDays.map((d: any) => String(d)).filter((d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+            : [],
     };
     if (cfg.services.length === 0) {
         try { cfg.services = unionAgendaServices(await getAgendas()); } catch { /* sin agendas → catálogo vacío */ }
@@ -2209,6 +2217,15 @@ async function getTallerConfig(): Promise<TallerConfig> {
 // las reservas para resolver el nombre canónico y los minutos de taller.
 async function getServiceCatalog(): Promise<AgendaService[]> {
     return (await getTallerConfig()).services;
+}
+
+// ¿El servicio pedido es una AVERÍA? Comparación normalizada (sin acentos,
+// minúsculas): pillamos "Avería", "averia", "AVERIAS", etc. Se usa para el
+// bloqueo manual de días desde el calendario.
+function isBreakdownServiceName(name: string | undefined | null): boolean {
+    if (!name) return false;
+    const norm = String(name).normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+    return norm.includes('aver');
 }
 
 async function saveTallerConfig(cfg: TallerConfig): Promise<void> {
@@ -4131,6 +4148,10 @@ async function getAvailableAppointments(userPhone: string, originPhoneId: string
                 const dayCommitted = committed[dayKey] || { previa: 0, walkin: 0 };
                 if (dayCommitted.previa + tallerMin > previasMax) blockedDays.add(dayKey);
             }
+            // 🚫 BLOQUEO MANUAL DE AVERÍAS: mismo criterio que en getAvailableDays.
+            if (isBreakdownServiceName(serviceKey)) {
+                for (const d of (cfg.breakdownBlockedDays || [])) blockedDays.add(d);
+            }
             if (blockedDays.size > 0) {
                 const before = filtered.length;
                 filtered = filtered.filter(r => !blockedDays.has(madridDayKey(new Date(r.get('Date') as string))));
@@ -4283,6 +4304,12 @@ async function getAvailableDays(agendaName?: string, serviceName?: string) {
                 const previasMax = Math.max(0, capacityMin - reservedMin);
                 const dayCommitted = committed[dayKey] || { previa: 0, walkin: 0 };
                 if (dayCommitted.previa + tallerMin > previasMax) blockedDays.add(dayKey);
+            }
+            // 🚫 BLOQUEO MANUAL DE AVERÍAS: si el cliente pidió una avería y el
+            // equipo marcó días como "no averías" desde el calendario, esos días
+            // los descartamos aquí. Otros servicios (revisiones, etc.) pasan.
+            if (isBreakdownServiceName(serviceKey)) {
+                for (const d of (cfg.breakdownBlockedDays || [])) blockedDays.add(d);
             }
         }
 
@@ -7798,6 +7825,32 @@ app.get('/api/taller/config', async (req, res) => {
     }
 });
 
+// Toggle rápido de bloqueo de averías para un día concreto.
+// Se llama desde el botón del calendario: no requiere reenviar toda la config
+// (que el usuario podría no tener cargada). Body: { date: 'YYYY-MM-DD',
+// blocked: boolean }. Si blocked=true añade el día al set; si false lo quita.
+app.post('/api/taller/breakdown-block', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB' });
+    try {
+        const dateStr = String(req.body?.date || '').trim();
+        const blocked = req.body?.blocked === true;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(dateStr)) {
+            return res.status(400).json({ error: 'Fecha inválida (formato YYYY-MM-DD)' });
+        }
+        const cfg = await getTallerConfig();
+        const set = new Set(cfg.breakdownBlockedDays || []);
+        if (blocked) set.add(dateStr); else set.delete(dateStr);
+        cfg.breakdownBlockedDays = Array.from(set).sort();
+        await saveTallerConfig(cfg);
+        // Aviso a los calendarios abiertos para que refresquen colores/estado.
+        try { io.emit('taller_config_changed', { breakdownBlockedDays: cfg.breakdownBlockedDays }); } catch (_) { /* no-op */ }
+        res.json({ success: true, breakdownBlockedDays: cfg.breakdownBlockedDays });
+    } catch (e: any) {
+        console.error('[API] Error POST /taller/breakdown-block:', e.message);
+        res.status(500).json({ error: 'Error actualizando bloqueo', details: e.message });
+    }
+});
+
 app.post('/api/taller/config', async (req, res) => {
     if (!base) return res.status(500).json({ error: 'DB' });
     try {
@@ -7817,6 +7870,9 @@ app.post('/api/taller/config', async (req, res) => {
             reservedIncidentHoursPerDay: (Number.isFinite(Number(b.reservedIncidentHoursPerDay)) && Number(b.reservedIncidentHoursPerDay) >= 0)
                 ? Math.min(dailyCapacityHours, Number(b.reservedIncidentHoursPerDay))
                 : TALLER_DEFAULTS.reservedIncidentHoursPerDay,
+            breakdownBlockedDays: Array.isArray(b.breakdownBlockedDays)
+                ? b.breakdownBlockedDays.map((d: any) => String(d)).filter((d: string) => /^\d{4}-\d{2}-\d{2}$/.test(d))
+                : [],
         };
         await saveTallerConfig(cfg);
         res.json({ success: true, config: cfg });
