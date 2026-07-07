@@ -1058,9 +1058,12 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
             // walk-in apuntado a mano en la agenda sin haber escrito por WhatsApp),
             // el backend lo crea sobre la marcha con ese nombre. Sin el name acabaría
             // como "Cliente 1234" en la ficha.
-            if (selectedAppt.clientPhone && editContactStatus && editContactStatus !== originalContactStatus) {
+            // Preferimos el teléfono original de la cita; si no lo hay (caso "Sin Cita"
+            // recién rellenado a mano), usamos el que el usuario acaba de teclear.
+            const phoneForStatus = selectedAppt.clientPhone || editPhone.trim();
+            if (phoneForStatus && editContactStatus && editContactStatus !== originalContactStatus) {
                 try {
-                    const resStatus = await fetch(`${API_URL}/contacts/${encodeURIComponent(selectedAppt.clientPhone)}/status`, {
+                    const resStatus = await fetch(`${API_URL}/contacts/${encodeURIComponent(phoneForStatus)}/status`, {
                         method: 'PUT',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ status: editContactStatus, name: editName || selectedAppt.clientName || '', skipReview })
@@ -2497,8 +2500,13 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                         );
                                     })()}
 
-                                    {/* Estado del CLIENTE — permite marcar "Vehículo Entregado" y demás */}
-                                    {selectedAppt.clientPhone && (
+                                    {/* Estado del CLIENTE — permite marcar "Vehículo Entregado" y demás.
+                                        Mostramos el selector también cuando el usuario está introduciendo
+                                        el teléfono al crear una cita (típico caso "Sin Cita"): antes solo
+                                        aparecía si el appointment ya tenía clientPhone guardado, así que en
+                                        el flujo de creación quedaba oculto. Ahora basta con que haya un
+                                        teléfono editable escrito. */}
+                                    {(selectedAppt.clientPhone || editPhone.trim().length > 0) && (
                                         <div>
                                             <label className={`text-xs font-bold uppercase mb-1 block ${isDark ? 'text-purple-400' : 'text-purple-700'}`}>Estado del Cliente</label>
                                             <select
