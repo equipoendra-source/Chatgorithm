@@ -9268,8 +9268,16 @@ app.post('/webhook', async (req, res) => {
             const assignedTo = (contactRecord?.get('assigned_to') as string) || '';
             const name = contactRecord?.get('name') as string || "Cliente";
 
+            // 🔇 SILENCIADO POR CLIENTE: si el equipo marcó ai_muted=true en la
+            // ficha del contacto (típico en el chat de Recambios donde el
+            // compañero atiende él mismo y no quiere que Laura le pise), Laura
+            // no responde a este cliente NUNCA hasta que se desmarque.
+            const contactAiMuted = !!(contactRecord?.get('ai_muted'));
+
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
+            } else if (contactAiMuted) {
+                console.log(`🔇 [Bot] Chat ${from} tiene ai_muted=true (silenciado por el equipo). Mensaje guardado, Laura no responde.`);
             } else if (isTodayBotBlocked()) {
                 // Día de la semana marcado como "sin IA" (ej. sábados). Los
                 // mensajes siguen entrando al panel para que el equipo los
@@ -11099,6 +11107,7 @@ app.get('/api/campaigns-contacts', async (req, res) => {
             status: (r.get('status') as string) || '',
             assigned_to: (r.get('assigned_to') as string) || '',
             optInMarketing: !!r.get('optInMarketing'),
+            ai_muted: !!r.get('ai_muted'),
             // opted_out_notifications = campo antiguo (respaldo): si está activo, excluido de todo
             optedOutCampaigns: !!r.get('opted_out_campaigns') || !!r.get('opted_out_notifications'),
             optedOutReminders: !!r.get('opted_out_reminders') || !!r.get('opted_out_notifications'),
