@@ -27,6 +27,7 @@ export interface Contact {
     tags?: string[];
     origin_phone_id?: string;
     unread_count?: number; // Added field
+    ai_muted?: boolean; // Toggle IA on/off por chat (silenciar Laura)
 }
 
 interface Agent { id: string; name: string; }

@@ -9536,7 +9536,8 @@ io.on('connection', (socket) => {
                 avatar: (x.get('avatar') as any[])?.[0]?.url,
                 tags: x.get('tags') || [],
                 origin_phone_id: x.get('origin_phone_id'),
-                unread_count: x.get('unread_count') || 0 // Return unread_count
+                unread_count: x.get('unread_count') || 0, // Return unread_count
+                ai_muted: !!x.get('ai_muted')  // Toggle IA on/off por chat (silenciar Laura)
             })));
         }
     });

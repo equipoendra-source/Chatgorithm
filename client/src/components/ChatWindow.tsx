@@ -114,7 +114,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     // Silenciar Laura para este contacto (persistente en Airtable). Si está en
     // true, el backend NO responde con la IA a los mensajes de este cliente.
     // Útil en Recambios donde el compañero atiende él mismo y no quiere el bot.
-    const [aiMuted, setAiMuted] = useState<boolean>(!!(contact as any).ai_muted);
+    const [aiMuted, setAiMuted] = useState<boolean>(!!contact.ai_muted);
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [agents, setAgents] = useState<Agent[]>([]);
 
@@ -233,7 +233,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         setCrmSignupDate(contact.signup_date || '');
         setContactTags(contact.tags || []);
         setOptInMarketing(!!(contact as any).optInMarketing);
-        setAiMuted(!!(contact as any).ai_muted);
+        setAiMuted(!!contact.ai_muted);
 
         setMessages([]);
         setShowEmojiPicker(false);
