@@ -2552,6 +2552,11 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
 // confirmado al listar las plantillas APPROVED de la WABA. Sin él, Meta da #132001.
 const INVOICE_TEMPLATE = 'factura_entrega_';
 
+// Plantilla (aprobada en Meta, categoría UTILITY, sin cabecera de documento) que
+// avisa al cliente de que su vehículo está listo para recoger. Se envía SIEMPRE
+// al marcar "Vehículo Entregado" (con o sin factura PDF). Variable {{1}} = nombre.
+const PICKUP_READY_TEMPLATE = 'coche_listo_recogida';
+
 // Cache nombre de plantilla → código de idioma real en Meta. Una plantilla puede
 // estar aprobada en "es", "es_ES", "es_MX"… y enviar con el código equivocado da
 // el error #132001 ("Template name does not exist in es_ES"). Preguntamos a Meta
@@ -7398,7 +7403,21 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
             }
         }
 
-        // Enviar la factura al cliente (si se adjuntó en el popup de la cita).
+        // Avisar SIEMPRE al cliente de que su vehículo está listo (plantilla
+        // aprobada `coche_listo_recogida`). Se manda con o sin factura — es
+        // el aviso de "puedes venir a recogerlo". Fire-and-forget: si Meta
+        // rechaza o el número está mal, la entrega ya está registrada.
+        if (clientPhone) {
+            const originId = contactOrigin || waPhoneId || 'default';
+            // Nombre corto del cliente (primer nombre) para que el saludo
+            // quede natural: "Hola Juan" en lugar de "Hola Juan García Pérez".
+            const firstName = (clientName || '').trim().split(/\s+/)[0] || 'cliente';
+            sendTemplateMessage(clientPhone, PICKUP_READY_TEMPLATE, [firstName], originId)
+                .then(r => { if (r !== true) console.warn(`[Deliver] No se pudo enviar aviso 'coche listo' a ${clientPhone}: ${r}`); else console.log(`✅ [Deliver] Aviso 'coche listo' enviado a ${clientPhone}`); })
+                .catch(e => console.warn('[Deliver] Error enviando aviso coche listo:', e?.message));
+        }
+
+        // Enviar además la factura al cliente (si se adjuntó en el popup de la cita).
         // Plantilla con cabecera de documento → llega aunque la ventana de 24h
         // esté cerrada. Fire-and-forget: no bloquea ni revierte la entrega.
         if (invoiceUrl && clientPhone) {
