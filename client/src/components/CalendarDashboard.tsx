@@ -953,6 +953,42 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
     const [rescheduling, setRescheduling] = useState(false);
     const [showRescheduleModal, setShowRescheduleModal] = useState(false);
 
+    // Cancelar una cita reservada: el hueco vuelve a Available y queda libre para
+    // otro cliente. Reusa el PUT existente que ya cancela los recordatorios
+    // pendientes (cita_24h/cita_1h) y notifica al cliente por WhatsApp de la
+    // cancelación manual — no hay que replicar esa lógica aquí.
+    const [cancelling, setCancelling] = useState(false);
+    const handleCancelAppointment = async () => {
+        if (!selectedAppt || cancelling) return;
+        const who = selectedAppt.clientName || 'este cliente';
+        if (!window.confirm(`¿Cancelar la cita de ${who}?\n\nEl hueco quedará libre y el cliente recibirá aviso por WhatsApp.`)) return;
+        setCancelling(true);
+        try {
+            const res = await fetch(`${API_URL}/appointments/${selectedAppt.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    status: 'Available',
+                    clientName: '', clientPhone: '',
+                    matricula: '', marca: '', modelo: '', notas: '', extra: '',
+                    incident: false,
+                    actorUsername: getCurrentUsername()
+                })
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                alert('No se pudo cancelar: ' + (data.error || 'error'));
+                return;
+            }
+            closeBookingModal();
+            fetchData();
+        } catch (e: any) {
+            alert('Error al cancelar: ' + (e?.message || ''));
+        } finally {
+            setCancelling(false);
+        }
+    };
+
     const handleReschedule = async (newSlotId: string) => {
         if (!selectedAppt || rescheduling) return;
         setRescheduling(true);
@@ -2689,21 +2725,31 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 </div>
                             )}
 
-                            {/* Cambiar día/hora — solo para citas ya reservadas (no crear). */}
+                            {/* Reprogramar + Cancelar — solo para citas ya reservadas. */}
                             {!readOnly && selectedAppt.status === 'Booked' && (
-                                <button
-                                    onClick={() => {
-                                        // Precargar el selector de día con la fecha actual de la cita
-                                        // (por si el usuario solo quiere cambiar de hora dentro del mismo día).
-                                        const d = new Date(selectedAppt.date);
-                                        setRescheduleDate(d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' }));
-                                        setShowRescheduleModal(true);
-                                    }}
-                                    className={`w-full mb-2 px-4 py-2.5 rounded-xl font-bold text-sm border transition flex items-center justify-center gap-2 ${isDark ? 'bg-cyan-900/30 border-cyan-800 text-cyan-300 hover:bg-cyan-900/50' : 'bg-cyan-50 border-cyan-200 text-cyan-700 hover:bg-cyan-100'}`}
-                                    title="Cambiar el día y/o la hora de esta cita"
-                                >
-                                    <CalendarIcon size={16} /> Cambiar día / hora
-                                </button>
+                                <div className="flex gap-2 mb-2">
+                                    <button
+                                        onClick={() => {
+                                            // Precargar el selector de día con la fecha actual de la cita
+                                            // (por si el usuario solo quiere cambiar de hora dentro del mismo día).
+                                            const d = new Date(selectedAppt.date);
+                                            setRescheduleDate(d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' }));
+                                            setShowRescheduleModal(true);
+                                        }}
+                                        className={`flex-1 px-4 py-2.5 rounded-xl font-bold text-sm border transition flex items-center justify-center gap-2 ${isDark ? 'bg-cyan-900/30 border-cyan-800 text-cyan-300 hover:bg-cyan-900/50' : 'bg-cyan-50 border-cyan-200 text-cyan-700 hover:bg-cyan-100'}`}
+                                        title="Cambiar el día y/o la hora de esta cita"
+                                    >
+                                        <CalendarIcon size={16} /> Cambiar día / hora
+                                    </button>
+                                    <button
+                                        onClick={handleCancelAppointment}
+                                        disabled={cancelling}
+                                        className={`flex-1 px-4 py-2.5 rounded-xl font-bold text-sm border transition flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-wait ${isDark ? 'bg-amber-900/30 border-amber-800 text-amber-300 hover:bg-amber-900/50' : 'bg-amber-50 border-amber-200 text-amber-700 hover:bg-amber-100'}`}
+                                        title="Cancelar la cita — el hueco queda libre y el cliente recibe aviso"
+                                    >
+                                        <X size={16} /> Cancelar cita
+                                    </button>
+                                </div>
                             )}
 
                             {/* Borrar/Guardar — solo admins y managers */}
