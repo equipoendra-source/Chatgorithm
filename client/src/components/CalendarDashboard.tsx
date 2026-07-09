@@ -2610,8 +2610,12 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             )}
 
                             {/* Factura del cliente — se adjunta y envía por WhatsApp al
-                                marcar "Vehículo Entregado". Solo para citas reservadas con cliente. */}
-                            {selectedAppt.status === 'Booked' && selectedAppt.clientPhone && (
+                                marcar "Vehículo Entregado". Aceptamos también editStatus='Booked'
+                                (el usuario está pasando la cita a Booked ahora) y editPhone si el
+                                teléfono se está tecleando en este momento (caso típico "Sin Cita"
+                                walk-in: el hueco original está Available y sin phone, pero el
+                                usuario está creando la cita + entregando en un solo paso). */}
+                            {(selectedAppt.status === 'Booked' || editStatus === 'Booked') && (selectedAppt.clientPhone || editPhone.trim().length > 0) && (
                                 <div className={`pt-4 border-t mt-4 ${isDark ? 'border-slate-700' : 'border-slate-100'}`}>
                                     <label className="text-xs font-bold uppercase mb-1.5 flex items-center gap-1.5 text-slate-400">
                                         <FileText size={13} /> Factura del cliente
