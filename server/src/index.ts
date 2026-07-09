@@ -7513,48 +7513,60 @@ app.post('/api/appointments/:id/reschedule', async (req, res) => {
             if (!newDate) throw { httpStatus: 400, message: 'El slot destino no tiene fecha.' };
 
             // Copiar los datos del cliente al slot destino con Status=Booked.
-            // Reproducimos los mismos campos que bookAppointment/PUT usa.
-            const dataToCopy: any = {
+            // Solo mandamos los campos que TIENEN VALOR en el origen: así
+            // evitamos errores en Airtable si un campo opcional no existe o
+            // no acepta string vacío (single-select, date, checkbox…).
+            // updateAppointmentFields también quita campos "Unknown field"
+            // sobre la marcha (retry hasta 5 fallos), pero mejor no depender de eso.
+            const copy: any = {
                 Status: 'Booked',
-                ClientPhone: (oldRec.get('ClientPhone') as string) || '',
                 ClientName: oldClientName,
-                Matricula: (oldRec.get('Matricula') as string) || '',
-                Marca: (oldRec.get('Marca') as string) || '',
-                Modelo: (oldRec.get('Modelo') as string) || '',
-                Extra: (oldRec.get('Extra') as string) || '',
-                Notas: (oldRec.get('Notas') as string) || '',
-                DurationMin: Number(oldRec.get('DurationMin') || 0),
-                ServiceType: (oldRec.get('ServiceType') as string) || '',
-                InvoiceUrl: (oldRec.get('InvoiceUrl') as string) || '',
-                Incident: !!oldRec.get('Incident'),
-                DeliveredAt: (oldRec.get('DeliveredAt') as string) || '',
-                DeliveredBy: (oldRec.get('DeliveredBy') as string) || '',
             };
-            // updateAppointmentFields tolera campos que no existen (Incident,
-            // DurationMin, ServiceType, InvoiceUrl, DeliveredAt/By): si Airtable
-            // se queja, los reintenta sin ellos. Con eso no rompemos si el
-            // negocio no tiene todos los campos configurados.
-            await updateAppointmentFields(newSlotId, dataToCopy);
+            const phone = (oldRec.get('ClientPhone') as string) || '';
+            if (phone) copy.ClientPhone = phone;
+            const matr = (oldRec.get('Matricula') as string) || '';
+            if (matr) copy.Matricula = matr;
+            const marca = (oldRec.get('Marca') as string) || '';
+            if (marca) copy.Marca = marca;
+            const modelo = (oldRec.get('Modelo') as string) || '';
+            if (modelo) copy.Modelo = modelo;
+            const extra = (oldRec.get('Extra') as string) || '';
+            if (extra) copy.Extra = extra;
+            const notas = (oldRec.get('Notas') as string) || '';
+            if (notas) copy.Notas = notas;
+            const dur = Number(oldRec.get('DurationMin') || 0);
+            if (dur > 0) copy.DurationMin = dur;
+            const svc = (oldRec.get('ServiceType') as string) || '';
+            if (svc) copy.ServiceType = svc;
+            const inv = (oldRec.get('InvoiceUrl') as string) || '';
+            if (inv) copy.InvoiceUrl = inv;
+            if (oldRec.get('Incident')) copy.Incident = true;
+            const delAt = (oldRec.get('DeliveredAt') as string) || '';
+            if (delAt) copy.DeliveredAt = delAt;
+            const delBy = (oldRec.get('DeliveredBy') as string) || '';
+            if (delBy) copy.DeliveredBy = delBy;
 
-            // Liberar el slot origen: vuelve a Available limpio, listo para
-            // que otro cliente lo coja. Mantenemos la agenda para que el
-            // mantenimiento no lo tome como huérfano.
-            await updateAppointmentFields(oldId, {
-                Status: 'Available',
-                ClientPhone: '',
-                ClientName: '',
-                Matricula: '',
-                Marca: '',
-                Modelo: '',
-                Extra: '',
-                Notas: '',
-                DurationMin: 0,
-                ServiceType: '',
-                InvoiceUrl: '',
-                Incident: false,
-                DeliveredAt: '',
-                DeliveredBy: '',
-            });
+            await updateAppointmentFields(newSlotId, copy);
+
+            // Liberar el slot origen: solo vaciamos los campos que sí existían
+            // con valor. Status siempre. Así reducimos el riesgo de tocar
+            // campos opcionales inexistentes que hagan fallar el update.
+            const clear: any = { Status: 'Available' };
+            if (phone) clear.ClientPhone = '';
+            clear.ClientName = ''; // siempre lo vaciamos (era el que verificamos al inicio)
+            if (matr) clear.Matricula = '';
+            if (marca) clear.Marca = '';
+            if (modelo) clear.Modelo = '';
+            if (extra) clear.Extra = '';
+            if (notas) clear.Notas = '';
+            if (dur > 0) clear.DurationMin = 0;
+            if (svc) clear.ServiceType = '';
+            if (inv) clear.InvoiceUrl = '';
+            if (oldRec.get('Incident')) clear.Incident = false;
+            if (delAt) clear.DeliveredAt = '';
+            if (delBy) clear.DeliveredBy = '';
+
+            await updateAppointmentFields(oldId, clear);
 
             return { oldDate, newDate, clientPhone: dataToCopy.ClientPhone as string, clientName: oldClientName };
         });
@@ -7589,8 +7601,9 @@ app.post('/api/appointments/:id/reschedule', async (req, res) => {
         res.json({ success: true, newId: newSlotId, oldDate: result?.oldDate, newDate: result?.newDate });
     } catch (e: any) {
         if (e && typeof e.httpStatus === 'number') return res.status(e.httpStatus).json({ error: e.message });
-        console.error('[API] Error POST /appointments/:id/reschedule:', e?.message);
-        res.status(500).json({ error: 'Error reprogramando la cita.' });
+        console.error('[API] Error POST /appointments/:id/reschedule:', e?.message, e?.stack);
+        // Devolvemos el mensaje del error real al frontend (útil para diagnosticar).
+        res.status(500).json({ error: `Error reprogramando: ${e?.message || 'desconocido'}` });
     }
 });
 
