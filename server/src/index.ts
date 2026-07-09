@@ -762,6 +762,28 @@ interface TeamAlert {
 }
 const recentAlerts: TeamAlert[] = []; // ring buffer
 const MAX_ALERTS_KEPT = 50;
+
+// --- ALERTAS POR TELEGRAM ---
+// Se activa solo si TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID están definidos (Render →
+// Environment). Si faltan, notifyTeam sigue funcionando igual (consola + Socket.IO),
+// simplemente sin salida por Telegram. Bot creado vía @BotFather; TELEGRAM_CHAT_ID es
+// el chat que debe recibir las alertas (el de quien administra el bot).
+const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
+const TELEGRAM_CHAT_ID = process.env.TELEGRAM_CHAT_ID;
+if (TELEGRAM_BOT_TOKEN && TELEGRAM_CHAT_ID) {
+    console.log('📨 [Telegram] Alertas del equipo activadas');
+}
+function sendTelegramAlert(alert: TeamAlert) {
+    if (!TELEGRAM_BOT_TOKEN || !TELEGRAM_CHAT_ID) return;
+    const emoji = alert.severity === 'critical' ? '🚨' : alert.severity === 'error' ? '❌' : '⚠️';
+    const text = `${emoji} *${alert.type}*\n${alert.message}`;
+    axios.post(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        chat_id: TELEGRAM_CHAT_ID,
+        text,
+        parse_mode: 'Markdown',
+    }).catch((e) => console.error('❌ [Telegram] Error enviando alerta:', e?.response?.data || e.message));
+}
+
 function notifyTeam(type: AlertType, severity: TeamAlert['severity'], message: string, context?: any) {
     const alert: TeamAlert = { type, severity, message, context, timestamp: new Date().toISOString() };
     recentAlerts.push(alert);
@@ -772,6 +794,7 @@ function notifyTeam(type: AlertType, severity: TeamAlert['severity'], message: s
     try {
         io.emit('team_alert', alert);
     } catch (_) {}
+    sendTelegramAlert(alert);
 }
 
 // Cada entrada mapea: número de opción → array de IDs de slot (1 slot para citas cortas, N para largas).
@@ -5359,7 +5382,8 @@ const TEMPLATE_HUMAN_MAP: Record<string, string> = {
     cita_recordatorio_24h:  '(recordatorio automático enviado al cliente: tiene una cita programada para mañana; se le pide que confirme su asistencia)',
     cita_recordatorio_1h:   '(recordatorio automático enviado al cliente: su cita es dentro de aproximadamente 1 hora)',
     recordatorio_cita:      '(recordatorio automático enviado al cliente sobre una cita programada)',
-    coche_listo_recogida:   '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller)',
+    coche_listo_recogida:     '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller)',
+    coche_listo_recogida_v2:  '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller, con botones de respuesta rápida para elegir cuándo pasa a recogerlo)',
     postventa_dia7_v2:      '(seguimiento posventa enviado al cliente unos días después de la entrega del vehículo)',
     postventa_dia30_v2:     '(seguimiento posventa enviado al cliente ~30 días después de la entrega del vehículo)',
     postventa_revision_6m:  '(recordatorio enviado al cliente: le toca la revisión de los 6 meses)',
@@ -9263,6 +9287,11 @@ app.post('/webhook', async (req, res) => {
             if (msg.type === 'text') {
                 text = msg.text.body;
                 inboundType = 'text';
+            } else if (msg.type === 'button') {
+                // Respuesta a botón de plantilla aprobada (Quick Reply de template).
+                // Meta envía type='button' con msg.button.text y msg.button.payload.
+                text = msg.button?.payload || msg.button?.text || '(botón)';
+                inboundType = 'text';
             } else if (msg.type === 'interactive') {
                 if (msg.interactive.type === 'list_reply') {
                     text = msg.interactive.list_reply.id;
@@ -9368,6 +9397,45 @@ app.post('/webhook', async (req, res) => {
                     console.log(`📅 [WEBHOOK] Confirmación de cita gestionada por "${text}" (${from})`);
                     return res.sendStatus(200);
                 }
+            }
+
+            // --- Respuesta a botón "¿Cuándo recoges tu vehículo?" (coche_listo_recogida_v2) ---
+            // type='button' con payload 'Voy hoy' / 'Voy mañana' / 'Llamadme'.
+            // Laura NO responde — mandamos un acuse fijo y avisamos al equipo.
+            if (msg.type === 'button' && ['Voy hoy', 'Voy mañana', 'Llamadme'].includes(text)) {
+                const clientName = (contactRecord?.get('name') as string) || 'El cliente';
+                const ackMap: Record<string, string> = {
+                    'Voy hoy':    '¡Perfecto! Te esperamos hoy. Recuerda nuestro horario: lunes a viernes de 8:00 a 19:00h. 🙌',
+                    'Voy mañana': '¡Perfecto! Te esperamos mañana. Recuerda nuestro horario: lunes a viernes de 8:00 a 19:00h. 👍',
+                    'Llamadme':   'Recibido, en breve nos ponemos en contacto contigo. ¡Hasta pronto!',
+                };
+                const labelMap: Record<string, string> = {
+                    'Voy hoy':    'va a recoger hoy',
+                    'Voy mañana': 'va a recoger mañana',
+                    'Llamadme':   'pide que le llaméis',
+                };
+                // Acuse de recibo al cliente
+                try {
+                    await sendWhatsAppText(from, ackMap[text], originPhoneId);
+                } catch (e: any) {
+                    console.warn(`[CocheListo] Error enviando acuse a ${from}:`, e?.message);
+                }
+                // Toast de aviso al equipo
+                try {
+                    io.emit('team_human_attention', {
+                        phone: from,
+                        clientName,
+                        reason: 'assigned_to_dept',
+                        reasonLabel: `${labelMap[text]} 🚗`,
+                        snippet: `${clientName} ha pulsado "${text}"`,
+                        title: `🚗 Recogida · ${clientName}`,
+                        body: `${clientName} ${labelMap[text]}`,
+                        source: 'keyword',
+                        createdAt: new Date().toISOString()
+                    });
+                } catch (_) { /* no bloquear */ }
+                console.log(`🚗 [CoeheListo] ${clientName} (${from}) pulsó "${text}". Acuse enviado, equipo avisado. Laura no responde.`);
+                return res.sendStatus(200);
             }
 
             // --- Detección opt-out de notificaciones y marketing ---
