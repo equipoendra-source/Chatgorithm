@@ -7568,7 +7568,7 @@ app.post('/api/appointments/:id/reschedule', async (req, res) => {
 
             await updateAppointmentFields(oldId, clear);
 
-            return { oldDate, newDate, clientPhone: dataToCopy.ClientPhone as string, clientName: oldClientName };
+            return { oldDate, newDate, clientPhone: (copy.ClientPhone as string) || '', clientName: oldClientName };
         });
 
         // Cancelar los recordatorios cita_24h/cita_1h del cliente: apuntaban
