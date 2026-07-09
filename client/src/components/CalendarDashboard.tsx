@@ -945,6 +945,40 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
         finally { setUploadingInvoice(false); }
     };
 
+    // Estado del submodal "Cambiar día/hora": null=cerrado, string=YYYY-MM-DD del día
+    // seleccionado. El usuario primero elige un día del calendario y luego una hora
+    // libre. Solo se muestran huecos Available de la MISMA agenda que la cita
+    // origen (para no meter una cita del taller en una agenda de ventas).
+    const [rescheduleDate, setRescheduleDate] = useState<string>('');
+    const [rescheduling, setRescheduling] = useState(false);
+    const [showRescheduleModal, setShowRescheduleModal] = useState(false);
+
+    const handleReschedule = async (newSlotId: string) => {
+        if (!selectedAppt || rescheduling) return;
+        setRescheduling(true);
+        try {
+            const res = await fetch(`${API_URL}/appointments/${selectedAppt.id}/reschedule`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ newSlotId, actorUsername: getCurrentUsername() })
+            });
+            const data = await res.json();
+            if (!res.ok) {
+                alert('No se pudo reprogramar: ' + (data.error || 'error'));
+                return;
+            }
+            // Cerrar todo y refrescar
+            setShowRescheduleModal(false);
+            setRescheduleDate('');
+            closeBookingModal();
+            fetchData();
+        } catch (e: any) {
+            alert('Error de red al reprogramar: ' + (e?.message || ''));
+        } finally {
+            setRescheduling(false);
+        }
+    };
+
     const handleUpdateAppt = async () => {
         if (!selectedAppt) return;
         // service se envía siempre que la cita acabe en Booked: al CREAR
@@ -2655,6 +2689,23 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                                 </div>
                             )}
 
+                            {/* Cambiar día/hora — solo para citas ya reservadas (no crear). */}
+                            {!readOnly && selectedAppt.status === 'Booked' && (
+                                <button
+                                    onClick={() => {
+                                        // Precargar el selector de día con la fecha actual de la cita
+                                        // (por si el usuario solo quiere cambiar de hora dentro del mismo día).
+                                        const d = new Date(selectedAppt.date);
+                                        setRescheduleDate(d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' }));
+                                        setShowRescheduleModal(true);
+                                    }}
+                                    className={`w-full mb-2 px-4 py-2.5 rounded-xl font-bold text-sm border transition flex items-center justify-center gap-2 ${isDark ? 'bg-cyan-900/30 border-cyan-800 text-cyan-300 hover:bg-cyan-900/50' : 'bg-cyan-50 border-cyan-200 text-cyan-700 hover:bg-cyan-100'}`}
+                                    title="Cambiar el día y/o la hora de esta cita"
+                                >
+                                    <CalendarIcon size={16} /> Cambiar día / hora
+                                </button>
+                            )}
+
                             {/* Borrar/Guardar — solo admins y managers */}
                             {!readOnly && (
                                 <div className="flex gap-2">
@@ -2668,6 +2719,78 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                     </div>
                 </div>
             )}
+
+            {/* SUBMODAL "CAMBIAR DÍA / HORA" — muestra los huecos Available libres
+                de la misma agenda que la cita origen. El usuario elige día en el
+                input date y hora en la rejilla de huecos libres. Al pulsar uno,
+                se dispara el swap atómico en el backend. */}
+            {showRescheduleModal && selectedAppt && (() => {
+                // Filtrar huecos: Available, misma agenda, futuros, del día elegido.
+                const targetAgenda = selectedAppt.agenda || '';
+                const dayStr = rescheduleDate;
+                const now = new Date();
+                const freeSlots = appointments.filter(a => {
+                    if (a.status !== 'Available') return false;
+                    if (a.id === selectedAppt.id) return false; // no ofrecernos el mismo slot
+                    if ((a.agenda || '') !== targetAgenda) return false;
+                    const d = new Date(a.date);
+                    if (d.getTime() <= now.getTime()) return false;
+                    const dKey = d.toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' });
+                    return dKey === dayStr;
+                }).sort((x, y) => new Date(x.date).getTime() - new Date(y.date).getTime());
+                const fmtHour = (iso: string) => new Date(iso).toLocaleTimeString('es-ES', { timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit' });
+                return (
+                    <div className="fixed inset-0 bg-black/50 z-[60] flex items-center justify-center p-4 backdrop-blur-sm animate-in fade-in">
+                        <div className={`rounded-2xl shadow-2xl w-full max-w-md flex flex-col max-h-[85vh] ${isDark ? 'glass-panel border-white/5' : 'bg-white'}`}>
+                            <div className={`p-4 border-b flex justify-between items-center flex-shrink-0 ${isDark ? 'border-white/5 bg-slate-900/30' : 'border-slate-100 bg-slate-50'}`}>
+                                <h3 className={`font-bold flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                                    <CalendarIcon size={18} className="text-cyan-500" /> Cambiar día / hora
+                                </h3>
+                                <button onClick={() => { setShowRescheduleModal(false); setRescheduleDate(''); }} className={`p-1.5 rounded-lg transition ${isDark ? 'hover:bg-slate-700 text-slate-400' : 'hover:bg-slate-100 text-slate-500'}`}>
+                                    <X size={18} />
+                                </button>
+                            </div>
+                            <div className="p-5 space-y-4 overflow-y-auto">
+                                <div>
+                                    <label className={`text-xs font-bold uppercase mb-1.5 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Nuevo día</label>
+                                    <input
+                                        type="date"
+                                        value={rescheduleDate}
+                                        min={new Date().toLocaleDateString('en-CA', { timeZone: 'Europe/Madrid' })}
+                                        onChange={e => setRescheduleDate(e.target.value)}
+                                        className={`w-full p-2.5 border rounded-lg text-sm outline-none focus:ring-2 focus:ring-cyan-500 ${isDark ? 'bg-slate-800 border-slate-700 text-white' : 'border-slate-200'}`}
+                                    />
+                                </div>
+                                <div>
+                                    <label className={`text-xs font-bold uppercase mb-1.5 block ${isDark ? 'text-cyan-400' : 'text-cyan-700'}`}>Nueva hora ({freeSlots.length} libres)</label>
+                                    {freeSlots.length === 0 ? (
+                                        <p className={`text-sm italic ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                            {rescheduleDate ? 'No hay huecos libres en este día. Prueba otro día.' : 'Elige primero un día.'}
+                                        </p>
+                                    ) : (
+                                        <div className="grid grid-cols-3 gap-2">
+                                            {freeSlots.map(s => (
+                                                <button
+                                                    key={s.id}
+                                                    onClick={() => handleReschedule(s.id)}
+                                                    disabled={rescheduling}
+                                                    className={`p-2.5 rounded-lg text-sm font-bold border transition disabled:opacity-40 disabled:cursor-wait ${isDark ? 'bg-slate-800 border-slate-700 text-cyan-300 hover:bg-cyan-900/40 hover:border-cyan-700' : 'bg-white border-slate-200 text-cyan-700 hover:bg-cyan-50 hover:border-cyan-300'}`}
+                                                    title={`Reprogramar a ${fmtHour(s.date)}`}
+                                                >
+                                                    {fmtHour(s.date)}
+                                                </button>
+                                            ))}
+                                        </div>
+                                    )}
+                                </div>
+                                <div className={`text-[11px] p-2.5 rounded-lg ${isDark ? 'bg-slate-800/60 text-slate-400 border border-slate-700' : 'bg-slate-50 text-slate-500 border border-slate-200'}`}>
+                                    💡 Al elegir una hora, la cita se mueve al nuevo hueco automáticamente. El hueco actual queda libre para otro cliente y los recordatorios se recalculan con la nueva fecha.
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
 
             {/* MODAL CONFIGURAR AGENDAS */}
             {showAgendaModal && (

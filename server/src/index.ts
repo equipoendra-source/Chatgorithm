@@ -7471,6 +7471,129 @@ app.post('/api/appointments/:id/invoice', async (req, res) => {
 // DeliveredBy, y revierte el status del contacto si seguía en "Vehículo
 // Entregado" (cancelando la secuencia postventa pendiente vía
 // handleContactStatusChange).
+// Reprogramar una cita a otro slot Available existente. Swap atómico:
+// copia los datos de la cita vieja al slot destino (Booked + datos), y
+// libera el slot origen (Available + campos vacíos). Bajo lock para
+// evitar que otro proceso (Laura, otro agente) reserve el destino en
+// medio del swap.
+//
+// Body: { newSlotId: string, actorUsername?: string }
+// - newSlotId: id del slot destino, que debe estar Available.
+// - actorUsername: para el audit log.
+app.post('/api/appointments/:id/reschedule', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB' });
+    const oldId = req.params.id;
+    const newSlotId = String(req.body?.newSlotId ?? '').trim();
+    const actor = String(req.body?.actorUsername ?? 'system');
+    if (!newSlotId) return res.status(400).json({ error: 'Falta newSlotId' });
+    if (newSlotId === oldId) return res.status(400).json({ error: 'El slot destino es el mismo que el origen' });
+    try {
+        // Todo el swap dentro del lock del OLDID: evita que se cancele o se
+        // entregue mientras estamos moviendo. También paramos las citas del
+        // destino a través del mismo lock secundario si hiciera falta, pero
+        // como el destino debe ser Available y ya bloqueamos el origen, con
+        // uno basta para el flujo humano.
+        const result = await withAppointmentLock(oldId, async () => {
+            const oldRec = await base!('Appointments').find(oldId);
+            const oldStatus = (oldRec.get('Status') as string) || '';
+            const oldClientName = (oldRec.get('ClientName') as string) || '';
+            const oldDate = (oldRec.get('Date') as string) || '';
+            if (oldStatus !== 'Booked' || !oldClientName.trim()) {
+                throw { httpStatus: 400, message: 'Solo se pueden reprogramar citas reservadas con cliente.' };
+            }
+            // El slot destino debe existir y estar Available para no pisar otra cita.
+            let newRec: any;
+            try { newRec = await base!('Appointments').find(newSlotId); }
+            catch (_) { throw { httpStatus: 404, message: 'El slot destino no existe.' }; }
+            const newStatus = (newRec.get('Status') as string) || '';
+            const newDate = (newRec.get('Date') as string) || '';
+            if (newStatus !== 'Available') {
+                throw { httpStatus: 409, message: `El slot destino ya no está libre (estado: ${newStatus}). Recarga el calendario y elige otro.` };
+            }
+            if (!newDate) throw { httpStatus: 400, message: 'El slot destino no tiene fecha.' };
+
+            // Copiar los datos del cliente al slot destino con Status=Booked.
+            // Reproducimos los mismos campos que bookAppointment/PUT usa.
+            const dataToCopy: any = {
+                Status: 'Booked',
+                ClientPhone: (oldRec.get('ClientPhone') as string) || '',
+                ClientName: oldClientName,
+                Matricula: (oldRec.get('Matricula') as string) || '',
+                Marca: (oldRec.get('Marca') as string) || '',
+                Modelo: (oldRec.get('Modelo') as string) || '',
+                Extra: (oldRec.get('Extra') as string) || '',
+                Notas: (oldRec.get('Notas') as string) || '',
+                DurationMin: Number(oldRec.get('DurationMin') || 0),
+                ServiceType: (oldRec.get('ServiceType') as string) || '',
+                InvoiceUrl: (oldRec.get('InvoiceUrl') as string) || '',
+                Incident: !!oldRec.get('Incident'),
+                DeliveredAt: (oldRec.get('DeliveredAt') as string) || '',
+                DeliveredBy: (oldRec.get('DeliveredBy') as string) || '',
+            };
+            // updateAppointmentFields tolera campos que no existen (Incident,
+            // DurationMin, ServiceType, InvoiceUrl, DeliveredAt/By): si Airtable
+            // se queja, los reintenta sin ellos. Con eso no rompemos si el
+            // negocio no tiene todos los campos configurados.
+            await updateAppointmentFields(newSlotId, dataToCopy);
+
+            // Liberar el slot origen: vuelve a Available limpio, listo para
+            // que otro cliente lo coja. Mantenemos la agenda para que el
+            // mantenimiento no lo tome como huérfano.
+            await updateAppointmentFields(oldId, {
+                Status: 'Available',
+                ClientPhone: '',
+                ClientName: '',
+                Matricula: '',
+                Marca: '',
+                Modelo: '',
+                Extra: '',
+                Notas: '',
+                DurationMin: 0,
+                ServiceType: '',
+                InvoiceUrl: '',
+                Incident: false,
+                DeliveredAt: '',
+                DeliveredBy: '',
+            });
+
+            return { oldDate, newDate, clientPhone: dataToCopy.ClientPhone as string, clientName: oldClientName };
+        });
+
+        // Cancelar los recordatorios cita_24h/cita_1h del cliente: apuntaban
+        // a la fecha vieja y el cron los recreará automáticamente contra la
+        // nueva. Sin esto, al cliente le llegaría "recuerda tu cita mañana"
+        // cuando ya no es mañana.
+        if (result?.clientPhone) {
+            try { await cancelPendingCitaReminders(result.clientPhone); }
+            catch (e: any) { console.warn('[Reschedule] Error cancelando recordatorios:', e?.message); }
+        }
+
+        // Emitir eventos para refrescar calendarios abiertos.
+        try {
+            io.emit('appointment_changed', { action: 'rescheduled', oldId, newId: newSlotId });
+            io.emit('appointment_event', { type: 'rescheduled', appointmentId: newSlotId, oldAppointmentId: oldId, oldDate: result?.oldDate, newDate: result?.newDate, clientName: result?.clientName || '' });
+        } catch (_) { /* nunca bloquear */ }
+
+        // Audit log
+        try {
+            logAudit({
+                action: 'appointment.update', user: actor, targetType: 'appointment',
+                targetId: newSlotId, targetName: result?.clientName || result?.clientPhone || oldId,
+                summary: `Reprogramada cita de ${result?.clientName || '?'} (${result?.oldDate || '?'} → ${result?.newDate || '?'})`,
+                changes: { date: { from: result?.oldDate, to: result?.newDate }, appointmentId: { from: oldId, to: newSlotId } },
+                origin: 'web'
+            }).catch(() => {});
+        } catch (_) { /* nunca bloquear */ }
+
+        console.log(`📅 [API] Reprogramada cita ${oldId} → ${newSlotId} (${result?.oldDate} → ${result?.newDate})`);
+        res.json({ success: true, newId: newSlotId, oldDate: result?.oldDate, newDate: result?.newDate });
+    } catch (e: any) {
+        if (e && typeof e.httpStatus === 'number') return res.status(e.httpStatus).json({ error: e.message });
+        console.error('[API] Error POST /appointments/:id/reschedule:', e?.message);
+        res.status(500).json({ error: 'Error reprogramando la cita.' });
+    }
+});
+
 app.post('/api/appointments/:id/undeliver', async (req, res) => {
     if (!base) return res.status(500).json({ error: "DB" });
     try {
