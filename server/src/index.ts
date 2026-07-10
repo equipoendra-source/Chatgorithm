@@ -7437,8 +7437,22 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
             // quede natural: "Hola Juan" en lugar de "Hola Juan García Pérez".
             const firstName = (clientName || '').trim().split(/\s+/)[0] || 'cliente';
             sendTemplateMessage(clientPhone, PICKUP_READY_TEMPLATE, [firstName], originId)
-                .then(r => { if (r !== true) console.warn(`[Deliver] No se pudo enviar aviso 'coche listo' a ${clientPhone}: ${r}`); else console.log(`✅ [Deliver] Aviso 'coche listo' enviado a ${clientPhone}`); })
-                .catch(e => console.warn('[Deliver] Error enviando aviso coche listo:', e?.message));
+                .then(r => {
+                    if (r !== true) {
+                        console.warn(`[Deliver] No se pudo enviar aviso 'coche listo' a ${clientPhone}: ${r}`);
+                        notifyTeam('send_failed', 'error',
+                            `No se pudo avisar a ${clientName || clientPhone} de que su vehículo está listo (plantilla ${PICKUP_READY_TEMPLATE}): ${r}`,
+                            { phone: clientPhone, templateName: PICKUP_READY_TEMPLATE, error: r });
+                    } else {
+                        console.log(`✅ [Deliver] Aviso 'coche listo' enviado a ${clientPhone}`);
+                    }
+                })
+                .catch(e => {
+                    console.warn('[Deliver] Error enviando aviso coche listo:', e?.message);
+                    notifyTeam('send_failed', 'error',
+                        `Error de conexión avisando a ${clientName || clientPhone} de que su vehículo está listo: ${e?.message}`,
+                        { phone: clientPhone, templateName: PICKUP_READY_TEMPLATE });
+                });
         }
 
         // Enviar además la factura al cliente (si se adjuntó en el popup de la cita).
