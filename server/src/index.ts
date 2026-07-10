@@ -9552,8 +9552,23 @@ app.post('/webhook', async (req, res) => {
                 enqueueForAI(from, text, name, originPhoneId, inboundMediaPkg);
             }
         } else if (body.object && body.entry?.[0]?.changes?.[0]?.value?.statuses) {
-            // Status updates (delivered, read, etc.) - ignorar silenciosamente
-            console.log(`📊 [WEBHOOK] Status update recibido (no es mensaje)`);
+            // Confirmaciones asíncronas de entrega real (sent/delivered/read/failed).
+            // Que la API de Meta acepte el envío (200) NO significa que el mensaje
+            // llegue al móvil: la confirmación/fallo real llega aquí después, por
+            // separado. Antes se ignoraba todo → fallos de entrega invisibles.
+            const statuses = body.entry[0].changes[0].value.statuses || [];
+            for (const st of statuses) {
+                if (st.status === 'failed') {
+                    const err = (st.errors && st.errors[0]) || {};
+                    const detail = `Meta ${err.code || ''}: ${err.title || err.message || 'motivo desconocido'} ${err.error_data?.details || ''}`.trim();
+                    console.warn(`❌ [WEBHOOK] Entrega FALLIDA a ${st.recipient_id} (msg ${st.id}): ${detail}`);
+                    notifyTeam('send_failed', 'error',
+                        `WhatsApp no llegó al destinatario ${st.recipient_id}: ${detail}`,
+                        { phone: st.recipient_id, messageId: st.id, errorCode: err.code || 0 });
+                } else {
+                    console.log(`📊 [WEBHOOK] Status "${st.status}" para ${st.recipient_id} (msg ${st.id})`);
+                }
+            }
         } else if (body.object && body.entry?.[0]?.changes?.[0]?.field === 'message_template_status_update') {
             const metaId = body.entry[0].changes[0].value.message_template_id;
             const newStatus = body.entry[0].changes[0].value.event;
