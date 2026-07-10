@@ -2578,7 +2578,7 @@ const INVOICE_TEMPLATE = 'factura_entrega_';
 // Plantilla (aprobada en Meta, categoría UTILITY, sin cabecera de documento) que
 // avisa al cliente de que su vehículo está listo para recoger. Se envía SIEMPRE
 // al marcar "Vehículo Entregado" (con o sin factura PDF). Variable {{1}} = nombre.
-const PICKUP_READY_TEMPLATE = 'coche_listo_recogida';
+const PICKUP_READY_TEMPLATE = 'coche_listo_recogida_v2';
 
 // Cache nombre de plantilla → código de idioma real en Meta. Una plantilla puede
 // estar aprobada en "es", "es_ES", "es_MX"… y enviar con el código equivocado da
