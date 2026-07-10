@@ -2566,19 +2566,17 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
     return lastErr || 'No se pudo enviar la plantilla';
 }
 
-// Nombre de la plantilla (aprobada en Meta con CABECERA DE DOCUMENTO) que se usa
-// para enviar la factura al entregar el vehículo. El admin debe crearla en Meta:
-//   - Categoría: UTILITY
-//   - Cabecera: Documento (Document)
-//   - Cuerpo: ej. "Hola {{1}}, te adjuntamos la factura de tu visita. ¡Gracias!"
-// OJO: el nombre real en Meta lleva un guion bajo al final (factura_entrega_),
-// confirmado al listar las plantillas APPROVED de la WABA. Sin él, Meta da #132001.
-const INVOICE_TEMPLATE = 'factura_entrega_';
-
 // Plantilla (aprobada en Meta, categoría UTILITY, sin cabecera de documento) que
-// avisa al cliente de que su vehículo está listo para recoger. Se envía SIEMPRE
-// al marcar "Vehículo Entregado" (con o sin factura PDF). Variable {{1}} = nombre.
+// avisa al cliente de que su vehículo está listo para recoger. Se envía cuando
+// NO hay factura adjunta. Variable {{1}} = nombre. Botones: Voy hoy / Voy
+// mañana / Llamadme.
 const PICKUP_READY_TEMPLATE = 'coche_listo_recogida_v2';
+
+// Igual que PICKUP_READY_TEMPLATE pero con cabecera de DOCUMENTO — un solo
+// mensaje con el aviso + la factura + los botones. Se usa en vez de la de
+// arriba cuando SÍ hay factura adjunta (las dos plantillas son mutuamente
+// excluyentes: esta exige adjuntar un documento en cada envío).
+const PICKUP_READY_WITH_INVOICE_TEMPLATE = 'coche_listo_recogida_factura';
 
 // Cache nombre de plantilla → código de idioma real en Meta. Una plantilla puede
 // estar aprobada en "es", "es_ES", "es_MX"… y enviar con el código equivocado da
@@ -2715,6 +2713,43 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
     }
     console.error(`❌ [Factura] No se encontró idioma válido para ${templateName} a ${cleanTo}. Último error:`, lastErr);
     return lastErr || 'No se pudo enviar la factura';
+}
+
+// Avisa al cliente de que su vehículo está listo para recoger. Punto ÚNICO de
+// envío de este aviso — lo llaman TODOS los sitios donde se puede marcar
+// "Vehículo Entregado" (endpoint /deliver del calendario, panel "Pendientes
+// de entrega", y el desplegable de estado dentro del chat) para que el
+// cliente reciba el mismo mensaje sin importar por dónde se marcó la entrega.
+// - Si hay factura (invoiceUrl) → UN solo mensaje: plantilla con cabecera de
+//   documento + texto + botones (coche_listo_recogida_factura).
+// - Si no hay factura → plantilla de solo texto + botones (coche_listo_recogida_v2).
+// Fire-and-forget: nunca bloquea al llamador. Si Meta rechaza el envío
+// (plantilla en otra WABA, no aprobada, número inválido…), avisa al equipo
+// vía notifyTeam en vez de fallar en silencio.
+function sendPickupReadyNotification(phone: string, clientName: string, invoiceUrl: string, originPhoneId: string): void {
+    const cleanPhone = cleanNumber(phone);
+    if (!cleanPhone) return;
+    const firstName = (clientName || '').trim().split(/\s+/)[0] || 'cliente';
+    const send = invoiceUrl
+        ? sendTemplateWithDocument(cleanPhone, PICKUP_READY_WITH_INVOICE_TEMPLATE, [firstName], invoiceUrl, 'Factura.pdf', originPhoneId)
+        : sendTemplateMessage(cleanPhone, PICKUP_READY_TEMPLATE, [firstName], originPhoneId);
+    send
+        .then(r => {
+            if (r !== true) {
+                console.warn(`[PickupReady] No se pudo avisar a ${cleanPhone}: ${r}`);
+                notifyTeam('send_failed', 'error',
+                    `No se pudo avisar a ${clientName || cleanPhone} de que su vehículo está listo: ${r}`,
+                    { phone: cleanPhone, conFactura: !!invoiceUrl, error: r });
+            } else {
+                console.log(`✅ [PickupReady] Aviso enviado a ${cleanPhone}${invoiceUrl ? ' (con factura, 1 mensaje)' : ''}`);
+            }
+        })
+        .catch(e => {
+            console.warn('[PickupReady] Error de conexión:', e?.message);
+            notifyTeam('send_failed', 'error',
+                `Error de conexión avisando a ${clientName || cleanPhone} de que su vehículo está listo: ${e?.message}`,
+                { phone: cleanPhone, conFactura: !!invoiceUrl });
+        });
 }
 
 // --- Programar notificación con idempotencia ---
@@ -5384,6 +5419,7 @@ const TEMPLATE_HUMAN_MAP: Record<string, string> = {
     recordatorio_cita:      '(recordatorio automático enviado al cliente sobre una cita programada)',
     coche_listo_recogida:     '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller)',
     coche_listo_recogida_v2:  '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller, con botones de respuesta rápida para elegir cuándo pasa a recogerlo)',
+    coche_listo_recogida_factura: '(aviso enviado al cliente: su vehículo ya está listo para recoger en el taller, con la factura adjunta y botones de respuesta rápida para elegir cuándo pasa a recogerlo)',
     postventa_dia7_v2:      '(seguimiento posventa enviado al cliente unos días después de la entrega del vehículo)',
     postventa_dia30_v2:     '(seguimiento posventa enviado al cliente ~30 días después de la entrega del vehículo)',
     postventa_revision_6m:  '(recordatorio enviado al cliente: le toca la revisión de los 6 meses)',
@@ -7427,42 +7463,12 @@ app.post('/api/appointments/:id/deliver', async (req, res) => {
             }
         }
 
-        // Avisar SIEMPRE al cliente de que su vehículo está listo (plantilla
-        // aprobada `coche_listo_recogida`). Se manda con o sin factura — es
-        // el aviso de "puedes venir a recogerlo". Fire-and-forget: si Meta
-        // rechaza o el número está mal, la entrega ya está registrada.
+        // Avisar SIEMPRE al cliente de que su vehículo está listo. Un solo
+        // mensaje con la factura adjunta si hay invoiceUrl, o solo texto+botones
+        // si no. Ver sendPickupReadyNotification para el detalle de plantillas.
         if (clientPhone) {
             const originId = contactOrigin || waPhoneId || 'default';
-            // Nombre corto del cliente (primer nombre) para que el saludo
-            // quede natural: "Hola Juan" en lugar de "Hola Juan García Pérez".
-            const firstName = (clientName || '').trim().split(/\s+/)[0] || 'cliente';
-            sendTemplateMessage(clientPhone, PICKUP_READY_TEMPLATE, [firstName], originId)
-                .then(r => {
-                    if (r !== true) {
-                        console.warn(`[Deliver] No se pudo enviar aviso 'coche listo' a ${clientPhone}: ${r}`);
-                        notifyTeam('send_failed', 'error',
-                            `No se pudo avisar a ${clientName || clientPhone} de que su vehículo está listo (plantilla ${PICKUP_READY_TEMPLATE}): ${r}`,
-                            { phone: clientPhone, templateName: PICKUP_READY_TEMPLATE, error: r });
-                    } else {
-                        console.log(`✅ [Deliver] Aviso 'coche listo' enviado a ${clientPhone}`);
-                    }
-                })
-                .catch(e => {
-                    console.warn('[Deliver] Error enviando aviso coche listo:', e?.message);
-                    notifyTeam('send_failed', 'error',
-                        `Error de conexión avisando a ${clientName || clientPhone} de que su vehículo está listo: ${e?.message}`,
-                        { phone: clientPhone, templateName: PICKUP_READY_TEMPLATE });
-                });
-        }
-
-        // Enviar además la factura al cliente (si se adjuntó en el popup de la cita).
-        // Plantilla con cabecera de documento → llega aunque la ventana de 24h
-        // esté cerrada. Fire-and-forget: no bloquea ni revierte la entrega.
-        if (invoiceUrl && clientPhone) {
-            const originId = contactOrigin || waPhoneId || 'default';
-            sendTemplateWithDocument(clientPhone, INVOICE_TEMPLATE, [], invoiceUrl, 'Factura.pdf', originId)
-                .then(r => { if (r !== true) console.warn(`[Deliver] No se pudo enviar la factura a ${clientPhone}: ${r}`); })
-                .catch(e => console.warn('[Deliver] Error enviando factura:', e?.message));
+            sendPickupReadyNotification(clientPhone, clientName, invoiceUrl, originId);
         }
 
         // Audit log + evento socket para refrescar calendarios abiertos
@@ -9856,6 +9862,30 @@ io.on('connection', (socket) => {
 
             // Efectos secundarios del cambio de estado (secuencia postventa)
             await handleContactStatusChange(r[0], oldStatus, data.updates.status, clean);
+
+            // Avisar al cliente de que su vehículo está listo. Este socket
+            // (desplegable de estado en el chat) es OTRA vía para marcar
+            // "Vehículo Entregado" además del calendario — sin esto el
+            // cliente no recibía ningún WhatsApp si se marcaba desde aquí.
+            // No hay una cita concreta en contexto (a diferencia de /deliver),
+            // así que buscamos la última cita Booked del cliente por si tiene
+            // factura adjunta.
+            if (data.updates.status === 'Vehículo Entregado' && oldStatus !== 'Vehículo Entregado') {
+                try {
+                    const originId = (r[0].get('origin_phone_id') as string) || waPhoneId || 'default';
+                    let invoiceUrl = '';
+                    try {
+                        const appts = await base('Appointments').select({
+                            filterByFormula: `AND({ClientPhone}='${clean}', {Status}='Booked', {ClientName}!='')`,
+                            sort: [{ field: 'Date', direction: 'desc' }], maxRecords: 1
+                        }).firstPage();
+                        if (appts.length > 0) invoiceUrl = (appts[0].get('InvoiceUrl') as string) || '';
+                    } catch (_) { /* sin factura si falla la búsqueda de la cita */ }
+                    sendPickupReadyNotification(clean, clientName, invoiceUrl, originId);
+                } catch (e: any) {
+                    console.warn('[update_contact_info] Error avisando "vehículo listo":', e?.message);
+                }
+            }
         }
     });
 
