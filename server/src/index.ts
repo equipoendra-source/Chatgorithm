@@ -5368,7 +5368,14 @@ async function assignDepartment(clientPhone: string, department: string) {
             const fields: any = { "department": department, "status": "Abierto" };
             if (pickedAgent) fields.assigned_to = pickedAgent;
 
-            await base('Contacts').update([{ id: contacts[0].id, fields }]);
+            // typecast: Airtable crea sola la opción del single-select si el
+            // departamento es nuevo (ej. se acaba de crear "Recambios" en
+            // Ajustes CRM y nunca se había usado). Sin esto Airtable rechaza
+            // el update con "insufficient permissions to create new select
+            // option", assignDepartment devuelve "Error asignando." y el
+            // cliente recibe el fallback de "problema técnico" — aunque Laura
+            // hubiera elegido el departamento correcto.
+            await base('Contacts').update([{ id: contacts[0].id, fields }], { typecast: true });
             io.emit('contact_updated_notification');
             activeAiChats.delete(clean);
             io.emit('ai_active_change', { phone: clean, active: false });
