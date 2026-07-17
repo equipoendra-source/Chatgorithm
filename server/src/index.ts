@@ -1766,6 +1766,43 @@ async function notifyHumanAttention(data: {
         console.warn('[HumanAttention] Socket emit falló:', e?.message);
     }
 
+    // 3.5) PERSISTIR la alarma en la ficha del contacto.
+    //      Sin esto la alarma solo vivía como toast en el navegador: si nadie
+    //      la veía en ese momento (fuera de horario, recarga de página, nadie
+    //      conectado) se perdía para siempre y el cliente se quedaba sin
+    //      atender, sin que quedara ningún rastro. Guardándola en el contacto,
+    //      la bandeja puede filtrar "pendientes de atender" y el equipo las
+    //      repesca luego. Se limpia sola cuando un agente contesta a ese chat
+    //      (socket 'chatMessage').
+    //      Tolerante a propósito: si los campos aún no existen en Airtable,
+    //      avisamos por log y seguimos — una alarma en pantalla nunca debe
+    //      romperse porque falte una columna.
+    try {
+        if (base) {
+            const cs = await base('Contacts').select({
+                filterByFormula: `{phone}='${clean}'`, maxRecords: 1
+            }).firstPage();
+            if (cs.length > 0) {
+                await base('Contacts').update([{
+                    id: cs[0].id,
+                    fields: {
+                        attention_pending: true,
+                        attention_reason: reasonText[data.reason],
+                        attention_snippet: truncate(data.snippet || '', 200),
+                        attention_at: new Date().toISOString()
+                    }
+                }], { typecast: true });
+                io.emit('contact_updated_notification');
+            }
+        }
+    } catch (e: any) {
+        if (/unknown field|attention_/i.test(e?.message || '')) {
+            console.warn('[HumanAttention] Faltan columnas en Contacts (attention_pending / attention_reason / attention_snippet / attention_at). Créalas en Airtable o las alarmas no se guardarán.');
+        } else {
+            console.warn('[HumanAttention] No se pudo guardar la alarma en el contacto:', e?.message);
+        }
+    }
+
     // 4) Push al móvil (FCM + WebPush) — broadcast a todo el equipo
     try {
         sendFCMNotification({
@@ -9802,7 +9839,11 @@ io.on('connection', (socket) => {
                 tags: x.get('tags') || [],
                 origin_phone_id: x.get('origin_phone_id'),
                 unread_count: x.get('unread_count') || 0, // Return unread_count
-                ai_muted: !!x.get('ai_muted')  // Toggle IA on/off por chat (silenciar Laura)
+                ai_muted: !!x.get('ai_muted'),  // Toggle IA on/off por chat (silenciar Laura)
+                // Alarma de atención humana pendiente → pestaña "Atención" de la bandeja
+                attention_pending: !!x.get('attention_pending'),
+                attention_reason: (x.get('attention_reason') as string) || '',
+                attention_at: (x.get('attention_at') as string) || ''
             })));
         }
     });
@@ -9949,10 +9990,28 @@ io.on('connection', (socket) => {
 
                 if (records.length > 0) {
                     const currentStatus = records[0].get('status');
+                    const handoverFields: any = {};
                     // Solo actualizamos si es "Nuevo" (o está asignado a IA implícitamente) para evitar pisar otros estados
                     if (currentStatus === 'Nuevo') {
                         console.log(`📝 [SYNC] Cambio forzado: ${cleanTo} -> Status 'Abierto' (Stop IA)`);
-                        await base('Contacts').update([{ id: records[0].id, fields: { "status": "Abierto" } }]);
+                        handoverFields.status = 'Abierto';
+                    }
+                    // Un agente está contestando → la alarma de atención humana
+                    // (si la había) queda ATENDIDA y el chat sale solo de la
+                    // pestaña "Atención" de la bandeja. Nadie tiene que
+                    // marcarlo a mano: contestar ES atenderlo.
+                    // Aprovechamos el mismo record ya cargado arriba para no
+                    // añadir otra llamada a Airtable por cada mensaje enviado.
+                    if (records[0].get('attention_pending')) {
+                        handoverFields.attention_pending = false;
+                        handoverFields.attention_reason = '';
+                        handoverFields.attention_snippet = '';
+                        handoverFields.attention_at = '';
+                        console.log(`✅ [HumanAttention] Alarma de ${cleanTo} atendida (respondió un agente).`);
+                    }
+                    if (Object.keys(handoverFields).length > 0) {
+                        await base('Contacts').update([{ id: records[0].id, fields: handoverFields }], { typecast: true });
+                        io.emit('contact_updated_notification');
                     }
                 }
             } catch (err) {
@@ -11398,6 +11457,10 @@ app.get('/api/campaigns-contacts', async (req, res) => {
             assigned_to: (r.get('assigned_to') as string) || '',
             optInMarketing: !!r.get('optInMarketing'),
             ai_muted: !!r.get('ai_muted'),
+            // Alarma de atención humana pendiente → pestaña "Atención" de la bandeja
+            attention_pending: !!r.get('attention_pending'),
+            attention_reason: (r.get('attention_reason') as string) || '',
+            attention_at: (r.get('attention_at') as string) || '',
             // opted_out_notifications = campo antiguo (respaldo): si está activo, excluido de todo
             optedOutCampaigns: !!r.get('opted_out_campaigns') || !!r.get('opted_out_notifications'),
             optedOutReminders: !!r.get('opted_out_reminders') || !!r.get('opted_out_notifications'),
