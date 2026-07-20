@@ -1841,6 +1841,38 @@ async function notifyHumanAttention(data: {
     console.log(`🚨 [HumanAttention] ${data.reason} (${data.source}) → ${clean} (${data.clientName})`);
 }
 
+// Limpia la alarma de atención humana de un contacto cuando un agente le
+// RESPONDE de verdad (texto, audio, imagen, documento o plantilla). Contestar
+// ES atenderlo — el chat sale solo de la pestaña "Atención" de la bandeja.
+// Helper compartido porque el agente tiene VARIOS caminos de respuesta y solo
+// el texto pasa por el socket 'chatMessage': los adjuntos/audios van por
+// POST /api/upload y las plantillas por POST /api/send-template. Sin esto,
+// responder con un audio, una foto o una plantilla (la vía obligada fuera de
+// la ventana de 24h) dejaba el chat clavado en "Atención" para siempre.
+// Tolerante: nunca lanza — la respuesta al cliente jamás debe fallar por esto.
+async function clearAttentionForContact(cleanPhone: string, source: string): Promise<void> {
+    if (!base || !cleanPhone) return;
+    try {
+        const cs = await base('Contacts').select({
+            filterByFormula: `{phone}='${cleanPhone}'`, maxRecords: 1
+        }).firstPage();
+        if (cs.length === 0 || !cs[0].get('attention_pending')) return;
+        await base('Contacts').update([{
+            id: cs[0].id,
+            fields: {
+                attention_pending: false,
+                attention_reason: '',
+                attention_snippet: '',
+                attention_at: ''
+            }
+        }], { typecast: true });
+        io.emit('contact_updated_notification');
+        console.log(`✅ [HumanAttention] Alarma de ${cleanPhone} atendida (${source}).`);
+    } catch (e: any) {
+        console.warn(`[HumanAttention] No se pudo limpiar la alarma de ${cleanPhone} (${source}):`, e?.message);
+    }
+}
+
 // Detección por PALABRAS CLAVE — primera red de seguridad antes incluso
 // de gastar tokens de Gemini. Devuelve el motivo si detecta, o null si no.
 // Comparación normalizada (sin acentos, minúsculas) para tolerar variaciones.
@@ -8492,6 +8524,11 @@ app.post('/api/send-template', async (req, res) => {
         if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
         await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
         await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender: senderName || "Agente", recipient: cleanTo, timestamp: new Date().toISOString(), type: "template", origin_phone_id: originPhoneId });
+        // Enviar una plantilla manual también ES atender la alarma de la
+        // pestaña "Atención". Camino crítico: fuera de la ventana de 24h el
+        // texto libre falla (Meta 131047) y la plantilla es LA única forma de
+        // responder — justo el caso típico de una alarma antigua pendiente.
+        clearAttentionForContact(cleanTo, 'plantilla').catch(() => {});
         res.json({ success: true });
     } catch (e: any) {
         const metaError = e?.response?.data?.error?.message || e?.message || "Error envío";
@@ -9113,6 +9150,10 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
 
         await saveAndEmitMessage({ text: textLog, sender: senderName, recipient: cleanTo, timestamp: new Date().toISOString(), type: saveType, mediaId: mediaId, origin_phone_id: originPhoneId });
         await handleContactUpdate(cleanTo, `Tú (${senderName}): 📎 Archivo`, undefined, originPhoneId);
+        // Responder con un audio/foto/documento también ES atender la alarma
+        // de la pestaña "Atención" — este camino es HTTP y no pasa por el
+        // socket 'chatMessage', así que hay que limpiarla aquí explícitamente.
+        clearAttentionForContact(cleanTo, 'adjunto').catch(() => {});
         res.json({ success: true });
     } catch (e: any) {
         console.error("❌ [Upload] Error:", e.response?.data || e.message || e);
@@ -10002,7 +10043,10 @@ io.on('connection', (socket) => {
                     // marcarlo a mano: contestar ES atenderlo.
                     // Aprovechamos el mismo record ya cargado arriba para no
                     // añadir otra llamada a Airtable por cada mensaje enviado.
-                    if (records[0].get('attention_pending')) {
+                    // EXCEPTO las notas internas (type='note'): el cliente no
+                    // recibe nada, así que apuntar una nota NO cuenta como
+                    // atenderle — la alarma debe seguir viva.
+                    if (msg.type !== 'note' && records[0].get('attention_pending')) {
                         handoverFields.attention_pending = false;
                         handoverFields.attention_reason = '';
                         handoverFields.attention_snippet = '';
