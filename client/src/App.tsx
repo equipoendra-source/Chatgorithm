@@ -295,10 +295,31 @@ function App() {
                 socket.emit('viewing_chat', { phone: selectedContact.phone });
             }
         };
+        // El server responde a authenticate_socket con { ok }. Si el token ya
+        // no existe queda SIN autenticar y el server bloquea todos los eventos
+        // destructivos — enviar mensajes incluido (DESTRUCTIVE_SOCKET_EVENTS).
+        // Pasa en cada redeploy: sessionTokens vive en memoria del server y se
+        // borra al reiniciar, pero el navegador conserva su token viejo.
+        // Antes NADIE escuchaba esta respuesta: la sesión parecía viva, la
+        // bandeja se leía bien, y escribir fallaba en silencio. Ahora lo
+        // detectamos y devolvemos al login con un aviso claro.
+        const onAuthResult = (res: any) => {
+            if (res?.ok) return;
+            console.warn('🔒 [Socket] Sesión caducada: el servidor no reconoce el token. Volviendo al login.');
+            try { localStorage.removeItem('chatgorithm_user'); } catch (_) { /* no bloquear */ }
+            try { sessionStorage.removeItem(SELECTED_CONTACT_KEY); } catch (_) { /* no bloquear */ }
+            setUser(null);
+            setSelectedContact(null);
+            alert('Tu sesión ha caducado porque el servidor se reinició. Vuelve a iniciar sesión.');
+        };
+        socket.on('socket_authenticated', onAuthResult);
         socket.on('connect', reAuth);
         // Si el socket ya está conectado al montar este efecto, autenticar ya
         if (socket.connected) reAuth();
-        return () => { socket.off('connect', reAuth); };
+        return () => {
+            socket.off('connect', reAuth);
+            socket.off('socket_authenticated', onAuthResult);
+        };
     }, [socket, selectedContact?.phone]);
 
     useEffect(() => {
