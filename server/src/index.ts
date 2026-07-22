@@ -464,6 +464,7 @@ const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
 const TABLE_VEHICLES = 'Vehicles'; // Vehículos/items registrados por cliente (multi-coche)
 const TABLE_APPOINTMENT_EVENTS = 'AppointmentEvents'; // Historial de reservas y cancelaciones (auditoría)
 const TABLE_AUDIT_LOG = 'AuditLog'; // Audit log: quién hizo qué cambio en cuándo (admin/agente)
+const TABLE_CHAT_GROUPS = 'ChatGroups'; // Grupos de conversación (varios clientes + varios trabajadores)
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 // BUSINESS_ACCOUNTS: phoneId → token. Se puebla desde la tabla WhatsAppAccounts
@@ -520,6 +521,166 @@ if (airtableApiKey && airtableBaseId) {
     } catch (e) { console.error("Error crítico configurando Airtable:", e); }
 }
 
+// ==========================================
+//  GRUPOS DE CONVERSACIÓN (tabla ChatGroups)
+// ==========================================
+// La API oficial de WhatsApp Cloud NO soporta grupos. Un "grupo" aquí es un
+// contenedor propio de Chatgorithm: el equipo ve un hilo único, y por debajo
+// cada mensaje se reparte (fan-out) al chat 1-a-1 de cada cliente miembro.
+// El cliente recibe un mensaje normal con el prefijo "[Nombre del grupo] Quien:".
+interface ChatGroup {
+    id: string;
+    name: string;
+    clientPhones: string[];      // teléfonos limpios (cleanNumber)
+    agentNames: string[];        // nombres de la tabla Agents
+    lineId: string;              // PhoneId de WhatsAppAccounts desde el que habla el grupo
+    clientsSeeEachOther: boolean;
+    createdBy: string;
+    createdAt: string;
+    active: boolean;
+}
+
+const CHAT_GROUPS = new Map<string, ChatGroup>();   // groupId → grupo
+// phone → groupId (SOLO grupos activos). Se indexa el número completo Y sus
+// últimos 9 dígitos: un contacto creado a mano puede estar guardado sin el
+// prefijo "34" mientras WhatsApp siempre lo entrega con él (mismo criterio de
+// tolerancia que usa `phoneMatch`). Sin este alias, el mensaje de ese cliente
+// nunca se espejaría en su grupo.
+const GROUP_BY_PHONE = new Map<string, string>();
+// Si la tabla aún no existe en Airtable no tiene sentido reintentar en bucle ni
+// llenar los logs: avisamos una vez y seguimos funcionando sin grupos.
+let chatGroupsTableMissing = false;
+
+// Acepta tanto un JSON array (formato que escribimos) como una lista separada
+// por comas (por si alguien edita la celda a mano en Airtable).
+function parseListField(raw: unknown): string[] {
+    const s = String(raw || '').trim();
+    if (!s) return [];
+    if (s.startsWith('[')) {
+        try {
+            const arr = JSON.parse(s);
+            if (Array.isArray(arr)) return arr.map(v => String(v).trim()).filter(Boolean);
+        } catch { /* cae al split por comas */ }
+    }
+    return s.split(',').map(v => v.trim()).filter(Boolean);
+}
+
+// Carga (o recarga) los grupos desde Airtable y reconstruye los índices en
+// memoria. El webhook consulta GROUP_BY_PHONE en cada mensaje entrante, por eso
+// interesa tenerlo cacheado y no ir a Airtable cada vez.
+async function loadChatGroups(): Promise<void> {
+    if (!base || chatGroupsTableMissing) return;
+    try {
+        const records = await base(TABLE_CHAT_GROUPS).select().all();
+        CHAT_GROUPS.clear();
+        GROUP_BY_PHONE.clear();
+        for (const r of records) {
+            const group: ChatGroup = {
+                id: r.id,
+                name: String(r.get('Name') || '').trim() || 'Grupo sin nombre',
+                clientPhones: parseListField(r.get('ClientPhones')).map(p => cleanNumber(p)).filter(Boolean),
+                agentNames: parseListField(r.get('AgentNames')),
+                lineId: String(r.get('LineId') || '').trim(),
+                clientsSeeEachOther: r.get('ClientsSeeEachOther') === true,
+                createdBy: String(r.get('CreatedBy') || ''),
+                createdAt: String(r.get('CreatedAt') || ''),
+                // Un grupo recién creado a mano sin marcar la casilla se considera
+                // activo: solo desactiva quien pone Active explícitamente a false.
+                active: r.get('Active') !== false
+            };
+            CHAT_GROUPS.set(group.id, group);
+            if (group.active) {
+                for (const phone of group.clientPhones) {
+                    // v1: un teléfono pertenece a un solo grupo activo. Si por edición
+                    // manual en Airtable hubiera duplicados, gana el primero y avisamos.
+                    if (GROUP_BY_PHONE.has(phone)) {
+                        console.warn(`⚠️ [Grupos] El teléfono ${phone} está en varios grupos activos. Se usará "${CHAT_GROUPS.get(GROUP_BY_PHONE.get(phone)!)?.name}".`);
+                        continue;
+                    }
+                    GROUP_BY_PHONE.set(phone, group.id);
+                    if (phone.length > 9) {
+                        const suffix = phone.slice(-9);
+                        if (!GROUP_BY_PHONE.has(suffix)) GROUP_BY_PHONE.set(suffix, group.id);
+                    }
+                }
+            }
+        }
+        const clientsInGroups = Array.from(CHAT_GROUPS.values())
+            .filter(g => g.active)
+            .reduce((n, g) => n + g.clientPhones.length, 0);
+        console.log(`👥 [Grupos] ${CHAT_GROUPS.size} grupo(s) cargado(s), ${clientsInGroups} cliente(s) en grupos activos.`);
+    } catch (e: any) {
+        const msg = e?.message || '';
+        if (e?.statusCode === 404 || /NOT_FOUND|could not be found|Table.*not found/i.test(msg)) {
+            chatGroupsTableMissing = true;
+            console.warn(`⚠️ [Grupos] La tabla "${TABLE_CHAT_GROUPS}" no existe en Airtable. La función de grupos queda desactivada hasta que la crees (campos: Name, ClientPhones, AgentNames, LineId, ClientsSeeEachOther, CreatedBy, CreatedAt, Active).`);
+        } else {
+            console.error('[Grupos] Error cargando grupos:', msg);
+        }
+    }
+}
+// Cargar al arranque, después de que `base` esté listo.
+setTimeout(() => { loadChatGroups().catch(() => {}); }, 1500);
+
+// Devuelve el grupo activo al que pertenece un teléfono de cliente, o null.
+function getActiveGroupForPhone(phone: string): ChatGroup | null {
+    const clean = cleanNumber(phone);
+    if (!clean) return null;
+    let groupId = GROUP_BY_PHONE.get(clean);
+    // Reintento por los últimos 9 dígitos (ver comentario de GROUP_BY_PHONE).
+    if (!groupId && clean.length > 9) groupId = GROUP_BY_PHONE.get(clean.slice(-9));
+    if (!groupId) return null;
+    const group = CHAT_GROUPS.get(groupId);
+    return group && group.active ? group : null;
+}
+
+// Nombres de varios contactos en UNA sola consulta (los grupos siempre necesitan
+// los nombres de todos sus clientes a la vez; hacer una query por teléfono
+// gastaría cuota de Airtable sin motivo). Si un teléfono no está en Contacts,
+// se devuelve el propio número.
+async function getContactNames(phones: string[]): Promise<Map<string, string>> {
+    const out = new Map<string, string>();
+    const clean = phones.map(p => cleanNumber(p)).filter(Boolean);
+    for (const p of clean) out.set(p, p);
+    if (!base || clean.length === 0) return out;
+    try {
+        const formula = `OR(${clean.map(p => `{phone}='${escAt(p)}'`).join(',')})`;
+        const records = await base('Contacts').select({ filterByFormula: formula }).all();
+        for (const r of records) {
+            const phone = cleanNumber(r.get('phone'));
+            const name = String(r.get('name') || '').trim();
+            if (phone && name) out.set(phone, name);
+        }
+    } catch (e: any) {
+        console.warn('[Grupos] No se pudieron leer los nombres de los contactos:', e.message);
+    }
+    return out;
+}
+
+// ¿Podemos enviar texto libre a este cliente? WhatsApp solo lo permite dentro de
+// las 24h siguientes al último mensaje ENTRANTE del cliente; fuera de esa ventana
+// Meta rechaza el envío con el error 131047 y solo valen plantillas aprobadas.
+// Devuelve también el timestamp para que el frontend pueda mostrar cuánto queda.
+async function getClientWindowState(phone: string): Promise<{ inWindow: boolean; lastInbound: string | null }> {
+    if (!base) return { inWindow: false, lastInbound: null };
+    const clean = cleanNumber(phone);
+    try {
+        const last = await base('Messages').select({
+            filterByFormula: `{sender}='${escAt(clean)}'`,
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            maxRecords: 1
+        }).firstPage();
+        if (last.length === 0) return { inWindow: false, lastInbound: null };
+        const ts = last[0].get('timestamp') as string;
+        const tsMs = ts ? new Date(ts).getTime() : 0;
+        if (!tsMs || Number.isNaN(tsMs)) return { inWindow: false, lastInbound: null };
+        return { inWindow: (Date.now() - tsMs) < (24 * 60 * 60 * 1000), lastInbound: ts };
+    } catch (e: any) {
+        console.warn(`[Grupos] No se pudo comprobar la ventana 24h de ${clean}:`, e.message);
+        return { inWindow: false, lastInbound: null };
+    }
+}
+
 // --- CONEXIÓN GEMINI ---
 let genAI: GoogleGenerativeAI | null = null;
 if (geminiApiKey) {
@@ -553,6 +714,7 @@ const PUBLIC_SOCKET_EVENTS = new Set<string>([
     'request_contacts',        // lectura
     'request_conversation',    // lectura
     'request_team_history',    // lectura
+    'request_group_history',   // lectura del hilo de un grupo
     'request_ai_status',       // lectura del estado de IA de un chat
     'mark_read',               // marcar leído (no destructivo)
     // viewer tracking: registran en Maps en memoria por socket.id. NO son
@@ -604,6 +766,7 @@ const DESTRUCTIVE_SOCKET_EVENTS = new Set<string>([
     'update_quick_reply',
     'update_contact_info',
     'send_team_message',
+    'group_message',         // envía a TODOS los clientes del grupo por WhatsApp
     'update_my_preferences', // El usuario actualiza SUS propias preferencias (tour state, theme, etc.)
 ]);
 
@@ -3644,17 +3807,36 @@ async function saveAndEmitMessage(msg: any) {
     // 4. Persistencia en Airtable
     if (base) {
         try {
-            await base('Messages').create([{
-                fields: {
-                    "text": payload.text || "",
-                    "sender": payload.sender,
-                    "recipient": payload.recipient || "",
-                    "timestamp": payload.timestamp,
-                    "type": payload.type || "text",
-                    "media_id": payload.mediaId || "",
-                    "origin_phone_id": payload.origin_phone_id || ""
+            const fields: Record<string, any> = {
+                "text": payload.text || "",
+                "sender": payload.sender,
+                "recipient": payload.recipient || "",
+                "timestamp": payload.timestamp,
+                "type": payload.type || "text",
+                "media_id": payload.mediaId || "",
+                "origin_phone_id": payload.origin_phone_id || ""
+            };
+            // Campos de GRUPO: solo se añaden si el mensaje pertenece a un grupo.
+            // Nunca se mandan en mensajes normales para que la app siga
+            // funcionando igual si esas columnas no existen todavía.
+            if (payload.group_id) {
+                fields["group_id"] = payload.group_id;
+                fields["group_msg_id"] = payload.group_msg_id || "";
+            }
+            try {
+                await base('Messages').create([{ fields }], { typecast: true });
+            } catch (createErr: any) {
+                // Si faltan las columnas de grupo, guardamos el mensaje SIN ellas
+                // antes que perderlo (mismo patrón tolerante que usamos en Config).
+                if (payload.group_id && /group_id|group_msg_id|unknown field|UNKNOWN_FIELD_NAME/i.test(createErr?.message || '')) {
+                    console.warn('⚠️ [Grupos] La tabla Messages no tiene los campos "group_id" y "group_msg_id" (texto). Créalos para que el hilo del grupo se conserve. El mensaje se ha guardado sin ellos.');
+                    delete fields["group_id"];
+                    delete fields["group_msg_id"];
+                    await base('Messages').create([{ fields }], { typecast: true });
+                } else {
+                    throw createErr;
                 }
-            }], { typecast: true });
+            }
 
             // Solo incrementamos unread si es mensaje entrante del usuario (no bot)
             // y si NO hay ningún agente con ese chat abierto en este momento.
@@ -3677,6 +3859,102 @@ async function saveAndEmitMessage(msg: any) {
 
         } catch (e) { console.error("Error guardando en Airtable (socket ya enviado):", e); }
     }
+}
+
+// ==========================================
+//  FAN-OUT DE MENSAJES DE GRUPO
+// ==========================================
+// Prefijo que ve el CLIENTE en su WhatsApp. Sin él no entendería por qué le
+// escriben dos personas distintas desde el mismo número.
+function buildGroupBody(group: ChatGroup, senderLabel: string, text: string): string {
+    return `*[${group.name}] ${senderLabel}:*\n${text}`;
+}
+
+// Registro CANÓNICO del hilo del grupo: uno por mensaje, con `group_msg_id`
+// relleno y `recipient` vacío (así no aparece en ningún chat 1-a-1 — el filtro
+// de `request_conversation` busca por sender/recipient = teléfono).
+// Las copias que sí van a cada cliente llevan `group_msg_id` vacío.
+async function saveGroupThreadRecord(fields: {
+    groupId: string; text: string; sender: string; timestamp: string;
+    groupMsgId: string; lineId: string; type?: string; mediaId?: string;
+}): Promise<void> {
+    if (!base) return;
+    try {
+        await base('Messages').create([{
+            fields: {
+                "text": fields.text,
+                "sender": fields.sender,
+                "recipient": "",
+                "timestamp": fields.timestamp,
+                "type": fields.type || "text",
+                "media_id": fields.mediaId || "",
+                "origin_phone_id": fields.lineId,
+                "group_id": fields.groupId,
+                "group_msg_id": fields.groupMsgId
+            }
+        }], { typecast: true });
+    } catch (e: any) {
+        if (/group_id|group_msg_id|unknown field|UNKNOWN_FIELD_NAME/i.test(e?.message || '')) {
+            console.warn('⚠️ [Grupos] Faltan los campos "group_id" y "group_msg_id" (texto) en la tabla Messages. Créalos: sin ellos el historial del grupo no se guarda.');
+        } else {
+            console.error('[Grupos] Error guardando el mensaje del hilo:', e?.message);
+        }
+    }
+}
+
+interface GroupDeliveryResult { phone: string; name?: string; ok: boolean; code?: number; error?: string; }
+
+// Reparte un mensaje a los clientes del grupo por su chat 1-a-1 de WhatsApp.
+// Se guarda una copia en cada conversación individual para que el historial del
+// cliente en la app coincida exactamente con lo que tiene en su móvil.
+// Devuelve el resultado por cliente: la UI avisa de a quién NO le ha llegado
+// (caso típico: ventana de 24h cerrada, código 131047).
+async function fanOutGroupMessage(opts: {
+    group: ChatGroup;
+    senderLabel: string;
+    text: string;
+    timestamp: string;
+    excludePhone?: string;
+}): Promise<GroupDeliveryResult[]> {
+    const { group, senderLabel, text, timestamp } = opts;
+    const token = getToken(group.lineId);
+    const body = buildGroupBody(group, senderLabel, text);
+    // phoneMatch (no ===) para que el autor quede excluido aunque su contacto
+    // esté guardado sin el prefijo "34" y WhatsApp lo entregue con él: si no,
+    // se le reenviaría su propio mensaje.
+    const targets = group.clientPhones.filter(p => p && !(opts.excludePhone && phoneMatch(p, opts.excludePhone)));
+    const results: GroupDeliveryResult[] = [];
+
+    // Secuencial a propósito: los grupos son pequeños y así no disparamos el
+    // rate limit de Meta con ráfagas simultáneas.
+    for (const phone of targets) {
+        if (!token) {
+            results.push({ phone, ok: false, error: 'La línea del grupo no tiene token configurado' });
+            continue;
+        }
+        const send = await sendWhatsAppRawWithRetries(phone, body, group.lineId, token);
+        // Se guarda la copia haya ido bien o mal, igual que hace `chatMessage`:
+        // el agente debe ver el intento en el chat del cliente, con su icono de error.
+        await saveAndEmitMessage({
+            text: body,
+            sender: senderLabel,
+            recipient: phone,
+            type: 'text',
+            origin_phone_id: group.lineId,
+            timestamp,
+            group_id: group.id,
+            group_msg_id: ''   // copia, no registro canónico del hilo
+        });
+        await handleContactUpdate(phone, `Tú: ${text}`, undefined, group.lineId);
+        if (!send.ok) {
+            io.emit('message_status', {
+                recipient: phone, sender: senderLabel, timestamp,
+                status: 'failed', code: send.code || 0, metaError: send.metaError || ''
+            });
+        }
+        results.push({ phone, ok: send.ok, code: send.code, error: send.metaError });
+    }
+    return results;
 }
 
 // Cola por-phone para serializar handleContactUpdate y evitar race condition:
@@ -6613,6 +6891,183 @@ app.get('/api/accounts', (req, res) => res.json(
     }))
 ));
 
+// ==========================================
+//  API GRUPOS DE CONVERSACIÓN
+// ==========================================
+// Cualquier trabajador puede crear y gestionar grupos (decisión de producto).
+const serializeGroup = (g: ChatGroup) => ({
+    id: g.id,
+    name: g.name,
+    clientPhones: g.clientPhones,
+    agentNames: g.agentNames,
+    lineId: g.lineId,
+    lineName: ACCOUNT_META[g.lineId]?.name || `Línea ${g.lineId.slice(-4)}`,
+    clientsSeeEachOther: g.clientsSeeEachOther,
+    createdBy: g.createdBy,
+    createdAt: g.createdAt,
+    active: g.active
+});
+
+// Valida el cuerpo de creación/edición. Devuelve un string con el error o null.
+// `excludeGroupId` permite editar un grupo sin que sus propios teléfonos cuenten
+// como "ya ocupados".
+function validateGroupPayload(
+    body: any,
+    excludeGroupId?: string
+): { error: string } | { ok: true; name: string; clientPhones: string[]; agentNames: string[]; lineId: string; clientsSeeEachOther: boolean } {
+    const name = String(body?.name || '').trim();
+    if (!name) return { error: 'El grupo necesita un nombre.' };
+
+    const clientPhones = (Array.isArray(body?.clientPhones) ? body.clientPhones : [])
+        .map((p: any) => cleanNumber(p))
+        .filter(Boolean);
+    const uniquePhones = Array.from(new Set<string>(clientPhones));
+    if (uniquePhones.length === 0) return { error: 'Añade al menos un cliente al grupo.' };
+
+    const agentNames = Array.from(new Set<string>(
+        (Array.isArray(body?.agentNames) ? body.agentNames : []).map((a: any) => String(a).trim()).filter(Boolean)
+    ));
+    if (agentNames.length === 0) return { error: 'Añade al menos un trabajador al grupo.' };
+
+    // La línea debe existir de verdad: si no, los mensajes saldrían por un número
+    // equivocado (o fallarían) y el cliente vería un chat distinto al esperado.
+    const rawLineId = String(body?.lineId || '').trim();
+    const lineId = BUSINESS_ACCOUNTS[rawLineId] ? rawLineId : (waPhoneId || '');
+    if (!lineId) return { error: 'No hay ninguna línea de WhatsApp válida configurada.' };
+
+    // v1: un cliente solo puede estar en un grupo activo a la vez. Si no, un
+    // mensaje entrante suyo sería ambiguo (¿a qué hilo pertenece?).
+    for (const phone of uniquePhones) {
+        const other = getActiveGroupForPhone(phone);
+        if (other && other.id !== excludeGroupId) {
+            return { error: `El cliente ${phone} ya está en el grupo "${other.name}". Quítalo de ese grupo antes de añadirlo aquí.` };
+        }
+    }
+
+    return {
+        ok: true,
+        name,
+        clientPhones: uniquePhones,
+        agentNames,
+        lineId,
+        clientsSeeEachOther: body?.clientsSeeEachOther === true
+    };
+}
+
+// Traduce un fallo de Airtable por tabla/campos inexistentes en un mensaje que
+// le diga al usuario exactamente qué crear (mismo patrón que el resto del código).
+function groupsSetupError(e: any): string | null {
+    const msg = e?.message || '';
+    if (e?.statusCode === 404 || /NOT_FOUND|could not be found/i.test(msg)) {
+        return `Falta la tabla "${TABLE_CHAT_GROUPS}" en Airtable. Créala con los campos: Name (texto), ClientPhones (texto largo), AgentNames (texto largo), LineId (texto), ClientsSeeEachOther (checkbox), CreatedBy (texto), CreatedAt (texto), Active (checkbox).`;
+    }
+    if (/unknown field|UNKNOWN_FIELD_NAME/i.test(msg)) {
+        return `A la tabla "${TABLE_CHAT_GROUPS}" le falta algún campo. Necesita: Name, ClientPhones, AgentNames, LineId, ClientsSeeEachOther, CreatedBy, CreatedAt, Active. (${msg})`;
+    }
+    return null;
+}
+
+app.get('/api/groups', (req, res) => {
+    const includeArchived = req.query.includeArchived === '1';
+    const groups = Array.from(CHAT_GROUPS.values())
+        .filter(g => includeArchived || g.active)
+        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+        .map(serializeGroup);
+    res.json({ groups, tableMissing: chatGroupsTableMissing });
+});
+
+// Estado de la ventana de 24h de cada cliente del grupo. El frontend lo pide al
+// abrir el grupo para avisar ANTES de escribir a quién no le va a llegar.
+app.get('/api/groups/:id/status', async (req, res) => {
+    const group = CHAT_GROUPS.get(req.params.id);
+    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
+    try {
+        const names = await getContactNames(group.clientPhones);
+        const clients = await Promise.all(group.clientPhones.map(async phone => {
+            const state = await getClientWindowState(phone);
+            return { phone, name: names.get(phone) || phone, ...state };
+        }));
+        res.json({ clients });
+    } catch (e: any) {
+        console.error('[API] Error GET /groups/:id/status:', e.message);
+        res.status(500).json({ error: 'Error comprobando el estado de los clientes' });
+    }
+});
+
+app.post('/api/groups', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const v = validateGroupPayload(req.body);
+    if ('error' in v) return res.status(400).json({ error: v.error });
+    try {
+        const created = await base(TABLE_CHAT_GROUPS).create([{
+            fields: {
+                Name: v.name,
+                ClientPhones: JSON.stringify(v.clientPhones),
+                AgentNames: JSON.stringify(v.agentNames),
+                LineId: v.lineId,
+                ClientsSeeEachOther: v.clientsSeeEachOther,
+                CreatedBy: String(req.body?.createdBy || '').trim(),
+                CreatedAt: new Date().toISOString(),
+                Active: true
+            }
+        }], { typecast: true });
+        chatGroupsTableMissing = false; // si la creación funciona, la tabla existe
+        await loadChatGroups();
+        const group = CHAT_GROUPS.get(created[0].id);
+        io.emit('groups_updated');
+        res.json({ success: true, group: group ? serializeGroup(group) : null });
+    } catch (e: any) {
+        const setupErr = groupsSetupError(e);
+        console.error('[API] Error POST /groups:', e.message);
+        res.status(setupErr ? 400 : 500).json({ error: setupErr || 'No se pudo crear el grupo' });
+    }
+});
+
+app.put('/api/groups/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const group = CHAT_GROUPS.get(req.params.id);
+    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
+    const v = validateGroupPayload(req.body, group.id);
+    if ('error' in v) return res.status(400).json({ error: v.error });
+    try {
+        await base(TABLE_CHAT_GROUPS).update([{
+            id: group.id,
+            fields: {
+                Name: v.name,
+                ClientPhones: JSON.stringify(v.clientPhones),
+                AgentNames: JSON.stringify(v.agentNames),
+                LineId: v.lineId,
+                ClientsSeeEachOther: v.clientsSeeEachOther
+            }
+        }], { typecast: true });
+        await loadChatGroups();
+        io.emit('groups_updated');
+        const updated = CHAT_GROUPS.get(group.id);
+        res.json({ success: true, group: updated ? serializeGroup(updated) : null });
+    } catch (e: any) {
+        const setupErr = groupsSetupError(e);
+        console.error('[API] Error PUT /groups/:id:', e.message);
+        res.status(setupErr ? 400 : 500).json({ error: setupErr || 'No se pudo actualizar el grupo' });
+    }
+});
+
+// Archivar, no borrar: el historial de mensajes del grupo sigue siendo válido y
+// los chats 1-a-1 de cada cliente quedan intactos.
+app.delete('/api/groups/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const group = CHAT_GROUPS.get(req.params.id);
+    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
+    try {
+        await base(TABLE_CHAT_GROUPS).update([{ id: group.id, fields: { Active: false } }], { typecast: true });
+        await loadChatGroups();
+        io.emit('groups_updated');
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('[API] Error DELETE /groups/:id:', e.message);
+        res.status(500).json({ error: 'No se pudo archivar el grupo' });
+    }
+});
+
 // Recarga las cuentas de WhatsApp desde Airtable SIN reiniciar el servidor.
 // Útil tras añadir un número nuevo a la tabla WhatsAppAccounts.
 app.post('/api/admin/reload-accounts', async (req, res) => {
@@ -9370,17 +9825,54 @@ app.post('/webhook', async (req, res) => {
             const metaProfileName = change.contacts?.[0]?.profile?.name || undefined;
             const contactRecord = await handleContactUpdate(from, text, metaProfileName, originPhoneId);
 
+            // ¿Este cliente pertenece a un grupo activo? Si es así, su mensaje es
+            // también un mensaje del hilo del grupo: se marca con group_id +
+            // group_msg_id para que el equipo lo vea en el grupo, sin dejar de
+            // guardarse con normalidad en su chat 1-a-1.
+            const inboundGroup = getActiveGroupForPhone(from);
+            const inboundGroupMsgId = inboundGroup ? crypto.randomUUID() : '';
+            const inboundTimestamp = new Date().toISOString();
+
             // CORRECCIÓN CRÍTICA: Añadir recipient como originPhoneId y pasar el tipo y mediaId correcto
             await saveAndEmitMessage({
                 text,
                 sender: from,
-                timestamp: new Date().toISOString(),
+                timestamp: inboundTimestamp,
                 type: inboundType,
                 mediaId: inboundMediaId,
                 origin_phone_id: originPhoneId,
-                recipient: originPhoneId
+                recipient: originPhoneId,
+                ...(inboundGroup ? { group_id: inboundGroup.id, group_msg_id: inboundGroupMsgId } : {})
             });
             console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
+
+            if (inboundGroup) {
+                const senderName = (contactRecord?.get('name') as string) || from;
+                // 1. El equipo lo ve al instante en el hilo del grupo.
+                io.emit('group_message', {
+                    groupId: inboundGroup.id,
+                    id: inboundGroupMsgId,
+                    text,
+                    sender: senderName,
+                    fromClient: true,
+                    timestamp: inboundTimestamp,
+                    type: inboundType,
+                    mediaId: inboundMediaId || ''
+                });
+                // 2. Si el grupo permite que los clientes se vean entre sí, se
+                //    reenvía al resto (nunca al que lo escribió). Sin await: la
+                //    respuesta 200 al webhook de Meta no debe esperar N envíos.
+                if (inboundGroup.clientsSeeEachOther && inboundGroup.clientPhones.length > 1 && inboundType === 'text') {
+                    fanOutGroupMessage({
+                        group: inboundGroup,
+                        senderLabel: senderName,
+                        text,
+                        timestamp: inboundTimestamp,
+                        excludePhone: from
+                    }).catch(e => console.error('[Grupos] Error reenviando mensaje entrante:', e?.message));
+                }
+                console.log(`👥 [Grupos] Mensaje de ${from} espejado en el grupo "${inboundGroup.name}".`);
+            }
 
             const upperText = (msg.type === 'text' && text) ? text.trim().toUpperCase() : '';
 
@@ -9519,6 +10011,11 @@ app.post('/webhook', async (req, res) => {
 
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
+            } else if (inboundGroup) {
+                // 👥 EN UN GRUPO LAURA NO RESPONDE. La conversación es entre varias
+                // personas: una respuesta automática se enviaría a todo el grupo y
+                // además Laura no puede saber a quién de los presentes contesta.
+                console.log(`🔇 [Bot] ${from} está en el grupo "${inboundGroup.name}". Mensaje guardado y espejado, Laura no responde.`);
             } else if (contactAiMuted) {
                 console.log(`🔇 [Bot] Chat ${from} tiene ai_muted=true (silenciado por el equipo). Mensaje guardado, Laura no responde.`);
             } else if (isTodayBotBlocked()) {
@@ -10084,6 +10581,86 @@ io.on('connection', (socket) => {
         }
     });
     socket.on('typing', (d) => { socket.broadcast.emit('remote_typing', d); });
+
+    // --- SOCKETS GRUPOS DE CONVERSACIÓN ---
+    // El hilo del grupo se reconstruye leyendo SOLO los registros canónicos
+    // ({group_msg_id} != ''), nunca las copias que se enviaron a cada cliente.
+    socket.on('request_group_history', async (groupId) => {
+        if (!base) return;
+        const group = CHAT_GROUPS.get(String(groupId || ''));
+        if (!group) return;
+        try {
+            const records = await base('Messages').select({
+                filterByFormula: `AND({group_id}='${escAt(group.id)}', {group_msg_id}!='')`,
+                sort: [{ field: 'timestamp', direction: 'asc' }],
+                maxRecords: 200
+            }).all();
+
+            // Los mensajes entrantes se guardan con el teléfono como `sender`;
+            // el equipo quiere ver el nombre del cliente.
+            const names = await getContactNames(group.clientPhones);
+            const history = records.map(r => {
+                const sender = String(r.get('sender') || '');
+                const clean = cleanNumber(sender);
+                // Un `sender` numérico que corresponde a un miembro del grupo es
+                // un mensaje del cliente. phoneMatch tolera el prefijo "34".
+                const memberPhone = clean ? group.clientPhones.find(p => phoneMatch(p, clean)) : undefined;
+                const fromClient = !!memberPhone;
+                return {
+                    id: String(r.get('group_msg_id') || r.id),
+                    text: r.get('text') || '',
+                    sender: fromClient ? (names.get(memberPhone!) || clean) : sender,
+                    fromClient,
+                    timestamp: r.get('timestamp') || null,
+                    type: r.get('type') || 'text',
+                    mediaId: r.get('media_id') || ''
+                };
+            });
+            socket.emit('group_history', { groupId: group.id, history });
+        } catch (e: any) {
+            if (/group_id|group_msg_id|unknown field|UNKNOWN_FIELD_NAME|INVALID_FILTER_BY_FORMULA/i.test(e?.message || '')) {
+                console.warn('⚠️ [Grupos] No se puede leer el historial: faltan los campos "group_id" y "group_msg_id" (texto) en la tabla Messages.');
+                socket.emit('group_history', { groupId: group.id, history: [], setupError: 'Faltan los campos "group_id" y "group_msg_id" en la tabla Messages de Airtable.' });
+            } else {
+                console.error('[Grupos] Error leyendo historial:', e?.message);
+                socket.emit('group_history', { groupId: group.id, history: [] });
+            }
+        }
+    });
+
+    // Un trabajador escribe en el grupo → se guarda el hilo y se reparte a los
+    // clientes por sus chats 1-a-1.
+    socket.on('group_message', async (payload) => {
+        const group = CHAT_GROUPS.get(String(payload?.groupId || ''));
+        if (!group || !group.active) {
+            socket.emit('action_error', 'El grupo no existe o está archivado.');
+            return;
+        }
+        const text = String(payload?.text || '').trim();
+        if (!text) return;
+        if (Array.from(text).length > 4096) {
+            socket.emit('action_error', 'El mensaje supera el límite de 4096 caracteres de WhatsApp.');
+            return;
+        }
+        const sender = String(payload?.sender || '').trim() || 'Equipo';
+        const timestamp = new Date().toISOString();
+        const groupMsgId = crypto.randomUUID();
+
+        // 1. Eco inmediato al equipo (el fan-out puede tardar varios segundos).
+        io.emit('group_message', { groupId: group.id, id: groupMsgId, text, sender, fromClient: false, timestamp });
+
+        // 2. Registro canónico del hilo — el equipo lo ve SIN el prefijo.
+        await saveGroupThreadRecord({ groupId: group.id, text, sender, timestamp, groupMsgId, lineId: group.lineId });
+
+        // 3. Reparto a los clientes (con el prefijo del grupo).
+        const results = await fanOutGroupMessage({ group, senderLabel: sender, text, timestamp });
+        const names = await getContactNames(group.clientPhones);
+        io.emit('group_send_report', {
+            groupId: group.id,
+            groupMsgId,
+            results: results.map(r => ({ ...r, name: names.get(r.phone) || r.phone }))
+        });
+    });
 
     // --- SOCKETS TEAM CHAT ---
     socket.on('request_team_history', async (channelName) => {

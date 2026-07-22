@@ -9,6 +9,7 @@ import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
 import { colorForAccount, nameForAccount } from '../utils/accountColors';
 import { normalizeForSearch } from '../utils/searchNormalize';
+import type { ChatGroup } from './GroupChatWindow';
 
 export interface Contact {
     id: string;
@@ -41,7 +42,7 @@ interface SidebarProps {
     isConnected?: boolean;
     onlineUsers: string[];
     typingStatus: { [chatId: string]: string };
-    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns') => void;
+    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'group_chat') => void;
     currentView?: string;
 
     selectedAccountId: string | null;
@@ -50,6 +51,12 @@ interface SidebarProps {
     // Nuevas props para el Chat de Equipo integrado
     teamChannel?: string;
     setTeamChannel?: (channel: string) => void;
+
+    // Grupos de conversación (varios clientes + varios trabajadores)
+    groups?: ChatGroup[];
+    selectedGroupId?: string | null;
+    onSelectGroup?: (group: ChatGroup) => void;
+    onCreateGroup?: () => void;
 }
 
 type ViewScope = 'all' | 'mine' | 'unassigned';
@@ -95,7 +102,11 @@ export function Sidebar({
     selectedAccountId,
     onSelectAccount,
     teamChannel,
-    setTeamChannel
+    setTeamChannel,
+    groups = [],
+    selectedGroupId,
+    onSelectGroup,
+    onCreateGroup
 }: SidebarProps) {
 
     const { theme } = useTheme();
@@ -148,6 +159,9 @@ export function Sidebar({
     // otro compañero para los DMs. No se persiste — se resetea al recargar la
     // app (mismo comportamiento que el contador de clientes en memoria).
     const [teamUnread, setTeamUnread] = useState<{ [channel: string]: number }>({});
+    // No leídos por grupo. Solo cuentan los mensajes de CLIENTES: los de otros
+    // compañeros del equipo ya se ven en el hilo abierto y marcarlos sería ruido.
+    const [groupUnread, setGroupUnread] = useState<{ [groupId: string]: number }>({});
     const audioRef = useRef<HTMLAudioElement | null>(null);
     // B1: Refs para preservar el scroll del Sidebar cuando llega un
     // contacts_update (polling 60s o cambios). listScrollRef apunta al
@@ -376,6 +390,29 @@ export function Sidebar({
             return n;
         });
     }, [currentView, teamChannel]);
+
+    // ─── GRUPOS — contador de no leídos ──────────────────────────────────────
+    useEffect(() => {
+        if (!socket) return;
+        const handleGroupMessage = (msg: { groupId?: string; fromClient?: boolean }) => {
+            if (!msg?.groupId || !msg.fromClient) return;
+            if (currentView === 'group_chat' && selectedGroupId === msg.groupId) return;
+            setGroupUnread(prev => ({ ...prev, [msg.groupId!]: (prev[msg.groupId!] || 0) + 1 }));
+        };
+        socket.on('group_message', handleGroupMessage);
+        return () => { socket.off('group_message', handleGroupMessage); };
+    }, [socket, currentView, selectedGroupId]);
+
+    // Al abrir un grupo se limpia su contador.
+    useEffect(() => {
+        if (currentView !== 'group_chat' || !selectedGroupId) return;
+        setGroupUnread(prev => {
+            if (!prev[selectedGroupId]) return prev;
+            const n = { ...prev };
+            delete n[selectedGroupId];
+            return n;
+        });
+    }, [currentView, selectedGroupId]);
 
     const resetNewContactForm = () => {
         setNewContactPhone(''); setNewContactName('');
@@ -746,6 +783,62 @@ export function Sidebar({
                 ) : (
                     /* LISTA MODO CONTACTOS (NORMAL) */
                     <>
+                        {/* GRUPOS — varios clientes + varios trabajadores en un mismo hilo.
+                            No son grupos nativos de WhatsApp: cada cliente recibe los
+                            mensajes en su chat individual. */}
+                        <div className={`px-3 pt-3 pb-2 border-b ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
+                            <div className="flex items-center justify-between mb-2">
+                                <span className={`text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                    Grupos
+                                </span>
+                                <button
+                                    onClick={() => onCreateGroup && onCreateGroup()}
+                                    title="Nuevo grupo"
+                                    className={`p-1 rounded-lg transition ${isDark
+                                        ? 'text-emerald-400 hover:bg-emerald-500/20'
+                                        : 'text-emerald-600 hover:bg-emerald-50'}`}
+                                >
+                                    <UserPlus className="w-4 h-4" />
+                                </button>
+                            </div>
+                            {groups.length === 0 ? (
+                                <p className={`text-[11px] pb-1 ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>
+                                    Sin grupos. Pulsa + para juntar varios clientes y trabajadores en un hilo.
+                                </p>
+                            ) : (
+                                <div className="space-y-1">
+                                    {groups.map(g => {
+                                        const isSelected = currentView === 'group_chat' && selectedGroupId === g.id;
+                                        const unread = groupUnread[g.id] || 0;
+                                        return (
+                                            <button
+                                                key={g.id}
+                                                onClick={() => onSelectGroup && onSelectGroup(g)}
+                                                className={`w-full flex items-center gap-2.5 p-2 rounded-xl transition-all ${isSelected
+                                                    ? (isDark ? 'bg-emerald-900/40 text-emerald-300 font-bold' : 'bg-emerald-50 text-emerald-700 font-bold')
+                                                    : (isDark ? 'text-slate-400 hover:bg-slate-700/50' : 'text-slate-600 hover:bg-slate-100')}`}
+                                            >
+                                                <span className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isDark ? 'bg-emerald-900/50 text-emerald-400' : 'bg-emerald-100 text-emerald-600'}`}>
+                                                    <Users className="w-4 h-4" />
+                                                </span>
+                                                <span className="flex-1 min-w-0 text-left">
+                                                    <span className="block text-sm truncate">{g.name}</span>
+                                                    <span className={`block text-[10px] truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                                        {g.clientPhones.length + g.agentNames.length} participantes · {g.lineName}
+                                                    </span>
+                                                </span>
+                                                {unread > 0 && (
+                                                    <span className="flex-shrink-0 bg-emerald-600 text-white text-[10px] font-bold h-5 min-w-[20px] px-1 rounded-full flex items-center justify-center shadow-sm animate-in zoom-in">
+                                                        {unread > 99 ? '99+' : unread}
+                                                    </span>
+                                                )}
+                                            </button>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                        </div>
+
                         {filteredContacts.length === 0 ? (
                             <div className="flex flex-col items-center justify-center h-40 text-slate-400 text-sm p-6 text-center">
                                 <div className={`p-3 rounded-full mb-2 ${isConnected ? (isDark ? 'bg-slate-800' : 'bg-slate-100') : 'bg-red-50'}`}>

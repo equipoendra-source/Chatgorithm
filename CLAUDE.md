@@ -172,6 +172,67 @@ Nuevo campo `TallerConfig.reservedIncidentHoursPerDay` (horas/día reservadas pa
 
 ---
 
+## Sesión 2026-07-22 — Grupos en el chat con clientes
+
+### Qué cambió
+Nuevo tipo de conversación: **grupos** con varios clientes y varios trabajadores en un mismo hilo.
+
+⚠️ **La API oficial de WhatsApp Cloud NO soporta grupos** (Meta no expone el endpoint). Lo
+implementado es un **grupo propio de Chatgorithm**: el equipo ve un hilo único y el servidor reparte
+(fan-out) cada mensaje al chat 1-a-1 de cada cliente, con el prefijo `*[Nombre del grupo] Quien:*`.
+Para el cliente es un chat normal — no ve la lista de miembros ni puede salirse. Se descartaron las
+librerías no oficiales (Baileys / whatsapp-web.js) por riesgo de baneo del número.
+
+### Modelo de datos
+- **Registro CANÓNICO del hilo**: `group_msg_id` relleno + `recipient` vacío → no aparece en ningún
+  chat 1-a-1 (`request_conversation` filtra por sender/recipient = teléfono). El equipo lo ve SIN prefijo.
+- **Copias por cliente**: `group_id` relleno, `group_msg_id` VACÍO. Son mensajes 1-a-1 reales, con el
+  prefijo, para que el historial del cliente en la app coincida con lo que tiene en su móvil.
+- El hilo se lee con `AND({group_id}='X', {group_msg_id}!='')`.
+
+### Backend (`server/src/index.ts`)
+- `TABLE_CHAT_GROUPS = 'ChatGroups'`, interfaz `ChatGroup`, caché `CHAT_GROUPS` + `GROUP_BY_PHONE`,
+  `loadChatGroups()` (recarga tras cada mutación), `getActiveGroupForPhone()`.
+- `GROUP_BY_PHONE` indexa el número completo **y sus últimos 9 dígitos**: un contacto dado de alta a
+  mano puede estar sin el prefijo "34" mientras WhatsApp siempre lo entrega con él. El fan-out excluye
+  al autor con `phoneMatch`, no con `===`, por el mismo motivo.
+- Helpers: `getContactNames()` (N nombres en UNA query), `getClientWindowState()` (ventana 24h),
+  `saveGroupThreadRecord()`, `fanOutGroupMessage()`.
+- REST: `GET/POST/PUT/DELETE /api/groups` + `GET /api/groups/:id/status` (ventana 24h por cliente).
+  DELETE archiva (`Active=false`), no borra. Valida: **un cliente = un grupo activo**.
+- Sockets: `request_group_history` (público) y `group_message` (en `DESTRUCTIVE_SOCKET_EVENTS`).
+- `saveAndEmitMessage` acepta `group_id`/`group_msg_id`: **solo los manda a Airtable si hay grupo**, y
+  reintenta sin ellos si las columnas no existen — la app sigue funcionando aunque falte el setup.
+- Webhook: si el teléfono está en un grupo activo → estampa `group_id`, emite al hilo y (si
+  `ClientsSeeEachOther`) reenvía al resto sin `await` (el 200 a Meta no debe esperar N envíos).
+- **Laura NO responde dentro de un grupo** (rama nueva antes de `contactAiMuted`).
+
+### Frontend (`client/src`)
+- `GroupChatWindow.tsx` (nuevo), `GroupCreateModal.tsx` (nuevo — pide contactos y agentes por socket).
+- `Sidebar.tsx`: bloque "Grupos" + botón `+` + contador de no leídos (solo mensajes de clientes).
+- `App.tsx`: vista `group_chat`, estado `groups`/`selectedGroupId`, recarga con el evento `groups_updated`.
+
+### Airtable — HAY QUE CREARLO A MANO
+- Tabla **`ChatGroups`**: `Name` (texto), `ClientPhones` (texto largo, JSON), `AgentNames` (texto largo,
+  JSON), `LineId` (texto), `ClientsSeeEachOther` (checkbox), `CreatedBy` (texto), `CreatedAt` (texto),
+  `Active` (checkbox).
+- Tabla **`Messages`**: 2 campos nuevos `group_id` (texto) y `group_msg_id` (texto).
+
+### Límites conocidos (asumidos, no son bugs)
+- **Ventana 24h**: a un cliente que lleve >24h sin escribir no se le puede mandar texto libre. La UI lo
+  avisa antes de escribir y marca "No entregado" después (código Meta 131047).
+- **Coste**: cada cliente del grupo es una conversación facturable aparte en Meta.
+- **Una línea por grupo**: si escribieran desde dos líneas, al cliente se le abrirían dos chats.
+- **RGPD**: con `ClientsSeeEachOther` activo un cliente ve el nombre y los mensajes de otro (nunca su
+  teléfono). Por defecto está desactivado.
+- Fase 1 = solo texto. Adjuntos, audio y push en grupos quedan para la fase 2.
+
+### Verificado
+Backend `npx tsc --noEmit` y frontend `npm run build` (`tsc && vite build`) sin errores. **Falta la
+prueba end-to-end con números reales** (requiere crear antes las tablas en Airtable).
+
+---
+
 ## Notas generales
 
 - Los archivos subidos **antes** del fix de Cloudinary (guardados en disco de Render) están perdidos permanentemente. Los mensajes en Airtable que los referencian mostrarán 404. Es comportamiento esperado.

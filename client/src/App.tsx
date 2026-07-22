@@ -12,10 +12,12 @@ import CalendarDashboard from './components/CalendarDashboard';
 // @ts-ignore
 import CampaignsDashboard from './components/CampaignsDashboard';
 import { TeamChat } from './components/TeamChat';
+import { GroupChatWindow, ChatGroup } from './components/GroupChatWindow';
+import { GroupCreateModal } from './components/GroupCreateModal';
 import { IncomingCallHandler } from './components/IncomingCallHandler';
 import { pushNotificationService } from './services/pushNotifications';
 import ErrorBoundary from './components/ErrorBoundary';
-import { getAuthServerUrl } from './config/api';
+import { getAuthServerUrl, API_URL } from './config/api';
 import { ThemeProvider, useTheme } from './context/ThemeContext';
 import { ToastProvider, useToast } from './context/ToastContext';
 import { ThemeSelectionModal } from './components/ThemeSelectionModal';
@@ -101,7 +103,7 @@ function App() {
     });
 
     // VIEW STATE
-    const [view, setView] = useState<'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns'>('chat');
+    const [view, setView] = useState<'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'group_chat'>('chat');
     const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
 
     // NUEVAS CITAS — toasts in-app + fecha a la que saltar al pinchar
@@ -114,6 +116,15 @@ function App() {
     // TEAM CHAT STATE
     const [teamChannel, setTeamChannel] = useState('general');
     const [mobileTeamChatActive, setMobileTeamChatActive] = useState(false); // Controls if mobile user is in a specific channel chat
+
+    // GRUPOS DE CONVERSACIÓN (varios clientes + varios trabajadores en un hilo).
+    // La lista vive aquí porque la usan tanto el Sidebar (listado) como el
+    // GroupChatWindow (grupo abierto) y el modal de creación/edición.
+    const [groups, setGroups] = useState<ChatGroup[]>([]);
+    const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
+    const [showGroupModal, setShowGroupModal] = useState(false);
+    const [editingGroup, setEditingGroup] = useState<ChatGroup | null>(null);
+    const selectedGroup = groups.find(g => g.id === selectedGroupId) || null;
 
     const [isConnected, setIsConnected] = useState(false);
     const [showTemplates, setShowTemplates] = useState(false);
@@ -683,6 +694,7 @@ function App() {
             if (selectedContact) { setSelectedContact(null); return; }
             if (view === 'team_chat' && mobileTeamChatActive) { setMobileTeamChatActive(false); return; }
             if (view === 'team_chat') { setView('chat'); return; }
+            if (view === 'group_chat') { setSelectedGroupId(null); setView('chat'); return; }
             CapacitorApp.exitApp();
         });
 
@@ -690,6 +702,24 @@ function App() {
             backButtonListener.then(l => l.remove());
         };
     }, [view, selectedContact, mobileTeamChatActive]);
+
+    // ─── GRUPOS DE CONVERSACIÓN ──────────────────────────────────────────────
+    // Se recargan al arrancar y cada vez que el servidor avisa de un cambio
+    // (alguien crea, edita o archiva un grupo desde otro dispositivo).
+    useEffect(() => {
+        if (!user) return;
+        let cancelled = false;
+        const loadGroups = () => {
+            fetch(`${API_URL}/groups`)
+                .then(r => r.json())
+                .then(d => { if (!cancelled && Array.isArray(d?.groups)) setGroups(d.groups); })
+                .catch(() => { /* si falla, la app sigue funcionando sin grupos */ });
+        };
+        loadGroups();
+        if (!socket) return;
+        socket.on('groups_updated', loadGroups);
+        return () => { cancelled = true; socket.off('groups_updated', loadGroups); };
+    }, [socket, user]);
 
     // ========================
     // RENDER FLOW
@@ -749,6 +779,37 @@ function App() {
         <GlobalSearch
             onSelectContact={handleSearchSelectContact}
             onClose={() => setShowGlobalSearch(false)}
+        />
+    );
+
+    // Modal de creación/edición de grupos. Se monta a nivel de App porque se abre
+    // desde dos sitios: el botón "+" del Sidebar y el engranaje del grupo abierto.
+    const groupModalNode = showGroupModal && (
+        <GroupCreateModal
+            socket={socket}
+            currentUser={user?.username || ''}
+            editing={editingGroup}
+            onClose={() => { setShowGroupModal(false); setEditingGroup(null); }}
+            onSaved={(saved) => {
+                setShowGroupModal(false);
+                setEditingGroup(null);
+                if (saved) {
+                    // Refresco optimista: el evento 'groups_updated' del socket
+                    // también llegará, pero así el cambio se ve al instante.
+                    setGroups(prev => {
+                        const rest = prev.filter(g => g.id !== saved.id);
+                        return [saved, ...rest];
+                    });
+                    setSelectedGroupId(saved.id);
+                    setSelectedContact(null);
+                    setView('group_chat');
+                } else {
+                    // Archivado: sale de la lista y volvemos a la bandeja.
+                    setGroups(prev => prev.filter(g => g.id !== editingGroup?.id));
+                    setSelectedGroupId(null);
+                    setView('chat');
+                }
+            }}
         />
     );
 
@@ -851,7 +912,7 @@ function App() {
                 </div>
 
                 {/* SIDEBAR */}
-                <div className={`w-full md:w-80 flex-shrink-0 flex flex-col border-r h-full ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) ? 'hidden md:flex' : 'flex'} ${isDark
+                <div className={`w-full md:w-80 flex-shrink-0 flex flex-col border-r h-full ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) || (view === 'group_chat' && window.innerWidth < 768) ? 'hidden md:flex' : 'flex'} ${isDark
                     ? 'border-white/5 bg-slate-900/30 backdrop-blur-md'
                     : 'border-slate-200 bg-slate-50'}`}>
 
@@ -876,7 +937,7 @@ function App() {
                     <div className="flex-1 min-h-0 relative flex flex-col overflow-hidden">
                         <Sidebar
                             user={user} socket={socket}
-                            onSelectContact={(c) => { setSelectedContact(c); setView('chat'); }}
+                            onSelectContact={(c) => { setSelectedContact(c); setSelectedGroupId(null); setView('chat'); }}
                             selectedContactId={selectedContact?.id}
                             isConnected={isConnected} onlineUsers={onlineUsers} typingStatus={typingStatus}
                             setView={setView}
@@ -888,6 +949,10 @@ function App() {
                                 setTeamChannel(channel);
                                 setMobileTeamChatActive(true);
                             }}
+                            groups={groups}
+                            selectedGroupId={selectedGroupId}
+                            onSelectGroup={(g) => { setSelectedContact(null); setSelectedGroupId(g.id); setView('group_chat'); }}
+                            onCreateGroup={() => { setEditingGroup(null); setShowGroupModal(true); }}
                         />
                     </div>
 
@@ -916,7 +981,7 @@ function App() {
                 </div>
 
                 {/* MAIN AREA */}
-                <main className={`flex-1 flex-col min-w-0 relative ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) || (view === 'team_chat' && window.innerWidth >= 768) ? 'flex' : 'hidden md:flex'} ${isDark ? 'bg-slate-900/20 backdrop-blur-sm' : 'bg-white'}`}>
+                <main className={`flex-1 flex-col min-w-0 relative ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) || (view === 'team_chat' && window.innerWidth >= 768) || view === 'group_chat' ? 'flex' : 'hidden md:flex'} ${isDark ? 'bg-slate-900/20 backdrop-blur-sm' : 'bg-white'}`}>
                     <div className="flex-1 overflow-hidden relative flex flex-col h-full">
                         {!isConnected && <div className="absolute top-0 left-0 right-0 bg-red-500/90 backdrop-blur-sm text-white text-xs text-center z-50 flex items-center justify-center gap-2 font-bold shadow-lg safe-pt-2 pb-2"><div className="w-4 h-4 flex items-center justify-center"><WifiOff className="w-3 h-3" /></div><span>Sin conexión con el servidor.</span></div>}
 
@@ -926,6 +991,17 @@ function App() {
                                 <TeamChat socket={socket} user={user} channel={teamChannel} />
                             </div>
                         )
+                            : view === 'group_chat' && selectedGroup ? (
+                                <div className="flex flex-col h-full w-full relative">
+                                    <button onClick={() => { setSelectedGroupId(null); setView('chat'); }} className="md:hidden absolute safe-top-4 left-4 z-50 p-2.5 rounded-full shadow-lg border border-white/10 bg-slate-800 text-slate-300 active:scale-95 transition-transform"><ArrowLeft className="w-5 h-5" /></button>
+                                    <GroupChatWindow
+                                        socket={socket}
+                                        user={user}
+                                        group={selectedGroup}
+                                        onEdit={(g) => { setEditingGroup(g); setShowGroupModal(true); }}
+                                    />
+                                </div>
+                            )
                             : selectedContact ? (
                                 // @ts-ignore
                                 <ChatWindow
@@ -973,6 +1049,7 @@ function App() {
             {/* Toast de nuevas citas (Laura y manual). Al pinchar abre el calendario en el día. */}
             {appointmentToastNode}
             {globalSearchNode}
+            {groupModalNode}
 
             {/* THEME SELECTION - STRICT BLOCKING */}
             {showThemeModal && (
