@@ -69,7 +69,10 @@ interface SidebarProps {
 // todos los chats sin agente, mezclando los urgentes con chats viejos que ya
 // no importaban. "Atención" muestra solo los que tienen una alarma sin
 // atender → es lo que de verdad hay que responder ya.
-type ViewScope = 'all' | 'mine' | 'attention';
+// 'groups' muestra el listado de Grupos (varios clientes + varios trabajadores
+// en un hilo) EN VEZ de los contactos — es un modo propio, no un filtro sobre
+// la bandeja de contactos.
+type ViewScope = 'all' | 'mine' | 'groups' | 'attention';
 
 const normalizePhone = (phone: string) => {
     if (!phone) return "";
@@ -530,6 +533,13 @@ export function Sidebar({
         );
     }
 
+    // Reutiliza la misma caja de búsqueda de la bandeja: al estar en modo
+    // Grupos, busca por nombre de grupo en vez de por contacto.
+    const filteredGroups = groups.filter(g => {
+        const qNorm = normalizeForSearch(searchQuery);
+        return qNorm === '' || normalizeForSearch(g.name).includes(qNorm);
+    });
+
     const updateFilter = (key: keyof typeof activeFilters, value: string) => {
         setActiveFilters(prev => ({ ...prev, [key]: value }));
     };
@@ -623,7 +633,7 @@ export function Sidebar({
                 {currentView !== 'team_chat' && (
                     <>
                         <h2 className={`text-xs font-bold uppercase tracking-wider mb-3 flex justify-between items-center ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                            Bandeja de Entrada
+                            {viewScope === 'groups' ? 'Grupos' : 'Bandeja de Entrada'}
                             {!isConnected && <span className="text-[10px] text-red-500 animate-pulse font-bold flex items-center gap-1">● Sin conexión</span>}
                         </h2>
 
@@ -631,7 +641,7 @@ export function Sidebar({
                             <Search className={`w-4 h-4 absolute left-3 top-2.5 ${isDark ? 'text-slate-400' : 'text-slate-400'}`} />
                             <input
                                 type="text"
-                                placeholder="Buscar chat..."
+                                placeholder={viewScope === 'groups' ? 'Buscar grupo...' : 'Buscar chat...'}
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
                                 className={`w-full pl-9 pr-4 py-2 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all ${isDark
@@ -651,6 +661,10 @@ export function Sidebar({
                                     ? (isDark ? 'bg-violet-600 text-white shadow-sm' : 'bg-white text-blue-600 shadow-sm')
                                     : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700')
                                     }`}>Míos</button>
+                                <button onClick={() => setViewScope('groups')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${viewScope === 'groups'
+                                    ? (isDark ? 'bg-emerald-600 text-white shadow-sm' : 'bg-white text-emerald-600 shadow-sm')
+                                    : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700')
+                                    }`}>Grupos</button>
                                 <button onClick={() => setViewScope('attention')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all flex items-center justify-center gap-1 ${viewScope === 'attention'
                                     ? (isDark ? 'bg-red-600 text-white shadow-sm' : 'bg-white text-red-600 shadow-sm')
                                     : (attentionCount > 0
@@ -667,15 +681,25 @@ export function Sidebar({
                                 </button>
                             </div>
 
-                            <button onClick={() => setShowFilters(!showFilters)} className={`p-2 rounded-xl transition-all border ${showFilters || hasActiveFilters
-                                ? (isDark ? 'bg-blue-600/20 border-blue-500/50 text-blue-400' : 'bg-blue-50 border-blue-200 text-blue-600')
-                                : (isDark ? 'glass-button-secondary' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50')
-                                }`} id="tour-filters">
-                                {hasActiveFilters ? <FilterIcon className="w-4 h-4 fill-current" /> : <FilterIcon className="w-4 h-4" />}
+                            {/* En modo Grupos este botón crea un grupo; en el resto abre los
+                                filtros de contactos (departamento/estado/etiqueta/agente, que
+                                no aplican a grupos). */}
+                            <button
+                                onClick={() => viewScope === 'groups' ? (onCreateGroup && onCreateGroup()) : setShowFilters(!showFilters)}
+                                title={viewScope === 'groups' ? 'Nuevo grupo' : 'Filtros'}
+                                className={`p-2 rounded-xl transition-all border ${viewScope === 'groups'
+                                    ? (isDark ? 'bg-emerald-600/20 border-emerald-500/50 text-emerald-400' : 'bg-emerald-50 border-emerald-200 text-emerald-600')
+                                    : (showFilters || hasActiveFilters)
+                                        ? (isDark ? 'bg-blue-600/20 border-blue-500/50 text-blue-400' : 'bg-blue-50 border-blue-200 text-blue-600')
+                                        : (isDark ? 'glass-button-secondary' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50')
+                                    }`} id="tour-filters">
+                                {viewScope === 'groups'
+                                    ? <UserPlus className="w-4 h-4" />
+                                    : (hasActiveFilters ? <FilterIcon className="w-4 h-4 fill-current" /> : <FilterIcon className="w-4 h-4" />)}
                             </button>
                         </div>
 
-                        {showFilters && (
+                        {viewScope !== 'groups' && showFilters && (
                             <div className={`mt-3 p-3 rounded-xl border space-y-2 animate-in slide-in-from-top-2 fade-in duration-200 ${isDark
                                 ? 'bg-slate-800/50 border-slate-700'
                                 : 'bg-slate-50 border-slate-200'
@@ -810,65 +834,60 @@ export function Sidebar({
                             </div>
                         </div>
                     </div>
+                ) : viewScope === 'groups' ? (
+                    /* LISTA MODO GRUPOS — varios clientes + varios trabajadores en un
+                       mismo hilo. No son grupos nativos de WhatsApp: cada cliente
+                       recibe los mensajes en su chat individual. */
+                    <div className="p-2">
+                        {groups.length === 0 ? (
+                            <div className="flex flex-col items-center justify-center h-40 text-slate-400 text-sm p-6 text-center gap-2">
+                                <Users className="w-10 h-10 opacity-40" />
+                                <p>Sin grupos todavía.</p>
+                                <button
+                                    onClick={() => onCreateGroup && onCreateGroup()}
+                                    className={`mt-1 px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1.5 ${isDark ? 'bg-emerald-600/20 text-emerald-400 hover:bg-emerald-600/30' : 'bg-emerald-50 text-emerald-600 hover:bg-emerald-100'}`}
+                                >
+                                    <UserPlus className="w-3.5 h-3.5" /> Crear grupo
+                                </button>
+                            </div>
+                        ) : filteredGroups.length === 0 ? (
+                            <p className={`text-center text-sm p-6 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Sin resultados para "{searchQuery}".</p>
+                        ) : (
+                            <div className="space-y-1">
+                                {filteredGroups.map(g => {
+                                    const isSelected = currentView === 'group_chat' && selectedGroupId === g.id;
+                                    const unread = groupUnread[g.id] || 0;
+                                    return (
+                                        <button
+                                            key={g.id}
+                                            onClick={() => onSelectGroup && onSelectGroup(g)}
+                                            className={`w-full flex items-center gap-2.5 p-2.5 rounded-xl transition-all ${isSelected
+                                                ? (isDark ? 'bg-emerald-900/40 text-emerald-300 font-bold' : 'bg-emerald-50 text-emerald-700 font-bold')
+                                                : (isDark ? 'text-slate-400 hover:bg-slate-700/50' : 'text-slate-600 hover:bg-slate-100')}`}
+                                        >
+                                            <span className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 ${isDark ? 'bg-emerald-900/50 text-emerald-400' : 'bg-emerald-100 text-emerald-600'}`}>
+                                                <Users className="w-4 h-4" />
+                                            </span>
+                                            <span className="flex-1 min-w-0 text-left">
+                                                <span className="block text-sm truncate">{g.name}</span>
+                                                <span className={`block text-[10px] truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                                    {g.clientPhones.length + g.agentNames.length} participantes · {g.lineName}
+                                                </span>
+                                            </span>
+                                            {unread > 0 && (
+                                                <span className="flex-shrink-0 bg-emerald-600 text-white text-[10px] font-bold h-5 min-w-[20px] px-1 rounded-full flex items-center justify-center shadow-sm animate-in zoom-in">
+                                                    {unread > 99 ? '99+' : unread}
+                                                </span>
+                                            )}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
+                    </div>
                 ) : (
                     /* LISTA MODO CONTACTOS (NORMAL) */
                     <>
-                        {/* GRUPOS — varios clientes + varios trabajadores en un mismo hilo.
-                            No son grupos nativos de WhatsApp: cada cliente recibe los
-                            mensajes en su chat individual. */}
-                        <div className={`px-3 pt-3 pb-2 border-b ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
-                            <div className="flex items-center justify-between mb-2">
-                                <span className={`text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                                    Grupos
-                                </span>
-                                <button
-                                    onClick={() => onCreateGroup && onCreateGroup()}
-                                    title="Nuevo grupo"
-                                    className={`p-1 rounded-lg transition ${isDark
-                                        ? 'text-emerald-400 hover:bg-emerald-500/20'
-                                        : 'text-emerald-600 hover:bg-emerald-50'}`}
-                                >
-                                    <UserPlus className="w-4 h-4" />
-                                </button>
-                            </div>
-                            {groups.length === 0 ? (
-                                <p className={`text-[11px] pb-1 ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>
-                                    Sin grupos. Pulsa + para juntar varios clientes y trabajadores en un hilo.
-                                </p>
-                            ) : (
-                                <div className="space-y-1">
-                                    {groups.map(g => {
-                                        const isSelected = currentView === 'group_chat' && selectedGroupId === g.id;
-                                        const unread = groupUnread[g.id] || 0;
-                                        return (
-                                            <button
-                                                key={g.id}
-                                                onClick={() => onSelectGroup && onSelectGroup(g)}
-                                                className={`w-full flex items-center gap-2.5 p-2 rounded-xl transition-all ${isSelected
-                                                    ? (isDark ? 'bg-emerald-900/40 text-emerald-300 font-bold' : 'bg-emerald-50 text-emerald-700 font-bold')
-                                                    : (isDark ? 'text-slate-400 hover:bg-slate-700/50' : 'text-slate-600 hover:bg-slate-100')}`}
-                                            >
-                                                <span className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 ${isDark ? 'bg-emerald-900/50 text-emerald-400' : 'bg-emerald-100 text-emerald-600'}`}>
-                                                    <Users className="w-4 h-4" />
-                                                </span>
-                                                <span className="flex-1 min-w-0 text-left">
-                                                    <span className="block text-sm truncate">{g.name}</span>
-                                                    <span className={`block text-[10px] truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                                                        {g.clientPhones.length + g.agentNames.length} participantes · {g.lineName}
-                                                    </span>
-                                                </span>
-                                                {unread > 0 && (
-                                                    <span className="flex-shrink-0 bg-emerald-600 text-white text-[10px] font-bold h-5 min-w-[20px] px-1 rounded-full flex items-center justify-center shadow-sm animate-in zoom-in">
-                                                        {unread > 99 ? '99+' : unread}
-                                                    </span>
-                                                )}
-                                            </button>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                        </div>
-
                         {filteredContacts.length === 0 ? (
                             <div className="flex flex-col items-center justify-center h-40 text-slate-400 text-sm p-6 text-center">
                                 <div className={`p-3 rounded-full mb-2 ${isConnected ? (isDark ? 'bg-slate-800' : 'bg-slate-100') : 'bg-red-50'}`}>
