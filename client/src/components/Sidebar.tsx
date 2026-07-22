@@ -29,6 +29,12 @@ export interface Contact {
     origin_phone_id?: string;
     unread_count?: number; // Added field
     ai_muted?: boolean; // Toggle IA on/off por chat (silenciar Laura)
+    // Alarma de atención humana sin atender (derivado a dpto, pide humano,
+    // cliente enfadado). Se pone sola al saltar la alarma y se limpia sola
+    // cuando un agente contesta al chat.
+    attention_pending?: boolean;
+    attention_reason?: string;  // "derivado al equipo" / "pide hablar con una persona" / "parece molesto/a"
+    attention_at?: string;      // ISO de cuándo saltó
 }
 
 interface Agent { id: string; name: string; }
@@ -59,7 +65,11 @@ interface SidebarProps {
     onCreateGroup?: () => void;
 }
 
-type ViewScope = 'all' | 'mine' | 'unassigned';
+// 'attention' sustituye al antiguo 'unassigned' (Libres). "Libres" mostraba
+// todos los chats sin agente, mezclando los urgentes con chats viejos que ya
+// no importaban. "Atención" muestra solo los que tienen una alarma sin
+// atender → es lo que de verdad hay que responder ya.
+type ViewScope = 'all' | 'mine' | 'attention';
 
 const normalizePhone = (phone: string) => {
     if (!phone) return "";
@@ -478,6 +488,16 @@ export function Sidebar({
         finally { setImporting(false); }
     };
 
+    // Nº de alarmas SIN ATENDER, para el badge rojo de la pestaña "Atención".
+    // Respeta la línea seleccionada (si estás viendo solo Recambios no cuenta
+    // las de SYA Motor), pero NO el buscador ni la pestaña activa: el contador
+    // tiene que cantar siempre cuántos clientes están colgados, estés donde estés.
+    const attentionCount = contacts.filter(c => {
+        if (!c.attention_pending) return false;
+        if (selectedAccountId && c.origin_phone_id && c.origin_phone_id !== selectedAccountId) return false;
+        return true;
+    }).length;
+
     const filteredContacts = contacts.filter(c => {
         if (selectedAccountId) {
             if (c.origin_phone_id && c.origin_phone_id !== selectedAccountId) return false;
@@ -489,7 +509,7 @@ export function Sidebar({
         const matchesSearch = (qNorm === '' || normalizeForSearch(c.name).includes(qNorm)) || (c.phone || "").includes(searchQuery);
         if (!matchesSearch) return false;
         if (viewScope === 'mine' && c.assigned_to !== user.username) return false;
-        if (viewScope === 'unassigned' && c.assigned_to) return false;
+        if (viewScope === 'attention' && !c.attention_pending) return false;
         if (activeFilters.department && c.department !== activeFilters.department) return false;
         if (activeFilters.status && c.status !== activeFilters.status) return false;
         if (activeFilters.agent && c.assigned_to !== activeFilters.agent) return false;
@@ -631,10 +651,20 @@ export function Sidebar({
                                     ? (isDark ? 'bg-violet-600 text-white shadow-sm' : 'bg-white text-blue-600 shadow-sm')
                                     : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700')
                                     }`}>Míos</button>
-                                <button onClick={() => setViewScope('unassigned')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${viewScope === 'unassigned'
-                                    ? (isDark ? 'bg-orange-600 text-white shadow-sm' : 'bg-white text-orange-600 shadow-sm')
-                                    : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700')
-                                    }`}>Libres</button>
+                                <button onClick={() => setViewScope('attention')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all flex items-center justify-center gap-1 ${viewScope === 'attention'
+                                    ? (isDark ? 'bg-red-600 text-white shadow-sm' : 'bg-white text-red-600 shadow-sm')
+                                    : (attentionCount > 0
+                                        ? (isDark ? 'text-red-400 hover:text-red-300' : 'text-red-600 hover:text-red-700')
+                                        : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700'))
+                                    }`}>
+                                    Atención
+                                    {attentionCount > 0 && (
+                                        <span className={`px-1.5 py-0.5 rounded-full text-[9px] font-black leading-none ${viewScope === 'attention'
+                                            ? (isDark ? 'bg-white/25 text-white' : 'bg-red-600 text-white')
+                                            : 'bg-red-600 text-white animate-pulse'
+                                            }`}>{attentionCount}</span>
+                                    )}
+                                </button>
                             </div>
 
                             <button onClick={() => setShowFilters(!showFilters)} className={`p-2 rounded-xl transition-all border ${showFilters || hasActiveFilters

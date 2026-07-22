@@ -1929,6 +1929,43 @@ async function notifyHumanAttention(data: {
         console.warn('[HumanAttention] Socket emit falló:', e?.message);
     }
 
+    // 3.5) PERSISTIR la alarma en la ficha del contacto.
+    //      Sin esto la alarma solo vivía como toast en el navegador: si nadie
+    //      la veía en ese momento (fuera de horario, recarga de página, nadie
+    //      conectado) se perdía para siempre y el cliente se quedaba sin
+    //      atender, sin que quedara ningún rastro. Guardándola en el contacto,
+    //      la bandeja puede filtrar "pendientes de atender" y el equipo las
+    //      repesca luego. Se limpia sola cuando un agente contesta a ese chat
+    //      (socket 'chatMessage').
+    //      Tolerante a propósito: si los campos aún no existen en Airtable,
+    //      avisamos por log y seguimos — una alarma en pantalla nunca debe
+    //      romperse porque falte una columna.
+    try {
+        if (base) {
+            const cs = await base('Contacts').select({
+                filterByFormula: `{phone}='${clean}'`, maxRecords: 1
+            }).firstPage();
+            if (cs.length > 0) {
+                await base('Contacts').update([{
+                    id: cs[0].id,
+                    fields: {
+                        attention_pending: true,
+                        attention_reason: reasonText[data.reason],
+                        attention_snippet: truncate(data.snippet || '', 200),
+                        attention_at: new Date().toISOString()
+                    }
+                }], { typecast: true });
+                io.emit('contact_updated_notification');
+            }
+        }
+    } catch (e: any) {
+        if (/unknown field|attention_/i.test(e?.message || '')) {
+            console.warn('[HumanAttention] Faltan columnas en Contacts (attention_pending / attention_reason / attention_snippet / attention_at). Créalas en Airtable o las alarmas no se guardarán.');
+        } else {
+            console.warn('[HumanAttention] No se pudo guardar la alarma en el contacto:', e?.message);
+        }
+    }
+
     // 4) Push al móvil (FCM + WebPush) — broadcast a todo el equipo
     try {
         sendFCMNotification({
@@ -1965,6 +2002,38 @@ async function notifyHumanAttention(data: {
     } catch (_) { /* nunca bloquear */ }
 
     console.log(`🚨 [HumanAttention] ${data.reason} (${data.source}) → ${clean} (${data.clientName})`);
+}
+
+// Limpia la alarma de atención humana de un contacto cuando un agente le
+// RESPONDE de verdad (texto, audio, imagen, documento o plantilla). Contestar
+// ES atenderlo — el chat sale solo de la pestaña "Atención" de la bandeja.
+// Helper compartido porque el agente tiene VARIOS caminos de respuesta y solo
+// el texto pasa por el socket 'chatMessage': los adjuntos/audios van por
+// POST /api/upload y las plantillas por POST /api/send-template. Sin esto,
+// responder con un audio, una foto o una plantilla (la vía obligada fuera de
+// la ventana de 24h) dejaba el chat clavado en "Atención" para siempre.
+// Tolerante: nunca lanza — la respuesta al cliente jamás debe fallar por esto.
+async function clearAttentionForContact(cleanPhone: string, source: string): Promise<void> {
+    if (!base || !cleanPhone) return;
+    try {
+        const cs = await base('Contacts').select({
+            filterByFormula: `{phone}='${cleanPhone}'`, maxRecords: 1
+        }).firstPage();
+        if (cs.length === 0 || !cs[0].get('attention_pending')) return;
+        await base('Contacts').update([{
+            id: cs[0].id,
+            fields: {
+                attention_pending: false,
+                attention_reason: '',
+                attention_snippet: '',
+                attention_at: ''
+            }
+        }], { typecast: true });
+        io.emit('contact_updated_notification');
+        console.log(`✅ [HumanAttention] Alarma de ${cleanPhone} atendida (${source}).`);
+    } catch (e: any) {
+        console.warn(`[HumanAttention] No se pudo limpiar la alarma de ${cleanPhone} (${source}):`, e?.message);
+    }
 }
 
 // Detección por PALABRAS CLAVE — primera red de seguridad antes incluso
@@ -3456,8 +3525,8 @@ Si ya sabes lo que quiere (ej: reservar cita), incluye el saludo Y ya responde a
 Analiza el mensaje del cliente:
 - **Cita / Reserva / Revisión / ITV / Cambio de aceite / Reparación** → Sigue el flujo de citas (pasos 2-5)
 - **Cancelar / Anular / Quitar cita** → Sigue el flujo de CANCELACIÓN (paso C)
-- **Ventas / Comprar / Precio de un vehículo** → Llama assign_department("Ventas")
-- **Avería urgente / Taller** → Llama assign_department("Taller")
+- **Cualquier consulta que necesite un humano** (comprar un coche, precio o disponibilidad de una PIEZA/RECAMBIO, avería, facturación, administración…) → Llama assign_department con el departamento que MEJOR encaje según la sección "🏢 DERIVACIÓN A DEPARTAMENTOS HUMANOS" de más abajo.
+  ⚠️ Elige SIEMPRE leyendo las DESCRIPCIONES de esa sección. NUNCA asumas un departamento por defecto y NUNCA te guíes solo por la palabra "precio" o "presupuesto": el precio de un COCHE y el precio de una PIEZA van a departamentos DISTINTOS. Si el cliente pregunta por una pieza, un recambio, o si "la tenéis", eso es del departamento de piezas/recambios — no del de venta de vehículos.
 - **Otro tema** → Saluda amablemente y pregunta en qué puedes ayudarle
 
 ### 🚫 REGLA IMPORTANTE — CITAS PARA HOY
@@ -5646,7 +5715,14 @@ async function assignDepartment(clientPhone: string, department: string) {
             const fields: any = { "department": department, "status": "Abierto" };
             if (pickedAgent) fields.assigned_to = pickedAgent;
 
-            await base('Contacts').update([{ id: contacts[0].id, fields }]);
+            // typecast: Airtable crea sola la opción del single-select si el
+            // departamento es nuevo (ej. se acaba de crear "Recambios" en
+            // Ajustes CRM y nunca se había usado). Sin esto Airtable rechaza
+            // el update con "insufficient permissions to create new select
+            // option", assignDepartment devuelve "Error asignando." y el
+            // cliente recibe el fallback de "problema técnico" — aunque Laura
+            // hubiera elegido el departamento correcto.
+            await base('Contacts').update([{ id: contacts[0].id, fields }], { typecast: true });
             io.emit('contact_updated_notification');
             activeAiChats.delete(clean);
             io.emit('ai_active_change', { phone: clean, active: false });
@@ -8903,6 +8979,11 @@ app.post('/api/send-template', async (req, res) => {
         if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
         await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
         await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender: senderName || "Agente", recipient: cleanTo, timestamp: new Date().toISOString(), type: "template", origin_phone_id: originPhoneId });
+        // Enviar una plantilla manual también ES atender la alarma de la
+        // pestaña "Atención". Camino crítico: fuera de la ventana de 24h el
+        // texto libre falla (Meta 131047) y la plantilla es LA única forma de
+        // responder — justo el caso típico de una alarma antigua pendiente.
+        clearAttentionForContact(cleanTo, 'plantilla').catch(() => {});
         res.json({ success: true });
     } catch (e: any) {
         const metaError = e?.response?.data?.error?.message || e?.message || "Error envío";
@@ -9524,6 +9605,10 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
 
         await saveAndEmitMessage({ text: textLog, sender: senderName, recipient: cleanTo, timestamp: new Date().toISOString(), type: saveType, mediaId: mediaId, origin_phone_id: originPhoneId });
         await handleContactUpdate(cleanTo, `Tú (${senderName}): 📎 Archivo`, undefined, originPhoneId);
+        // Responder con un audio/foto/documento también ES atender la alarma
+        // de la pestaña "Atención" — este camino es HTTP y no pasa por el
+        // socket 'chatMessage', así que hay que limpiarla aquí explícitamente.
+        clearAttentionForContact(cleanTo, 'adjunto').catch(() => {});
         res.json({ success: true });
     } catch (e: any) {
         console.error("❌ [Upload] Error:", e.response?.data || e.message || e);
@@ -10292,7 +10377,11 @@ io.on('connection', (socket) => {
                 tags: x.get('tags') || [],
                 origin_phone_id: x.get('origin_phone_id'),
                 unread_count: x.get('unread_count') || 0, // Return unread_count
-                ai_muted: !!x.get('ai_muted')  // Toggle IA on/off por chat (silenciar Laura)
+                ai_muted: !!x.get('ai_muted'),  // Toggle IA on/off por chat (silenciar Laura)
+                // Alarma de atención humana pendiente → pestaña "Atención" de la bandeja
+                attention_pending: !!x.get('attention_pending'),
+                attention_reason: (x.get('attention_reason') as string) || '',
+                attention_at: (x.get('attention_at') as string) || ''
             })));
         }
     });
@@ -10439,10 +10528,31 @@ io.on('connection', (socket) => {
 
                 if (records.length > 0) {
                     const currentStatus = records[0].get('status');
+                    const handoverFields: any = {};
                     // Solo actualizamos si es "Nuevo" (o está asignado a IA implícitamente) para evitar pisar otros estados
                     if (currentStatus === 'Nuevo') {
                         console.log(`📝 [SYNC] Cambio forzado: ${cleanTo} -> Status 'Abierto' (Stop IA)`);
-                        await base('Contacts').update([{ id: records[0].id, fields: { "status": "Abierto" } }]);
+                        handoverFields.status = 'Abierto';
+                    }
+                    // Un agente está contestando → la alarma de atención humana
+                    // (si la había) queda ATENDIDA y el chat sale solo de la
+                    // pestaña "Atención" de la bandeja. Nadie tiene que
+                    // marcarlo a mano: contestar ES atenderlo.
+                    // Aprovechamos el mismo record ya cargado arriba para no
+                    // añadir otra llamada a Airtable por cada mensaje enviado.
+                    // EXCEPTO las notas internas (type='note'): el cliente no
+                    // recibe nada, así que apuntar una nota NO cuenta como
+                    // atenderle — la alarma debe seguir viva.
+                    if (msg.type !== 'note' && records[0].get('attention_pending')) {
+                        handoverFields.attention_pending = false;
+                        handoverFields.attention_reason = '';
+                        handoverFields.attention_snippet = '';
+                        handoverFields.attention_at = '';
+                        console.log(`✅ [HumanAttention] Alarma de ${cleanTo} atendida (respondió un agente).`);
+                    }
+                    if (Object.keys(handoverFields).length > 0) {
+                        await base('Contacts').update([{ id: records[0].id, fields: handoverFields }], { typecast: true });
+                        io.emit('contact_updated_notification');
                     }
                 }
             } catch (err) {
@@ -11968,6 +12078,10 @@ app.get('/api/campaigns-contacts', async (req, res) => {
             assigned_to: (r.get('assigned_to') as string) || '',
             optInMarketing: !!r.get('optInMarketing'),
             ai_muted: !!r.get('ai_muted'),
+            // Alarma de atención humana pendiente → pestaña "Atención" de la bandeja
+            attention_pending: !!r.get('attention_pending'),
+            attention_reason: (r.get('attention_reason') as string) || '',
+            attention_at: (r.get('attention_at') as string) || '',
             // opted_out_notifications = campo antiguo (respaldo): si está activo, excluido de todo
             optedOutCampaigns: !!r.get('opted_out_campaigns') || !!r.get('opted_out_notifications'),
             optedOutReminders: !!r.get('opted_out_reminders') || !!r.get('opted_out_notifications'),
