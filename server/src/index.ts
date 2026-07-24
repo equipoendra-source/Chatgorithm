@@ -3698,9 +3698,87 @@ function isTodayBotBlocked(): boolean {
     return botBlockedWeekdays.has(getMadridWeekday());
 }
 
+// ==========================================================================
+// HORARIO DE RESPUESTA (HORAS) — Laura solo responde dentro de esta franja
+// horaria (OPCIONAL). Fuera de ella los mensajes siguen entrando al panel
+// para que el equipo los atienda a mano, pero Laura NO responde (igual que
+// los días bloqueados de arriba). Se persiste en BotSettings
+// (Setting='bot_active_hours') como "HH:MM-HH:MM" en hora de Europe/Madrid.
+// Valor vacío = sin límite (Laura responde 24h, comportamiento por defecto).
+// Se admite una franja que cruce la medianoche (ej. "22:00-06:00").
+// ==========================================================================
+let botActiveHours: { start: string; end: string } | null = null;
+
+async function loadBotActiveHours(): Promise<void> {
+    if (!base) return;
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'bot_active_hours'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            const v = (r[0].get('Value') as string || '').trim();
+            botActiveHours = parseActiveHours(v);
+            console.log(`🤖 [Bot] Horario de respuesta cargado: ${botActiveHours ? `${botActiveHours.start}-${botActiveHours.end}` : 'sin límite (24h)'}`);
+        } else {
+            // Crear con default vacío (Laura responde a cualquier hora)
+            await base('BotSettings').create([{ fields: { Setting: 'bot_active_hours', Value: '' } }]);
+            console.log('🤖 [Bot] Setting bot_active_hours creado con default vacío');
+        }
+    } catch (e: any) {
+        console.error('[Bot] Error cargando horario de respuesta, usando default (24h):', e.message);
+    }
+}
+
+// Valida y normaliza una hora "H:MM"/"HH:MM" → "HH:MM" (00-23 / 00-59).
+// Devuelve null si el formato no es válido.
+function normalizeHHMM(s: string): string | null {
+    const m = (s || '').trim().match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) return null;
+    const h = Number(m[1]);
+    const min = Number(m[2]);
+    if (h < 0 || h > 23 || min < 0 || min > 59) return null;
+    return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+}
+
+// Parsea "09:00-18:00" → { start:'09:00', end:'18:00' }. Devuelve null si el
+// valor está vacío, malformado, o si inicio y fin coinciden (franja nula =
+// sin límite). Un inicio mayor que el fin es válido (la franja cruza medianoche).
+function parseActiveHours(raw: string): { start: string; end: string } | null {
+    if (!raw) return null;
+    const parts = raw.split('-');
+    if (parts.length !== 2) return null;
+    const start = normalizeHHMM(parts[0]);
+    const end = normalizeHHMM(parts[1]);
+    if (!start || !end || start === end) return null;
+    return { start, end };
+}
+
+// Devuelve la hora actual "HH:MM" (00-23) en zona horaria Europe/Madrid.
+// Usa hourCycle 'h23' para que medianoche sea "00:00" y nunca "24:00".
+function getMadridHHMM(): string {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Europe/Madrid', hour: '2-digit', minute: '2-digit', hourCycle: 'h23'
+    }).formatToParts(new Date());
+    const hh = parts.find(p => p.type === 'hour')?.value ?? '00';
+    const mm = parts.find(p => p.type === 'minute')?.value ?? '00';
+    return `${hh}:${mm}`;
+}
+
+// Devuelve true si AHORA (en Madrid) Laura está FUERA de su horario de
+// respuesta. Si no hay horario configurado (null) nunca bloquea (24h activa).
+// La comparación lexicográfica es válida porque el formato es HH:MM con relleno.
+function isNowOutsideActiveHours(): boolean {
+    if (!botActiveHours) return false;
+    const now = getMadridHHMM();
+    const { start, end } = botActiveHours;
+    const inside = start < end
+        ? (now >= start && now < end)      // franja dentro del mismo día
+        : (now >= start || now < end);     // franja que cruza la medianoche
+    return !inside;
+}
+
 // Cargar al arranque (después de que base esté inicializado)
 setTimeout(() => { loadBotGloballyEnabled().catch(() => {}); }, 1000);
 setTimeout(() => { loadBotBlockedWeekdays().catch(() => {}); }, 1000);
+setTimeout(() => { loadBotActiveHours().catch(() => {}); }, 1000);
 
 // ==========================================================================
 // HUMAN_IDLE_MINUTES — tiempo (en min) que esperamos al humano asignado
@@ -9764,6 +9842,56 @@ app.post('/api/bot/blocked-weekdays', async (req, res) => {
     }
 });
 
+// ============================================================
+// HORARIO DE RESPUESTA (HORAS) — franja horaria en la que Laura
+// responde automáticamente. Fuera de ella los mensajes entran al
+// panel pero Laura calla. OPCIONAL: vacío/null = sin límite (24h).
+// ============================================================
+// GET /api/bot/active-hours → { activeHours: "HH:MM-HH:MM" | null }
+app.get('/api/bot/active-hours', (_req, res) => {
+    res.json({ activeHours: botActiveHours ? `${botActiveHours.start}-${botActiveHours.end}` : null });
+});
+// POST /api/bot/active-hours { activeHours: "HH:MM-HH:MM" | "" | null }
+//   "" o null desactivan el límite (Laura 24h). Un string se valida al
+//   formato HH:MM-HH:MM (24h, Europe/Madrid) con inicio ≠ fin y se persiste.
+app.post('/api/bot/active-hours', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const incoming = req.body?.activeHours;
+    let parsed: { start: string; end: string } | null = null;
+    if (incoming != null && String(incoming).trim() !== '') {
+        parsed = parseActiveHours(String(incoming).trim());
+        if (!parsed) {
+            return res.status(400).json({ error: 'activeHours debe tener formato "HH:MM-HH:MM" (24h) con inicio y fin distintos, o estar vacío' });
+        }
+    }
+    const value = parsed ? `${parsed.start}-${parsed.end}` : '';
+    try {
+        const r = await base('BotSettings').select({ filterByFormula: "{Setting} = 'bot_active_hours'", maxRecords: 1 }).firstPage();
+        if (r.length > 0) {
+            await base('BotSettings').update([{ id: r[0].id, fields: { Value: value } }]);
+        } else {
+            await base('BotSettings').create([{ fields: { Setting: 'bot_active_hours', Value: value } }]);
+        }
+        const oldValue = botActiveHours ? `${botActiveHours.start}-${botActiveHours.end}` : '';
+        botActiveHours = parsed;
+        console.log(`🤖 [Bot] Horario de respuesta actualizado: [${value || 'sin límite (24h)'}]`);
+        try { io.emit('bot_active_hours_changed', { activeHours: value || null }); } catch (_) {}
+        // Audit log
+        try {
+            const actor = String(req.body.actorUsername || 'system');
+            logAudit({
+                action: 'bot.config_update', user: actor, targetType: 'bot',
+                summary: `Horario de respuesta IA: ${value || 'sin límite (24h)'}`,
+                changes: { activeHours: { from: oldValue || null, to: value || null } }, origin: 'web'
+            }).catch(() => {});
+        } catch (_) { }
+        res.json({ success: true, activeHours: value || null });
+    } catch (e: any) {
+        console.error('[Bot active-hours] Error guardando:', e.message);
+        res.status(500).json({ error: e.message });
+    }
+});
+
 // ==========================================
 //  WEBHOOKS (CORREGIDO: RECIPIENT EXPLÍCITO)
 // ==========================================
@@ -10111,6 +10239,13 @@ app.post('/webhook', async (req, res) => {
                 // el contexto (incluidos los mensajes acumulados del día
                 // bloqueado, que están en el historial de los últimos 25).
                 console.log(`🔇 [Bot] Hoy (weekday=${getMadridWeekday()}) está en la lista de días bloqueados. Mensaje de ${from} guardado pero Laura no responde.`);
+            } else if (isNowOutsideActiveHours()) {
+                // Fuera del horario de respuesta configurado (ej. solo 09:00-18:00).
+                // Igual que los días bloqueados: el mensaje entra al panel para que
+                // el equipo lo atienda a mano; Laura NO responde. Cuando el cliente
+                // vuelva a escribir dentro del horario, Laura contestará con todo el
+                // contexto acumulado (los mensajes están en el historial reciente).
+                console.log(`🔇 [Bot] Ahora (${getMadridHHMM()} Madrid) está fuera del horario de respuesta (${botActiveHours?.start}-${botActiveHours?.end}). Mensaje de ${from} guardado pero Laura no responde.`);
             } else if (assignedTo) {
                 const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
                 if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {

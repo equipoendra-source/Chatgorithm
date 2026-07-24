@@ -107,6 +107,15 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
     const [blockedWeekdays, setBlockedWeekdays] = useState<number[]>([]);
     const [blockedWeekdaysLoading, setBlockedWeekdaysLoading] = useState<boolean>(false);
     const [blockedWeekdaysSaving, setBlockedWeekdaysSaving] = useState<boolean>(false);
+    // Horario de respuesta de Laura (OPCIONAL). Si está activo, Laura solo
+    // responde automáticamente dentro de la franja [inicio, fin) en hora de
+    // España; fuera de ella los mensajes entran al panel pero Laura calla
+    // (igual que los "Días sin IA"). Desactivado = responde a cualquier hora.
+    const [activeHoursEnabled, setActiveHoursEnabled] = useState<boolean>(false);
+    const [activeHoursStart, setActiveHoursStart] = useState<string>('09:00');
+    const [activeHoursEnd, setActiveHoursEnd] = useState<string>('18:00');
+    const [activeHoursLoading, setActiveHoursLoading] = useState<boolean>(false);
+    const [activeHoursSaving, setActiveHoursSaving] = useState<boolean>(false);
     // Departamentos a los que Laura puede derivar (lista dinámica, N elementos)
     const [showDepartmentEditor, setShowDepartmentEditor] = useState<boolean>(false);
     const [botDepartments, setBotDepartments] = useState<{ name: string; description: string }[]>([]);
@@ -173,6 +182,22 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                 .then(d => { if (Array.isArray(d.blockedWeekdays)) setBlockedWeekdays(d.blockedWeekdays); })
                 .catch(() => { /* fallback: vacío (Laura siempre activa) */ })
                 .finally(() => setBlockedWeekdaysLoading(false));
+            // Cargar horario de respuesta de Laura (franja horaria opcional)
+            setActiveHoursLoading(true);
+            fetch(`${API_URL}/bot/active-hours`)
+                .then(r => r.json())
+                .then(d => {
+                    if (typeof d.activeHours === 'string' && d.activeHours.includes('-')) {
+                        const [s, e] = d.activeHours.split('-');
+                        if (s) setActiveHoursStart(s);
+                        if (e) setActiveHoursEnd(e);
+                        setActiveHoursEnabled(true);
+                    } else {
+                        setActiveHoursEnabled(false);
+                    }
+                })
+                .catch(() => { /* fallback: sin límite (Laura 24h) */ })
+                .finally(() => setActiveHoursLoading(false));
             // (eliminado) — antes había aquí un fetch a /bot/department-labels
             // para cargar la lista del editor del bot. Tras la unificación,
             // la única fuente es la tabla Config (ya cargada vía socket
@@ -210,6 +235,25 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
         };
         socket.on('bot_blocked_weekdays_changed', handler);
         return () => { socket.off('bot_blocked_weekdays_changed', handler); };
+    }, [socket]);
+
+    // Escuchar cambios en tiempo real del horario de respuesta de Laura
+    // (sincroniza entre admins que tengan Settings abierto a la vez).
+    useEffect(() => {
+        if (!socket) return;
+        const handler = (data: { activeHours: string | null }) => {
+            const v = data?.activeHours;
+            if (typeof v === 'string' && v.includes('-')) {
+                const [s, e] = v.split('-');
+                if (s) setActiveHoursStart(s);
+                if (e) setActiveHoursEnd(e);
+                setActiveHoursEnabled(true);
+            } else {
+                setActiveHoursEnabled(false);
+            }
+        };
+        socket.on('bot_active_hours_changed', handler);
+        return () => { socket.off('bot_active_hours_changed', handler); };
     }, [socket]);
 
     // Guardar departamentos editados (lista dinámica)
@@ -335,6 +379,31 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
             setError('Error de conexión al guardar los días sin IA: ' + (e?.message || 'sin detalles'));
         } finally {
             setBlockedWeekdaysSaving(false);
+        }
+    };
+
+    // Persiste el horario de respuesta de Laura. enabled=false → sin límite
+    // (Laura responde 24h). Un rango inválido (inicio==fin) no se guarda: la
+    // UI ya avisa y se guardará en cuanto el usuario corrija las horas.
+    const saveActiveHours = async (enabled: boolean, start: string, end: string) => {
+        if (activeHoursSaving) return;
+        if (enabled && start === end) return;
+        setActiveHoursSaving(true);
+        const payload = enabled ? `${start}-${end}` : '';
+        try {
+            const r = await fetch(`${API_URL}/bot/active-hours`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ activeHours: payload, actorUsername: currentUser?.username || 'system' })
+            });
+            const data = await r.json().catch(() => ({}));
+            if (!r.ok || !data.success) {
+                setError('No se pudo guardar el horario de la IA: ' + (data.error || 'error desconocido'));
+            }
+        } catch (e: any) {
+            setError('Error de conexión al guardar el horario de la IA: ' + (e?.message || 'sin detalles'));
+        } finally {
+            setActiveHoursSaving(false);
         }
     };
 
@@ -778,6 +847,99 @@ export function Settings({ onBack, socket, currentUserRole, quickReplies = [], c
                                                     .join(', ')}.
                                                 Cuando el cliente vuelva a escribir un día NO bloqueado, Laura responderá teniendo en cuenta los mensajes que se acumularon.
                                             </p>
+                                        )}
+                                    </div>
+                                );
+                            })()}
+
+                            {/* ============================================================ */}
+                            {/* HORARIO DE RESPUESTA — Laura solo contesta dentro de la franja  */}
+                            {/* horaria configurada (opcional). Fuera de ella calla, igual que  */}
+                            {/* los "Días sin IA" de arriba.                                    */}
+                            {/* ============================================================ */}
+                            {(() => {
+                                const invalidRange = activeHoursEnabled && activeHoursStart === activeHoursEnd;
+                                const crossesMidnight = activeHoursEnabled && activeHoursStart > activeHoursEnd;
+                                return (
+                                    <div className={`p-6 rounded-2xl border-2 shadow-sm ${activeHoursEnabled
+                                        ? (isDark ? 'bg-amber-900/20 border-amber-700/50' : 'bg-amber-50 border-amber-200')
+                                        : (isDark ? 'glass-panel border-white/5' : 'bg-white border-slate-200')
+                                        }`}>
+                                        <div className="flex items-start gap-3 mb-4">
+                                            <div className={`p-2.5 rounded-xl shadow-lg flex-shrink-0 ${activeHoursEnabled ? 'bg-gradient-to-br from-amber-500 to-orange-600' : 'bg-gradient-to-br from-slate-400 to-slate-500'}`}>
+                                                <Clock className="w-5 h-5 text-white" />
+                                            </div>
+                                            <div className="flex-1 min-w-0">
+                                                <div className="flex items-center gap-2 flex-wrap">
+                                                    <h3 className={`text-lg font-bold ${isDark ? 'text-white' : 'text-slate-800'}`}>Horario de respuesta</h3>
+                                                    {activeHoursLoading && <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />}
+                                                </div>
+                                                <p className={`text-sm mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                                    Opcional. Limita la franja horaria en la que Laura responde automáticamente.
+                                                    Fuera de ese horario los mensajes seguirán llegando al panel — tu equipo responderá a mano.
+                                                </p>
+                                            </div>
+                                            {/* Toggle activar/desactivar */}
+                                            <button
+                                                type="button"
+                                                onClick={() => {
+                                                    const next = !activeHoursEnabled;
+                                                    setActiveHoursEnabled(next);
+                                                    saveActiveHours(next, activeHoursStart, activeHoursEnd);
+                                                }}
+                                                disabled={activeHoursSaving || activeHoursLoading}
+                                                className={`relative inline-flex h-8 w-14 flex-shrink-0 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-offset-2 ${activeHoursEnabled ? 'bg-amber-500 focus:ring-amber-500' : 'bg-slate-400 focus:ring-slate-400'} ${activeHoursSaving ? 'opacity-50 cursor-wait' : 'cursor-pointer'}`}
+                                                aria-label={activeHoursEnabled ? 'Desactivar horario de respuesta' : 'Activar horario de respuesta'}
+                                            >
+                                                <span className={`inline-block h-6 w-6 transform rounded-full bg-white shadow-md transition-transform ${activeHoursEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+                                            </button>
+                                        </div>
+
+                                        {activeHoursEnabled && (
+                                            <div className="mt-2 space-y-3">
+                                                <div className="flex flex-wrap items-end gap-4">
+                                                    <div>
+                                                        <label className={`block text-xs font-semibold mb-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Desde</label>
+                                                        <input
+                                                            type="time"
+                                                            value={activeHoursStart}
+                                                            disabled={activeHoursSaving}
+                                                            onChange={(e) => {
+                                                                const v = e.target.value || '00:00';
+                                                                setActiveHoursStart(v);
+                                                                saveActiveHours(true, v, activeHoursEnd);
+                                                            }}
+                                                            className={`px-3 py-2 rounded-xl border-2 font-semibold text-base focus:outline-none ${isDark ? 'bg-slate-700/60 border-slate-600 text-white' : 'bg-white border-slate-200 text-slate-800'} ${activeHoursSaving ? 'opacity-50 cursor-wait' : ''}`}
+                                                        />
+                                                    </div>
+                                                    <div className={`pb-2 text-lg font-bold ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>→</div>
+                                                    <div>
+                                                        <label className={`block text-xs font-semibold mb-1 ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>Hasta</label>
+                                                        <input
+                                                            type="time"
+                                                            value={activeHoursEnd}
+                                                            disabled={activeHoursSaving}
+                                                            onChange={(e) => {
+                                                                const v = e.target.value || '00:00';
+                                                                setActiveHoursEnd(v);
+                                                                saveActiveHours(true, activeHoursStart, v);
+                                                            }}
+                                                            className={`px-3 py-2 rounded-xl border-2 font-semibold text-base focus:outline-none ${isDark ? 'bg-slate-700/60 border-slate-600 text-white' : 'bg-white border-slate-200 text-slate-800'} ${activeHoursSaving ? 'opacity-50 cursor-wait' : ''}`}
+                                                        />
+                                                    </div>
+                                                </div>
+                                                {invalidRange ? (
+                                                    <p className={`text-xs ${isDark ? 'text-red-300' : 'text-red-600'}`}>
+                                                        ⚠️ La hora de inicio y la de fin no pueden ser iguales. Ajusta la franja para guardar el horario.
+                                                    </p>
+                                                ) : (
+                                                    <p className={`text-xs ${isDark ? 'text-amber-300' : 'text-amber-700'}`}>
+                                                        🕐 Laura responderá solo entre las <strong>{activeHoursStart}</strong> y las <strong>{activeHoursEnd}</strong> (hora de España).
+                                                        {crossesMidnight && ' La franja cruza la medianoche (turno de noche).'}
+                                                        {' '}Fuera de ese rango los mensajes se acumulan y Laura contestará al volver al horario.
+                                                    </p>
+                                                )}
+                                            </div>
                                         )}
                                     </div>
                                 );
