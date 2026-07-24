@@ -17,12 +17,13 @@ interface Template {
 interface ChatTemplateSelectorProps {
   isOpen: boolean;
   onClose: () => void;
-  targetPhone: string;
+  targetPhone?: string;
   senderName: string;
   originPhoneId?: string; // <--- PROPIEDAD AÑADIDA
+  groupId?: string; // Si viene, la plantilla se reparte a TODO el grupo en vez de a un contacto 1-a-1.
 }
 
-const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onClose, targetPhone, senderName, originPhoneId }) => {
+const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onClose, targetPhone, senderName, originPhoneId, groupId }) => {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
 
@@ -83,17 +84,30 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
     const finalText = constructFinalText(selectedTemplate.body, variableValues);
 
     try {
-      const payload = {
-        templateName: selectedTemplate.name,
-        language: selectedTemplate.language,
-        phone: targetPhone,
-        variables: Object.values(variableValues),
-        previewText: finalText,
-        senderName: senderName,
-        originPhoneId: originPhoneId // <--- ENVIAMOS EL ORIGEN AL SERVIDOR
-      };
+      // Modo grupo: se reparte a todos los clientes del grupo (sin phone concreto).
+      // Modo 1-a-1: se envía al contacto (targetPhone) por su línea de origen.
+      const endpoint = groupId
+        ? `${API_URL_BASE}/groups/${groupId}/send-template`
+        : `${API_URL_BASE}/send-template`;
+      const payload = groupId
+        ? {
+            templateName: selectedTemplate.name,
+            language: selectedTemplate.language,
+            variables: Object.values(variableValues),
+            previewText: finalText,
+            senderName: senderName
+          }
+        : {
+            templateName: selectedTemplate.name,
+            language: selectedTemplate.language,
+            phone: targetPhone,
+            variables: Object.values(variableValues),
+            previewText: finalText,
+            senderName: senderName,
+            originPhoneId: originPhoneId // <--- ENVIAMOS EL ORIGEN AL SERVIDOR
+          };
 
-      const response = await fetch(`${API_URL_BASE}/send-template`, {
+      const response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)

@@ -3812,6 +3812,11 @@ async function getMinutesSinceLastWorkerReply(clientPhone: string, originPhoneId
         const clauses = [
             `{recipient}='${clean}'`,
             `{sender}!='Bot IA'`,
+            // Cinturón de seguridad: las respuestas de Laura en grupos se
+            // guardan como 'Bot IA' (savedSender), pero excluimos también
+            // 'Laura' por si algún reparto futuro olvidara el savedSender —
+            // así Laura nunca se auto-cuenta como "trabajador atendiendo".
+            `{sender}!='Laura'`,
             `{sender}!='${clean}'`,
             `{sender}!=''`,
             // Excluir senders que parezcan números de teléfono (>=8 dígitos
@@ -4062,6 +4067,21 @@ async function fanOutGroupMessage(opts: {
     text: string;
     timestamp: string;
     excludePhone?: string;
+    // Remitente con el que se GUARDA la copia 1-a-1 (por defecto = senderLabel).
+    // Para Laura se guarda como "Bot IA" aunque el prefijo visible sea "Laura",
+    // para que getMinutesSinceLastWorkerReply NO la cuente como un trabajador
+    // (si no, Laura se auto-bloquearía tras responder una vez).
+    savedSender?: string;
+    // relayOnly: solo ENVIAR por WhatsApp, sin guardar copia 1-a-1 ni tocar el
+    // contacto. Se usa al reenviar el mensaje ENTRANTE de un cliente a los demás
+    // (clientsSeeEachOther): guardar esa copia en el chat de otro cliente
+    // contaminaría su historial de IA y su detector de "trabajador atendiendo".
+    relayOnly?: boolean;
+    // savePhone: si se define, la copia 1-a-1 SOLO se guarda para ese cliente
+    // (a los demás solo se les envía). Se usa para la respuesta de Laura: se
+    // guarda en el chat del cliente que preguntó, pero no en el de los demás,
+    // para no mezclar contexto entre clientes distintos del grupo.
+    savePhone?: string;
 }): Promise<GroupDeliveryResult[]> {
     const { group, senderLabel, text, timestamp } = opts;
     const token = getToken(group.lineId);
@@ -4071,6 +4091,8 @@ async function fanOutGroupMessage(opts: {
     // se le reenviaría su propio mensaje.
     const targets = group.clientPhones.filter(p => p && !(opts.excludePhone && phoneMatch(p, opts.excludePhone)));
     const results: GroupDeliveryResult[] = [];
+    // ¿Se persiste la copia 1-a-1 de este cliente?
+    const shouldSave = (phone: string) => opts.relayOnly ? false : (opts.savePhone ? phoneMatch(phone, opts.savePhone) : true);
 
     // Secuencial a propósito: los grupos son pequeños y así no disparamos el
     // rate limit de Meta con ráfagas simultáneas.
@@ -4082,22 +4104,101 @@ async function fanOutGroupMessage(opts: {
         const send = await sendWhatsAppRawWithRetries(phone, body, group.lineId, token);
         // Se guarda la copia haya ido bien o mal, igual que hace `chatMessage`:
         // el agente debe ver el intento en el chat del cliente, con su icono de error.
-        await saveAndEmitMessage({
-            text: body,
-            sender: senderLabel,
-            recipient: phone,
-            type: 'text',
-            origin_phone_id: group.lineId,
-            timestamp,
-            group_id: group.id,
-            group_msg_id: ''   // copia, no registro canónico del hilo
-        });
-        await handleContactUpdate(phone, `Tú: ${text}`, undefined, group.lineId);
-        if (!send.ok) {
-            io.emit('message_status', {
-                recipient: phone, sender: senderLabel, timestamp,
-                status: 'failed', code: send.code || 0, metaError: send.metaError || ''
+        if (shouldSave(phone)) {
+            await saveAndEmitMessage({
+                text: body,
+                sender: opts.savedSender || senderLabel,
+                recipient: phone,
+                type: 'text',
+                origin_phone_id: group.lineId,
+                timestamp,
+                group_id: group.id,
+                group_msg_id: ''   // copia, no registro canónico del hilo
             });
+            await handleContactUpdate(phone, `Tú: ${text}`, undefined, group.lineId);
+            if (!send.ok) {
+                io.emit('message_status', {
+                    recipient: phone, sender: senderLabel, timestamp,
+                    status: 'failed', code: send.code || 0, metaError: send.metaError || ''
+                });
+            }
+        }
+        results.push({ phone, ok: send.ok, code: send.code, error: send.metaError });
+    }
+    return results;
+}
+
+// Envía un mensaje de MEDIA ya subida (por media_id) a un cliente. Devuelve el
+// resultado para el reporte de reparto. No reintenta: los fallos de media suelen
+// ser permanentes (ventana 24h cerrada, tipo no soportado). El caption solo se
+// admite en image/video/document — el audio (nota de voz) no lo lleva.
+async function sendWhatsAppMediaById(opts: {
+    to: string; originPhoneId: string; token: string;
+    mediaId: string; msgType: string; filename?: string; caption?: string;
+}): Promise<SendResult> {
+    const { to, originPhoneId, token, mediaId, msgType, filename, caption } = opts;
+    const cleanTo = cleanNumber(to);
+    if (!cleanTo) return { ok: false, metaError: 'INVALID_RECIPIENT' };
+    const mediaObj: any = { id: mediaId };
+    if (msgType === 'document' && filename) mediaObj.filename = filename;
+    if (caption && (msgType === 'image' || msgType === 'video' || msgType === 'document')) mediaObj.caption = caption;
+    try {
+        await axios.post(
+            `https://graph.facebook.com/v21.0/${originPhoneId}/messages`,
+            { messaging_product: 'whatsapp', to: cleanTo, type: msgType, [msgType]: mediaObj },
+            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
+        );
+        return { ok: true };
+    } catch (e: any) {
+        const metaErr = e.response?.data?.error;
+        return { ok: false, code: metaErr?.code, metaError: metaErr?.message || e.message, httpStatus: e.response?.status };
+    }
+}
+
+// Reparte un mensaje de MEDIA (ya subida, con media_id) a los clientes del grupo
+// por su chat 1-a-1. Igual que fanOutGroupMessage pero para media: guarda una
+// copia en cada conversación individual (con type + media_id) y devuelve el
+// resultado por cliente. El media_id se reutiliza para todos porque el grupo
+// comparte una única línea (mismo phone number id).
+async function fanOutGroupMedia(opts: {
+    group: ChatGroup; senderLabel: string; mediaId: string; msgType: string;
+    textLog: string; filename?: string; timestamp: string; excludePhone?: string;
+    // Igual que en fanOutGroupMessage: solo enviar, sin guardar copia 1-a-1.
+    // Se usa al reenviar media ENTRANTE de un cliente a los demás.
+    relayOnly?: boolean;
+}): Promise<GroupDeliveryResult[]> {
+    const { group, senderLabel, mediaId, msgType, textLog, filename, timestamp } = opts;
+    const token = getToken(group.lineId);
+    // El prefijo del grupo va como caption (donde WhatsApp lo admite) para que el
+    // cliente vea de qué grupo viene, igual que en los mensajes de texto.
+    const caption = `*[${group.name}] ${senderLabel}:*`;
+    const targets = group.clientPhones.filter(p => p && !(opts.excludePhone && phoneMatch(p, opts.excludePhone)));
+    const results: GroupDeliveryResult[] = [];
+    for (const phone of targets) {
+        if (!token) {
+            results.push({ phone, ok: false, error: 'La línea del grupo no tiene token configurado' });
+            continue;
+        }
+        const send = await sendWhatsAppMediaById({ to: phone, originPhoneId: group.lineId, token, mediaId, msgType, filename, caption });
+        if (!opts.relayOnly) {
+            await saveAndEmitMessage({
+                text: textLog,
+                sender: senderLabel,
+                recipient: phone,
+                type: msgType,
+                mediaId,
+                origin_phone_id: group.lineId,
+                timestamp,
+                group_id: group.id,
+                group_msg_id: ''   // copia, no registro canónico del hilo
+            });
+            await handleContactUpdate(phone, `Tú: 📎 ${textLog}`, undefined, group.lineId);
+            if (!send.ok) {
+                io.emit('message_status', {
+                    recipient: phone, sender: senderLabel, timestamp,
+                    status: 'failed', code: send.code || 0, metaError: send.metaError || ''
+                });
+            }
         }
         results.push({ phone, ok: send.ok, code: send.code, error: send.metaError });
     }
@@ -5965,8 +6066,30 @@ function isDegenerateText(s: string): boolean {
     return DEGENERATE_MODEL_TEXTS.has((s || '').toLowerCase().trim());
 }
 
-async function processJsonResponse(jsonText: string, phone: string, originId: string) {
+// Entrega un mensaje de LAURA (IA) al cliente. En 1-a-1 (group undefined) va
+// solo al cliente que escribió — comportamiento original. En un grupo se
+// reparte a TODOS los clientes y se registra en el hilo, atribuido a "Laura".
+async function deliverLauraMessage(clean: string, msg: string, originPhoneId: string, group?: ChatGroup): Promise<void> {
+    if (!group) { await sendWhatsAppText(clean, msg, originPhoneId); return; }
+    const timestamp = new Date().toISOString();
+    const groupMsgId = crypto.randomUUID();
+    // Registro canónico del hilo + eco al equipo (el equipo lo ve como "Laura").
+    await saveGroupThreadRecord({ groupId: group.id, text: msg, sender: 'Laura', timestamp, groupMsgId, lineId: group.lineId });
+    io.emit('group_message', { groupId: group.id, id: groupMsgId, text: msg, sender: 'Laura', fromClient: false, timestamp });
+    // Reparto a todos los clientes (incluido el que preguntó) con el prefijo del
+    // grupo. La copia 1-a-1 se guarda como "Bot IA" (savedSender, para que Laura
+    // no se cuente como "trabajador atendiendo") y SOLO en el chat del cliente que
+    // preguntó (savePhone=clean): así su respuesta no entra en el historial de IA
+    // de los demás clientes del grupo (evita mezclar contexto entre clientes).
+    // Los demás la reciben igualmente por WhatsApp, solo que no se persiste su copia.
+    await fanOutGroupMessage({ group, senderLabel: 'Laura', text: msg, timestamp, savedSender: 'Bot IA', savePhone: clean });
+}
+
+async function processJsonResponse(jsonText: string, phone: string, originId: string, group?: ChatGroup) {
     const FALLBACK_MSG = "En este momento no puedo procesar tu solicitud. Por favor, inténtalo de nuevo.";
+    // En grupo, cada respuesta de Laura se reparte a todos los clientes y se
+    // registra en el hilo; en 1-a-1 va solo al cliente que escribió.
+    const say = (m: string) => deliverLauraMessage(phone, m, originId, group);
 
     // Intento 1: JSON.parse directo
     try {
@@ -5976,7 +6099,7 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
                 console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${data.customer_message}"`);
                 return;
             }
-            await sendWhatsAppText(phone, data.customer_message, originId);
+            await say(data.customer_message);
             return;
         }
     } catch (_) { /* continuar */ }
@@ -5992,7 +6115,7 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
                     console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${data.customer_message}"`);
                     return;
                 }
-                await sendWhatsAppText(phone, data.customer_message, originId);
+                await say(data.customer_message);
                 return;
             }
         }
@@ -6009,7 +6132,7 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
                 console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${msg}"`);
                 return;
             }
-            await sendWhatsAppText(phone, msg, originId);
+            await say(msg);
             return;
         }
     } catch (e) {
@@ -6034,14 +6157,14 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
         const hasInternalId = /\brec[A-Za-z0-9]{8,}\b/.test(plain);
         if (plain && !looksJson && !hasInternalId && plain.length <= 1500) {
             console.warn('[Laura] Respuesta no-JSON tolerada: enviando texto plano al cliente.');
-            await sendWhatsAppText(phone, plain, originId);
+            await say(plain);
             return;
         }
     } catch (_) { /* continuar al fallback */ }
 
     // Todos los intentos fallaron: NUNCA enviar el texto crudo
     console.error('[Laura] Error parseando respuesta JSON: todos los intentos fallaron. Texto recibido:', jsonText);
-    await sendWhatsAppText(phone, FALLBACK_MSG, originId);
+    await say(FALLBACK_MSG);
 }
 
 // inboundMedia: opcional. Cuando el cliente manda audio/imagen/vídeo, descargamos los bytes
@@ -6052,7 +6175,8 @@ async function processAI(
     contactPhone: string,
     contactName: string,
     originPhoneId: string,
-    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' },
+    group?: ChatGroup
 ) {
     if (!genAI) { console.error("❌ No API Key"); return; }
     const clean = cleanNumber(contactPhone);
@@ -6060,7 +6184,7 @@ async function processAI(
     // Serializar TODA la lógica por número de cliente. Si llegan 5 mensajes
     // en ráfaga del mismo número, se procesan uno detrás de otro y cada turno
     // ve el historial actualizado del anterior — no respuestas contradictorias.
-    return withPhoneLock(clean, () => processAIInner(text, clean, contactName, originPhoneId, inboundMedia));
+    return withPhoneLock(clean, () => processAIInner(text, clean, contactName, originPhoneId, inboundMedia, group));
 }
 
 async function processAIInner(
@@ -6068,7 +6192,8 @@ async function processAIInner(
     clean: string,
     contactName: string,
     originPhoneId: string,
-    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' },
+    group?: ChatGroup
 ) {
     if (!genAI) { console.error("❌ No API Key"); return; }
 
@@ -6621,7 +6746,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                 if (assignmentMsgSent) {
                     console.log('🤐 [IA] Texto final de Gemini ignorado: ya se envió mensaje de derivación al cliente.');
                 } else {
-                    await processJsonResponse(finalTxt, clean, originPhoneId);
+                    await processJsonResponse(finalTxt, clean, originPhoneId, group);
                 }
             } else if (!bookingConfirmedDirectly && !assignmentMsgSent && !stopRequested) {
                 // Gemini se quedó mudo y no fue una reserva NI una derivación NI un
@@ -6711,7 +6836,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
 //   - withPhoneLock dentro de processAI serializa los turnos de un mismo número.
 const AI_DEBOUNCE_MS = 6000;        // espera tras el último mensaje del cliente
 const AI_DEBOUNCE_MAX_MS = 15000;   // tope total desde el primer mensaje del lote
-interface AIBufferEntry { texts: string[]; name: string; originPhoneId: string; timer: ReturnType<typeof setTimeout>; firstAt: number; }
+interface AIBufferEntry { texts: string[]; name: string; originPhoneId: string; timer: ReturnType<typeof setTimeout>; firstAt: number; group?: ChatGroup; }
 const aiInboundBuffer = new Map<string, AIBufferEntry>();
 
 function flushAIBuffer(phone: string): void {
@@ -6723,7 +6848,7 @@ function flushAIBuffer(phone: string): void {
     if (!combined) return;
     // No await (esto corre dentro de un setTimeout): capturamos el rechazo para
     // que un fallo de processAIInner no se convierta en unhandledRejection.
-    processAI(combined, phone, entry.name, entry.originPhoneId)
+    processAI(combined, phone, entry.name, entry.originPhoneId, undefined, entry.group)
         .catch(err => console.error('[Laura] Error procesando lote agrupado:', err));
 }
 
@@ -6732,13 +6857,14 @@ function enqueueForAI(
     text: string,
     name: string,
     originPhoneId: string,
-    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' },
+    group?: ChatGroup
 ): void {
     // Media: no se agrupa. Vaciamos el texto pendiente (si lo hay) y procesamos
     // el media de inmediato en su propio turno.
     if (inboundMedia) {
         flushAIBuffer(phone);
-        processAI(text, phone, name, originPhoneId, inboundMedia)
+        processAI(text, phone, name, originPhoneId, inboundMedia, group)
             .catch(err => console.error('[Laura] Error procesando media:', err));
         return;
     }
@@ -6748,6 +6874,7 @@ function enqueueForAI(
         existing.texts.push(text);
         existing.name = name;
         existing.originPhoneId = originPhoneId;
+        existing.group = group;
         clearTimeout(existing.timer);
         // Reiniciamos el contador, pero sin pasarnos del tope total del lote.
         const elapsed = now - existing.firstAt;
@@ -6755,7 +6882,7 @@ function enqueueForAI(
         existing.timer = setTimeout(() => flushAIBuffer(phone), wait);
     } else {
         const entry: AIBufferEntry = {
-            texts: [text], name, originPhoneId, firstAt: now,
+            texts: [text], name, originPhoneId, firstAt: now, group,
             timer: setTimeout(() => flushAIBuffer(phone), AI_DEBOUNCE_MS)
         };
         aiInboundBuffer.set(phone, entry);
@@ -9695,6 +9822,135 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
 });
 
 // ==========================================
+//  ENDPOINT SUBIDA ARCHIVOS A UN GRUPO
+// ==========================================
+// Sube un archivo (foto, vídeo, audio, documento) a un GRUPO: se sube UNA vez a
+// la WhatsApp Media API de la línea del grupo y ese mismo media_id se reparte a
+// todos los clientes. Guarda el registro canónico del hilo (con type + media_id)
+// y una copia 1-a-1 en cada cliente, igual que hace fanOutGroupMessage con texto.
+app.post('/api/groups/:id/upload', upload.single('file'), async (req: any, res: any) => {
+    try {
+        const group = CHAT_GROUPS.get(String(req.params.id || ''));
+        if (!group || !group.active) return res.status(404).json({ error: 'El grupo no existe o está archivado.' });
+        const file = req.file;
+        const senderName = String(req.body?.senderName || 'Equipo');
+        const token = getToken(group.lineId);
+        if (!file || !token) {
+            return res.status(400).json({ error: 'Faltan datos (archivo o token de la línea del grupo).' });
+        }
+
+        // Mismo pre-procesado que /api/upload: audio → OGG Opus (nota de voz),
+        // imagen → auto-rotar por EXIF.
+        let fileBuffer = file.buffer;
+        let fileMimeType = file.mimetype;
+        let fileName = file.originalname;
+
+        const isAudio = file.mimetype.startsWith('audio');
+        if (isAudio) {
+            try {
+                const converted = await convertAudioToOggOpus(file.buffer, file.mimetype);
+                fileBuffer = converted.buffer; fileMimeType = converted.mimeType; fileName = converted.filename;
+            } catch (convErr: any) {
+                console.error('⚠️ [Grupo Upload] Conversión de audio falló, usando original:', convErr.message);
+            }
+        }
+        const isImage = file.mimetype.startsWith('image');
+        if (isImage) {
+            try { fileBuffer = await sharp(file.buffer).rotate().toBuffer(); }
+            catch (sharpErr: any) { console.error('⚠️ [Grupo Upload] Corrección EXIF falló, usando original:', sharpErr.message); }
+        }
+
+        // Subir UNA vez a la Media API de la línea del grupo.
+        const formData = new FormData();
+        formData.append('file', fileBuffer, { filename: fileName, contentType: fileMimeType });
+        formData.append('messaging_product', 'whatsapp');
+        const uploadRes = await axios.post(`https://graph.facebook.com/v21.0/${group.lineId}/media`, formData, { headers: { 'Authorization': `Bearer ${token}`, ...formData.getHeaders() } });
+        const mediaId = uploadRes.data.id;
+        console.log(`✅ [Grupo Upload] Media subida a la línea ${group.lineId}, ID: ${mediaId}`);
+
+        // Mismo criterio de tipo que /api/upload (vídeo cae en 'document', igual
+        // que el chat normal, para no divergir de su comportamiento).
+        let msgType = 'document';
+        if (isImage) msgType = 'image';
+        else if (isAudio) msgType = 'audio';
+
+        let textLog = fileName;
+        if (msgType === 'image') textLog = '📷 [Imagen]';
+        else if (msgType === 'audio') textLog = '🎤 [Audio]';
+
+        const timestamp = new Date().toISOString();
+        const groupMsgId = crypto.randomUUID();
+
+        // 1. Registro canónico del hilo (con type + media_id) — el equipo lo ve sin prefijo.
+        await saveGroupThreadRecord({ groupId: group.id, text: textLog, sender: senderName, timestamp, groupMsgId, lineId: group.lineId, type: msgType, mediaId });
+        // 2. Eco inmediato al equipo con la media (el reparto puede tardar).
+        io.emit('group_message', { groupId: group.id, id: groupMsgId, text: textLog, sender: senderName, fromClient: false, timestamp, type: msgType, mediaId });
+        // 3. Reparto a los clientes (mismo media_id, con el prefijo del grupo como caption).
+        const results = await fanOutGroupMedia({ group, senderLabel: senderName, mediaId, msgType, textLog, filename: msgType === 'document' ? fileName : undefined, timestamp });
+        const names = await getContactNames(group.clientPhones);
+        io.emit('group_send_report', {
+            groupId: group.id,
+            groupMsgId,
+            results: results.map(r => ({ ...r, name: names.get(cleanNumber(r.phone)) || r.phone }))
+        });
+
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('❌ [Grupo Upload] Error:', e.response?.data || e.message || e);
+        res.status(500).json({ error: 'Error subiendo archivo al grupo', details: e.response?.data || e.message });
+    }
+});
+
+// ==========================================
+//  ENVÍO DE PLANTILLA APROBADA A UN GRUPO
+// ==========================================
+// Reparte una plantilla de WhatsApp aprobada a todos los clientes del grupo.
+// Es la vía para escribir a clientes fuera de la ventana de 24h. Reutiliza
+// sendTemplateMessage por cliente (envío + resolución de idioma + copia 1-a-1)
+// y guarda el registro canónico del hilo con el texto real (previewText) para
+// que el equipo lo vea en el grupo.
+app.post('/api/groups/:id/send-template', async (req, res) => {
+    try {
+        const group = CHAT_GROUPS.get(String(req.params.id || ''));
+        if (!group || !group.active) return res.status(404).json({ error: 'El grupo no existe o está archivado.' });
+        const { templateName, language, variables, previewText, senderName } = req.body || {};
+        if (!templateName) return res.status(400).json({ error: 'Falta templateName.' });
+        const token = getToken(group.lineId);
+        if (!token) return res.status(500).json({ error: 'La línea del grupo no tiene token configurado.' });
+
+        const sender = String(senderName || 'Equipo');
+        const vars: string[] = Array.isArray(variables) ? variables.map((v: any) => String(v)) : [];
+        const threadText = String(previewText || `[Plantilla] ${templateName}`);
+        const timestamp = new Date().toISOString();
+        const groupMsgId = crypto.randomUUID();
+
+        // 1. Registro canónico del hilo + eco al equipo (con el texto real de la plantilla).
+        await saveGroupThreadRecord({ groupId: group.id, text: threadText, sender, timestamp, groupMsgId, lineId: group.lineId, type: 'template' });
+        io.emit('group_message', { groupId: group.id, id: groupMsgId, text: threadText, sender, fromClient: false, timestamp, type: 'template' });
+
+        // 2. Reparto: la plantilla a cada cliente. sendTemplateMessage resuelve el
+        //    idioma real de la plantilla y guarda una copia en el chat 1-a-1.
+        const results: GroupDeliveryResult[] = [];
+        for (const phone of group.clientPhones.filter(Boolean)) {
+            const r = await sendTemplateMessage(phone, templateName, vars, group.lineId, language || undefined);
+            const ok = r === true;
+            results.push({ phone, ok, error: ok ? undefined : String(r) });
+        }
+        const names = await getContactNames(group.clientPhones);
+        io.emit('group_send_report', {
+            groupId: group.id,
+            groupMsgId,
+            results: results.map(x => ({ ...x, name: names.get(cleanNumber(x.phone)) || x.phone }))
+        });
+
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('❌ [Grupo send-template] Error:', e.response?.data || e.message || e);
+        res.status(500).json({ error: 'Error enviando la plantilla al grupo', details: e.response?.data || e.message });
+    }
+});
+
+// ==========================================
 //  ENDPOINT SUBIDA ARCHIVOS CHAT DE EQUIPO
 // ==========================================
 app.post('/api/team/upload', teamUpload.single('file'), async (req: any, res: any) => {
@@ -10075,14 +10331,36 @@ app.post('/webhook', async (req, res) => {
                 // 2. Si el grupo permite que los clientes se vean entre sí, se
                 //    reenvía al resto (nunca al que lo escribió). Sin await: la
                 //    respuesta 200 al webhook de Meta no debe esperar N envíos.
-                if (inboundGroup.clientsSeeEachOther && inboundGroup.clientPhones.length > 1 && inboundType === 'text') {
-                    fanOutGroupMessage({
-                        group: inboundGroup,
-                        senderLabel: senderName,
-                        text,
-                        timestamp: inboundTimestamp,
-                        excludePhone: from
-                    }).catch(e => console.error('[Grupos] Error reenviando mensaje entrante:', e?.message));
+                if (inboundGroup.clientsSeeEachOther && inboundGroup.clientPhones.length > 1) {
+                    // relayOnly: solo se ENVÍA por WhatsApp al resto de clientes; NO
+                    // se guarda copia 1-a-1 en sus chats. El mensaje del cliente ya
+                    // quedó registrado en el hilo del grupo (registro canónico). Guardar
+                    // la copia en el chat de otro cliente contaminaría su historial de
+                    // IA (Laura vería mensajes de otro cliente) y su detector de
+                    // "trabajador atendiendo" (bloquearía a Laura por error).
+                    if (inboundType === 'text') {
+                        fanOutGroupMessage({
+                            group: inboundGroup,
+                            senderLabel: senderName,
+                            text,
+                            timestamp: inboundTimestamp,
+                            excludePhone: from,
+                            relayOnly: true
+                        }).catch(e => console.error('[Grupos] Error reenviando mensaje entrante:', e?.message));
+                    } else if (inboundMediaId) {
+                        // La media que envía un cliente también se reparte al resto
+                        // (su media_id de entrada es válido para reenviar en la misma línea).
+                        fanOutGroupMedia({
+                            group: inboundGroup,
+                            senderLabel: senderName,
+                            mediaId: inboundMediaId,
+                            msgType: inboundType,
+                            textLog: text || '📎 Archivo',
+                            timestamp: inboundTimestamp,
+                            excludePhone: from,
+                            relayOnly: true
+                        }).catch(e => console.error('[Grupos] Error reenviando media entrante:', e?.message));
+                    }
                 }
                 console.log(`👥 [Grupos] Mensaje de ${from} espejado en el grupo "${inboundGroup.name}".`);
             }
@@ -10224,11 +10502,6 @@ app.post('/webhook', async (req, res) => {
 
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
-            } else if (inboundGroup) {
-                // 👥 EN UN GRUPO LAURA NO RESPONDE. La conversación es entre varias
-                // personas: una respuesta automática se enviaría a todo el grupo y
-                // además Laura no puede saber a quién de los presentes contesta.
-                console.log(`🔇 [Bot] ${from} está en el grupo "${inboundGroup.name}". Mensaje guardado y espejado, Laura no responde.`);
             } else if (contactAiMuted) {
                 console.log(`🔇 [Bot] Chat ${from} tiene ai_muted=true (silenciado por el equipo). Mensaje guardado, Laura no responde.`);
             } else if (isTodayBotBlocked()) {
@@ -10246,6 +10519,21 @@ app.post('/webhook', async (req, res) => {
                 // vuelva a escribir dentro del horario, Laura contestará con todo el
                 // contexto acumulado (los mensajes están en el historial reciente).
                 console.log(`🔇 [Bot] Ahora (${getMadridHHMM()} Madrid) está fuera del horario de respuesta (${botActiveHours?.start}-${botActiveHours?.end}). Mensaje de ${from} guardado pero Laura no responde.`);
+            } else if (inboundGroup) {
+                // 👥 GRUPO: Laura responde a los mensajes de CLIENTES (los de
+                // trabajadores llegan por socket, nunca por aquí, así que jamás la
+                // disparan). Su respuesta se reparte a TODO el grupo (ver
+                // deliverLauraMessage). Pero se calla si un trabajador está
+                // atendiendo: cada mensaje del equipo al grupo se guarda como
+                // saliente en el 1-a-1 de cada cliente, así que
+                // getMinutesSinceLastWorkerReply lo detecta igual que en 1-a-1.
+                const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
+                if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
+                    console.log(`🔕 [Bot][Grupo] "${inboundGroup.name}": un trabajador escribió hace ${idleMin}min. Laura no responde al mensaje de ${from}.`);
+                } else {
+                    console.log(`🤖 [Bot][Grupo] Laura responde en "${inboundGroup.name}" al cliente ${from} y lo reparte al grupo.`);
+                    enqueueForAI(from, text, name, originPhoneId, inboundMediaPkg, inboundGroup);
+                }
             } else if (assignedTo) {
                 const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
                 if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
@@ -10903,7 +11191,7 @@ io.on('connection', (socket) => {
         io.emit('group_send_report', {
             groupId: group.id,
             groupMsgId,
-            results: results.map(r => ({ ...r, name: names.get(r.phone) || r.phone }))
+            results: results.map(r => ({ ...r, name: names.get(cleanNumber(r.phone)) || r.phone }))
         });
     });
 
