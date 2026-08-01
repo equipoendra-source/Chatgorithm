@@ -115,6 +115,11 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     // true, el backend NO responde con la IA a los mensajes de este cliente.
     // Útil en Recambios donde el compañero atiende él mismo y no quiere el bot.
     const [aiMuted, setAiMuted] = useState<boolean>(!!contact.ai_muted);
+    // Alarma de atención humana pendiente. El botón "Atendido" de la cabecera
+    // la limpia a mano para los casos en que el agente atiende al cliente SIN
+    // escribirle por WhatsApp (le llama por teléfono, lo resuelve en persona…),
+    // que si no dejarían el chat clavado en la pestaña "Atención".
+    const [attentionPending, setAttentionPending] = useState<boolean>(!!contact.attention_pending);
     const [selectedImage, setSelectedImage] = useState<string | null>(null);
     const [agents, setAgents] = useState<Agent[]>([]);
 
@@ -234,6 +239,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         setContactTags(contact.tags || []);
         setOptInMarketing(!!(contact as any).optInMarketing);
         setAiMuted(!!contact.ai_muted);
+        setAttentionPending(!!contact.attention_pending);
 
         setMessages([]);
         setShowEmojiPicker(false);
@@ -938,6 +944,26 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                             {!assignedTo && <button onClick={() => handleAssign('me')} className="bg-green-600 text-white px-3 py-1.5 rounded-lg text-xs font-bold flex items-center gap-1 hover:bg-green-700 transition shadow-sm"><UserPlus className="w-3.5 h-3.5" /> Asignarme</button>}
                             <div className="flex items-center gap-2 bg-purple-50 px-2 rounded-md border border-purple-200"><Briefcase className="w-4 h-4 text-purple-600" /><select className="text-xs bg-transparent border-none rounded-md py-1.5 pr-6 text-purple-700 focus:ring-0 cursor-pointer font-bold uppercase tracking-wide" value={department} onChange={(e) => { setDepartment(e.target.value); updateCRM('department', e.target.value); }}><option value="">Sin Dpto</option>{config?.departments?.map(d => <option key={d} value={d}>{d}</option>)}{department && !config?.departments?.includes(department) && <option value={department}>{department} (antiguo)</option>}</select></div>
                             <div id="chat-status-select" className="flex items-center gap-2 bg-slate-50 px-2 rounded-md border border-slate-200"><CheckCircle className="w-4 h-4 text-slate-400" /><select className="text-xs bg-transparent border-none rounded-md py-1.5 pr-6 text-slate-600 focus:ring-0 cursor-pointer font-medium" value={status} onChange={(e) => { setStatus(e.target.value); updateCRM('status', e.target.value); }}>{config?.statuses?.map(s => <option key={s} value={s}>{s}</option>) || <option value="Nuevo">Nuevo</option>}</select></div>
+                            {/* 🚨 Botón "Atendido": solo aparece si este chat tiene una
+                                alarma de atención humana pendiente. Lo pulsa el agente
+                                cuando ya ha atendido al cliente SIN escribirle por WhatsApp
+                                (le ha llamado por teléfono, lo ha resuelto en persona…) y
+                                así el chat sale de la pestaña "Atención". Es compartido:
+                                al limpiarlo, desaparece para todo el equipo. Reutiliza
+                                update_contact_info (limpia los 4 campos attention_* de golpe). */}
+                            {attentionPending && (
+                                <button
+                                    onClick={() => {
+                                        setAttentionPending(false);
+                                        if (socket) socket.emit('update_contact_info', { phone: contact.phone, updates: { attention_pending: false, attention_reason: '', attention_snippet: '', attention_at: '' }, actorUsername: user.username });
+                                    }}
+                                    title="Marcar como atendido — saca este chat de la pestaña Atención (úsalo si ya has llamado o atendido al cliente sin escribirle por aquí)"
+                                    className="flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-bold border border-amber-300 bg-amber-50 text-amber-700 hover:bg-amber-100 transition"
+                                >
+                                    <CheckCircle className="w-3.5 h-3.5" />
+                                    <span className="hidden lg:inline">Atendido</span>
+                                </button>
+                            )}
                             {/* 🤖 Toggle Laura ON/OFF por chat. Si aiMuted=true, el
                                 backend no responde con la IA a este cliente. Persistente
                                 (se guarda en Airtable como ai_muted). */}
