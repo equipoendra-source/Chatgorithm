@@ -862,8 +862,8 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                 )}
                 <p className={`text-[10px] text-center mt-2 ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>
                     {isNative
-                        ? 'Grupo real de WhatsApp: un solo mensaje para todos. Laura no responde automáticamente aquí.'
-                        : 'Cada cliente lo recibe en su chat individual de WhatsApp. Laura responde a los clientes del grupo, salvo que un trabajador esté atendiendo.'}
+                        ? 'Grupo real de WhatsApp: un solo mensaje para todos. Laura no interviene en los grupos.'
+                        : 'Cada cliente lo recibe en su chat individual de WhatsApp. Laura no interviene en los grupos.'}
                 </p>
             </form>
         </div>

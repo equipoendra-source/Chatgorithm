@@ -6386,32 +6386,19 @@ function isDegenerateText(s: string): boolean {
     return DEGENERATE_MODEL_TEXTS.has((s || '').toLowerCase().trim());
 }
 
-// Entrega un mensaje de LAURA (IA) al cliente. En 1-a-1 (group undefined) va
-// solo al cliente que escribió — comportamiento original. En un grupo se
-// reparte a TODOS los clientes y se registra en el hilo, atribuido a "Laura".
+// Entrega un mensaje de LAURA (IA) al cliente, siempre en su chat 1-a-1.
+//
+// Laura NO interviene en ningún grupo (decisión del usuario, 2026-08-01): una
+// respuesta automática dentro de un grupo la leen varias personas a la vez y no
+// hay forma de saber a cuál de ellas contesta. El webhook ya corta antes de
+// encolar el mensaje; el parámetro `group` se mantiene como segundo bloqueo,
+// para que ningún camino futuro acabe publicando en un grupo sin querer.
 async function deliverLauraMessage(clean: string, msg: string, originPhoneId: string, group?: ChatGroup): Promise<void> {
-    if (!group) { await sendWhatsAppText(clean, msg, originPhoneId); return; }
-    // Defensa en profundidad: Laura no debe hablar en grupos NATIVOS (ver la
-    // limitación documentada en CLAUDE.md — no tiene el historial del hilo y se
-    // repetiría). Hoy el webhook ya corta antes, pero si en el futuro algún
-    // camino nuevo llegase hasta aquí, publicaría en un grupo real delante de
-    // varios clientes. Mejor cortarlo también en el punto de salida.
-    if (group.mode === 'native') {
-        console.warn(`🔇 [Bot] Se ha intentado que Laura responda en el grupo nativo "${group.name}". Bloqueado a propósito.`);
+    if (group) {
+        console.warn(`🔇 [Bot] Se ha intentado que Laura responda en el grupo "${group.name}". Bloqueado: Laura no interviene en grupos.`);
         return;
     }
-    const timestamp = new Date().toISOString();
-    const groupMsgId = crypto.randomUUID();
-    // Registro canónico del hilo + eco al equipo (el equipo lo ve como "Laura").
-    await saveGroupThreadRecord({ groupId: group.id, text: msg, sender: 'Laura', timestamp, groupMsgId, lineId: group.lineId });
-    io.emit('group_message', { groupId: group.id, id: groupMsgId, text: msg, sender: 'Laura', fromClient: false, timestamp });
-    // Reparto a todos los clientes (incluido el que preguntó) con el prefijo del
-    // grupo. La copia 1-a-1 se guarda como "Bot IA" (savedSender, para que Laura
-    // no se cuente como "trabajador atendiendo") y SOLO en el chat del cliente que
-    // preguntó (savePhone=clean): así su respuesta no entra en el historial de IA
-    // de los demás clientes del grupo (evita mezclar contexto entre clientes).
-    // Los demás la reciben igualmente por WhatsApp, solo que no se persiste su copia.
-    await fanOutGroupMessage({ group, senderLabel: 'Laura', text: msg, timestamp, savedSender: 'Bot IA', savePhone: clean });
+    await sendWhatsAppText(clean, msg, originPhoneId);
 }
 
 async function processJsonResponse(jsonText: string, phone: string, originId: string, group?: ChatGroup) {
@@ -11233,20 +11220,13 @@ app.post('/webhook', async (req, res) => {
                 // contexto acumulado (los mensajes están en el historial reciente).
                 console.log(`🔇 [Bot] Ahora (${getMadridHHMM()} Madrid) está fuera del horario de respuesta (${botActiveHours?.start}-${botActiveHours?.end}). Mensaje de ${from} guardado pero Laura no responde.`);
             } else if (inboundGroup) {
-                // 👥 GRUPO: Laura responde a los mensajes de CLIENTES (los de
-                // trabajadores llegan por socket, nunca por aquí, así que jamás la
-                // disparan). Su respuesta se reparte a TODO el grupo (ver
-                // deliverLauraMessage). Pero se calla si un trabajador está
-                // atendiendo: cada mensaje del equipo al grupo se guarda como
-                // saliente en el 1-a-1 de cada cliente, así que
-                // getMinutesSinceLastWorkerReply lo detecta igual que en 1-a-1.
-                const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
-                if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
-                    console.log(`🔕 [Bot][Grupo] "${inboundGroup.name}": un trabajador escribió hace ${idleMin}min. Laura no responde al mensaje de ${from}.`);
-                } else {
-                    console.log(`🤖 [Bot][Grupo] Laura responde en "${inboundGroup.name}" al cliente ${from} y lo reparte al grupo.`);
-                    enqueueForAI(from, text, name, originPhoneId, inboundMediaPkg, inboundGroup);
-                }
+                // 👥 GRUPO: Laura NO interviene en ningún grupo, sea del tipo que
+                // sea (decisión del usuario, 2026-08-01). Una respuesta automática
+                // dentro de un grupo la leen varias personas a la vez y no hay
+                // forma de saber a cuál de ellas contesta.
+                // El mensaje queda guardado en el hilo y el equipo recibe su aviso;
+                // simplemente no se encola para la IA.
+                console.log(`🔇 [Bot][Grupo] Mensaje de ${from} en "${inboundGroup.name}": Laura no interviene en grupos.`);
             } else if (assignedTo) {
                 const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
                 if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {

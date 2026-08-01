@@ -215,8 +215,8 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
                         {isNative && !isEditing && (
                             <div className={`mt-2 p-2.5 rounded-lg text-[11px] leading-snug border ${isDark ? 'bg-amber-900/20 border-amber-800 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
                                 Al crearlo se abre un grupo real en WhatsApp y habrá que <strong>enviar la invitación</strong> a
-                                cada cliente: no entran solos. Además, dentro del grupo <strong>se verán entre ellos</strong> y
-                                Laura no responderá automáticamente.
+                                cada cliente: no entran solos. Además, dentro del grupo <strong>se verán entre ellos</strong>.
+                                Requiere cuenta verificada (OBA) de WhatsApp.
                             </div>
                         )}
                     </div>

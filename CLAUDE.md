@@ -250,11 +250,28 @@ cómo se guarda el `recipient`, revisa esto primero.
 - **`/invite` no tiene fallback a plantilla**: a un cliente fuera de la ventana de 24h no se le puede
   invitar por WhatsApp (la UI lo avisa antes de pulsar).
 
-### LIMITACIÓN CONOCIDA — Laura no responde en grupos nativos
-Su historial se construye leyendo `Messages` por `sender`/`recipient` = teléfono (chat 1-a-1). En un
-grupo nativo NO existe ese chat: los mensajes del hilo tienen `recipient=''`. Laura vería los
-mensajes del cliente pero **no sus propias respuestas** → se repetiría. Para habilitarla habría que
-darle un historial basado en `group_id`. Decisión consciente, no un olvido.
+### 🔇 Laura NO interviene en NINGÚN grupo (decisión del usuario, 2026-08-01)
+Ni en nativos ni en fanout. Antes sí respondía en los fanout; se desactivó a petición del usuario:
+una respuesta automática dentro de un grupo la leen varias personas a la vez y no hay forma de saber
+a cuál contesta.
+
+Doble bloqueo, a propósito:
+1. **Webhook** (rama `else if (inboundGroup)`): no se encola para la IA, solo se registra en el hilo.
+2. **`deliverLauraMessage`**: si recibe un `group`, avisa por log y no envía.
+
+El parámetro `group` sigue recorriendo el pipeline de IA (`enqueueForAI` → `processAI` →
+`processJsonResponse`) aunque ya nunca se rellene: es el segundo bloqueo. Si algún día se quisiera
+reactivar en fanout, basta con restaurar el `enqueueForAI` del webhook y quitar el guard de
+`deliverLauraMessage` — pero ojo, en NATIVO además faltaría el historial (se construye por
+`sender`/`recipient` = teléfono, y en un grupo nativo no existe ese chat 1-a-1, así que Laura no
+vería sus propias respuestas y se repetiría).
+
+### ⛔ ESTADO REAL: la cuenta NO es OBA — los grupos nativos NO se pueden usar
+Comprobado el 2026-08-01 contra la API de Meta: `is_official_business_account: false` para el número
++34 607 67 54 16 ("SYA motor"). **La Groups API rechazará cualquier intento de crear un grupo real.**
+El código nativo queda dormido (ningún grupo tiene `Mode=native`) y los grupos fanout siguen
+funcionando con normalidad. Para activarlo habría que conseguir el OBA de Meta (exige notoriedad de
+marca; no es un trámite garantizado).
 
 ### Verificado
 Backend `tsc` y frontend `npm run build` limpios. **Sin probar contra la API real de Meta** (requiere
