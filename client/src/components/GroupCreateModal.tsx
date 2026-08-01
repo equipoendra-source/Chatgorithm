@@ -3,8 +3,11 @@ import { X, Users, Search, Check, Loader2, AlertTriangle, Trash2, Smartphone } f
 import { useTheme } from '../context/ThemeContext';
 import { API_URL } from '../config/api';
 import { normalizeForSearch } from '../utils/searchNormalize';
-import type { ChatGroup } from './GroupChatWindow';
+import type { ChatGroup, GroupMode } from './GroupChatWindow';
 import type { Contact } from './Sidebar';
+
+// Límite que impone Meta a los grupos reales (clientes + trabajadores juntos).
+const NATIVE_MAX_PARTICIPANTS = 8;
 
 interface GroupCreateModalProps {
     socket: any;
@@ -46,6 +49,14 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
     const [selectedAgents, setSelectedAgents] = useState<string[]>(editing?.agentNames || [currentUser]);
     const [lineId, setLineId] = useState(editing?.lineId || '');
     const [clientsSeeEachOther, setClientsSeeEachOther] = useState(editing?.clientsSeeEachOther || false);
+    // El modo NO se puede cambiar al editar (un grupo nativo tiene un grupo real
+    // en WhatsApp con gente dentro; convertirlo dejaría el estado inconsistente).
+    const [mode, setMode] = useState<GroupMode>(editing?.mode || 'fanout');
+    const isEditing = !!editing;
+    const isNative = mode === 'native';
+    // Los trabajadores no ocupan plaza en el grupo real: todos hablan desde el
+    // único número de empresa, que sí cuenta como un participante más.
+    const totalParticipants = selectedPhones.length + 1;
 
     const [accounts, setAccounts] = useState<{ id: string; name: string }[]>([]);
     const [clientQuery, setClientQuery] = useState('');
@@ -82,6 +93,9 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
         if (selectedPhones.length === 0) return setError('Selecciona al menos un cliente.');
         if (selectedAgents.length === 0) return setError('Selecciona al menos un trabajador.');
         if (!lineId) return setError('Selecciona la línea de WhatsApp del grupo.');
+        if (isNative && totalParticipants > NATIVE_MAX_PARTICIPANTS) {
+            return setError(`Un grupo real de WhatsApp admite como máximo ${NATIVE_MAX_PARTICIPANTS} participantes: ${selectedPhones.length} clientes más el número de la empresa suman ${totalParticipants}.`);
+        }
 
         setSaving(true);
         try {
@@ -95,7 +109,9 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
                     agentNames: selectedAgents,
                     lineId,
                     clientsSeeEachOther,
-                    createdBy: currentUser
+                    createdBy: currentUser,
+                    // Solo se manda al crear: al editar el backend conserva el modo.
+                    ...(isEditing ? {} : { mode })
                 })
             });
             const data = await res.json();
@@ -113,7 +129,12 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
 
     const handleArchive = async () => {
         if (!editing) return;
-        if (!window.confirm(`¿Archivar el grupo "${editing.name}"?\n\nLos mensajes ya enviados NO se borran y los chats individuales de cada cliente quedan intactos.`)) return;
+        // En nativo el archivado BORRA el grupo real de WhatsApp: hay que avisar
+        // claramente, porque desaparece del móvil de todos los participantes.
+        const warning = editing.mode === 'native'
+            ? `¿Archivar el grupo "${editing.name}"?\n\n⚠️ Se BORRARÁ también el grupo real de WhatsApp: desaparecerá del móvil de todos los participantes.\n\nEl historial de la app se conserva.`
+            : `¿Archivar el grupo "${editing.name}"?\n\nLos mensajes ya enviados NO se borran y los chats individuales de cada cliente quedan intactos.`;
+        if (!window.confirm(warning)) return;
         setSaving(true);
         try {
             const res = await fetch(`${API_URL}/groups/${editing.id}`, { method: 'DELETE' });
@@ -122,6 +143,8 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
                 setError(d?.error || 'No se pudo archivar el grupo.');
                 return;
             }
+            const d = await res.json().catch(() => ({}));
+            if (d?.warning) alert(d.warning);
             onSaved(null);
         } catch {
             setError('Error de conexión al archivar el grupo.');
@@ -156,10 +179,57 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
 
                 {/* Cuerpo */}
                 <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                    {/* Tipo de grupo — solo al crear: cambiarlo después dejaría el
+                        grupo real de WhatsApp descolgado de su registro en la app. */}
+                    <div>
+                        <label className={labelCls}>Tipo de grupo</label>
+                        {isEditing ? (
+                            <div className={`px-3 py-2 rounded-xl text-sm border ${isDark ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-600'}`}>
+                                {isNative ? '🟢 Grupo real de WhatsApp' : '📨 Clásico (mensajes individuales)'}
+                                <span className={`block text-[10px] mt-0.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                    El tipo no se puede cambiar después de crear el grupo.
+                                </span>
+                            </div>
+                        ) : (
+                            <div className="grid grid-cols-2 gap-2">
+                                <button type="button" onClick={() => setMode('fanout')}
+                                    className={`p-3 rounded-xl border text-left transition ${!isNative
+                                        ? (isDark ? 'bg-indigo-900/40 border-indigo-600 text-indigo-200' : 'bg-indigo-50 border-indigo-400 text-indigo-800')
+                                        : (isDark ? 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-600' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300')}`}>
+                                    <span className="block text-sm font-bold">📨 Clásico</span>
+                                    <span className="block text-[10px] mt-1 leading-snug opacity-80">
+                                        Cada cliente lo recibe en su chat normal. Entra solo, sin hacer nada. Sin límite de gente.
+                                    </span>
+                                </button>
+                                <button type="button" onClick={() => setMode('native')}
+                                    className={`p-3 rounded-xl border text-left transition ${isNative
+                                        ? (isDark ? 'bg-emerald-900/40 border-emerald-600 text-emerald-200' : 'bg-emerald-50 border-emerald-400 text-emerald-800')
+                                        : (isDark ? 'bg-slate-800 border-slate-700 text-slate-400 hover:border-slate-600' : 'bg-white border-slate-200 text-slate-600 hover:border-slate-300')}`}>
+                                    <span className="block text-sm font-bold">🟢 Grupo real</span>
+                                    <span className="block text-[10px] mt-1 leading-snug opacity-80">
+                                        Grupo de WhatsApp de verdad. El cliente debe aceptar una invitación. Máx. {NATIVE_MAX_PARTICIPANTS}.
+                                    </span>
+                                </button>
+                            </div>
+                        )}
+                        {isNative && !isEditing && (
+                            <div className={`mt-2 p-2.5 rounded-lg text-[11px] leading-snug border ${isDark ? 'bg-amber-900/20 border-amber-800 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                                Al crearlo se abre un grupo real en WhatsApp y habrá que <strong>enviar la invitación</strong> a
+                                cada cliente: no entran solos. Además, dentro del grupo <strong>se verán entre ellos</strong> y
+                                Laura no responderá automáticamente.
+                            </div>
+                        )}
+                    </div>
+
                     <div>
                         <label className={labelCls}>Nombre del grupo</label>
                         <input value={name} onChange={e => setName(e.target.value)} className={inputCls}
                             placeholder="Ej: Presupuesto Golf GTI" autoFocus />
+                        {isNative && (
+                            <p className={`text-[10px] mt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                Este nombre lo verán los clientes como título del grupo en su WhatsApp.
+                            </p>
+                        )}
                     </div>
 
                     <div>
@@ -176,6 +246,17 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
                             varios chats distintos en su móvil.
                         </p>
                     </div>
+
+                    {/* Contador de participantes — solo importa en nativo, donde
+                        Meta impone un tope duro de 8. */}
+                    {isNative && (
+                        <div className={`flex items-center justify-between px-3 py-2 rounded-xl border text-xs ${totalParticipants > NATIVE_MAX_PARTICIPANTS
+                            ? 'bg-red-50 border-red-300 text-red-700'
+                            : (isDark ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-50 border-slate-200 text-slate-600')}`}>
+                            <span>Participantes ({selectedPhones.length} clientes + el número de la empresa)</span>
+                            <span className="font-bold">{totalParticipants} / {NATIVE_MAX_PARTICIPANTS}</span>
+                        </div>
+                    )}
 
                     {/* Trabajadores */}
                     <div>
@@ -228,7 +309,16 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
                         </div>
                     </div>
 
-                    {/* Privacidad */}
+                    {/* Privacidad — en un grupo REAL de WhatsApp los participantes
+                        se ven entre sí obligatoriamente, así que el interruptor no
+                        aplica: se sustituye por un aviso. */}
+                    {isNative ? (
+                        <div className={`p-3 rounded-xl border text-[11px] leading-snug ${isDark ? 'bg-amber-900/20 border-amber-800 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                            <strong>Privacidad:</strong> en un grupo real de WhatsApp todos los participantes se ven entre sí
+                            y pueden ver sus números. Si vas a juntar a clientes que no se conocen, asegúrate de tener su
+                            consentimiento (RGPD).
+                        </div>
+                    ) : (
                     <button type="button" onClick={() => setClientsSeeEachOther(v => !v)}
                         className={`w-full flex items-start gap-3 p-3 rounded-xl border text-left transition ${clientsSeeEachOther
                             ? (isDark ? 'bg-amber-900/20 border-amber-700' : 'bg-amber-50 border-amber-300')
@@ -247,6 +337,7 @@ export function GroupCreateModal({ socket, currentUser, editing, onClose, onSave
                             </span>
                         </span>
                     </button>
+                    )}
 
                     {error && (
                         <div className="flex items-start gap-2 p-3 rounded-xl bg-red-50 border border-red-200 text-red-700 text-xs">

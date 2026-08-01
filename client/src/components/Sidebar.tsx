@@ -869,9 +869,16 @@ export function Sidebar({
                                                 <Users className="w-4 h-4" />
                                             </span>
                                             <span className="flex-1 min-w-0 text-left">
-                                                <span className="block text-sm truncate">{g.name}</span>
+                                                <span className="flex items-center gap-1.5">
+                                                    <span className="text-sm truncate">{g.name}</span>
+                                                    {g.mode === 'native' && (
+                                                        <span className={`flex-shrink-0 px-1 py-0.5 rounded text-[8px] font-bold uppercase ${isDark ? 'bg-emerald-900/60 text-emerald-300' : 'bg-emerald-100 text-emerald-700'}`}
+                                                            title="Grupo real de WhatsApp">WA</span>
+                                                    )}
+                                                </span>
                                                 <span className={`block text-[10px] truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                                                     {g.clientPhones.length + g.agentNames.length} participantes · {g.lineName}
+                                                    {g.mode === 'native' && (g.pendingPhones?.length || 0) > 0 && ` · ${g.pendingPhones!.length} sin aceptar`}
                                                 </span>
                                             </span>
                                             {unread > 0 && (

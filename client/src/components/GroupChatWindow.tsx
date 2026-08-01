@@ -1,8 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
     Send, Users, MessageSquare, Smile, AlertTriangle, Settings2, Clock,
     Paperclip, X, Mic, Square, FileText, Download, Play, Pause, Volume2,
-    Camera, Search, FileDown, Loader2, ChevronUp, ChevronDown, Zap, LayoutTemplate
+    Camera, Search, FileDown, Loader2, ChevronUp, ChevronDown, Zap, LayoutTemplate,
+    UserPlus, Link2
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { useTheme } from '../context/ThemeContext';
@@ -10,9 +11,13 @@ import { API_URL } from '../config/api';
 import { exportChatToPdf } from '../services/chatPdfExport';
 import ChatTemplateSelector from './ChatTemplateSelector';
 
-// Un "grupo" no es un grupo nativo de WhatsApp (la API oficial no los soporta):
-// el equipo ve un hilo único y el servidor reparte cada mensaje al chat 1-a-1 de
-// cada cliente. Ver GroupCreateModal.tsx para la creación.
+// Hay dos tipos de grupo (ver GroupCreateModal.tsx):
+//  · 'fanout'  — clásico. No existe grupo en WhatsApp: el equipo ve un hilo
+//    único y el servidor reparte cada mensaje al chat 1-a-1 de cada cliente.
+//  · 'native'  — grupo REAL de WhatsApp (Groups API de Meta). El cliente entra
+//    por invitación y ve a los demás participantes.
+export type GroupMode = 'fanout' | 'native';
+
 export interface ChatGroup {
     id: string;
     name: string;
@@ -24,6 +29,12 @@ export interface ChatGroup {
     createdBy?: string;
     createdAt?: string;
     active: boolean;
+    // Solo con sentido en modo nativo
+    mode?: GroupMode;
+    waGroupId?: string;
+    inviteLink?: string;
+    joinedPhones?: string[];   // clientes que ya aceptaron la invitación
+    pendingPhones?: string[];  // invitados que todavía no han entrado
 }
 
 interface GroupMessage {
@@ -180,10 +191,15 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
         return () => { socket.off('quick_replies_list', handler); };
     }, [socket]);
 
+    const isNative = group.mode === 'native';
+
     // ── Estado de la ventana de 24h de cada cliente ────────────────────────
     // Se consulta al abrir el grupo: avisa ANTES de escribir a quién no le va a
     // llegar el mensaje (WhatsApp solo permite texto libre 24h después de que el
     // cliente escriba).
+    // En nativo los MENSAJES van al grupo y no les afecta la ventana... pero la
+    // INVITACIÓN sí es un mensaje privado, así que se sigue consultando para
+    // poder avisar de a quién no se le podrá invitar.
     const clientMsgCount = messages.filter(m => m.fromClient).length;
     useEffect(() => {
         let cancelled = false;
@@ -192,7 +208,70 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
             .then(d => { if (!cancelled && Array.isArray(d?.clients)) setClientStatus(d.clients); })
             .catch(() => { /* el aviso es informativo: si falla, no bloquea el chat */ });
         return () => { cancelled = true; };
-    }, [group.id, clientMsgCount]);
+    }, [group.id, clientMsgCount, isNative]);
+
+    // ── Participantes de un grupo nativo (quién aceptó la invitación) ──────
+    // Se sincroniza con Meta al abrir el grupo: es la única forma de saber quién
+    // está realmente dentro, porque entrar depende del cliente, no de nosotros.
+    const [participants, setParticipants] = useState<{ phone: string; name: string; joined: boolean }[]>([]);
+    const [invitingAll, setInvitingAll] = useState(false);
+    const [inviteFeedback, setInviteFeedback] = useState<string | null>(null);
+
+    const refreshParticipants = useCallback(() => {
+        if (!isNative) return;
+        fetch(`${API_URL}/groups/${group.id}/participants`)
+            .then(r => r.json())
+            .then(d => { if (Array.isArray(d?.participants)) setParticipants(d.participants); })
+            .catch(() => { /* informativo */ });
+        // Se recarga también cuando cambia la lista de clientes del grupo (al
+        // editarlo), no solo al cambiar de grupo: si no, un cliente recién
+        // añadido se quedaría pintado como si ya hubiera aceptado.
+    }, [group.id, isNative, group.clientPhones.join(',')]);
+
+    // Al abrir el grupo (o si cambian sus miembros) siempre se sincroniza.
+    useEffect(() => { refreshParticipants(); }, [refreshParticipants]);
+
+    // Y con cada mensaje entrante SOLO mientras quede gente por aceptar: cada
+    // refresco es una llamada a la Groups API de Meta, y una vez han entrado
+    // todos no hay nada nuevo que mirar.
+    const someoneStillPending = participants.length === 0 || participants.some(p => !p.joined);
+    useEffect(() => {
+        if (someoneStillPending) refreshParticipants();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [clientMsgCount]);
+
+    // Quién falta por aceptar. Si la llamada a /participants falla o aún no ha
+    // respondido (p. ej. la cuenta no es OBA y devuelve 400), NO damos por hecho
+    // que todos han entrado: se usa `pendingPhones`, que ya calcula el servidor.
+    const pending = participants.length > 0
+        ? participants.filter(p => !p.joined)
+        : (group.pendingPhones || []).map(phone => ({ phone, name: phone, joined: false }));
+
+    // Reenvía el enlace de invitación a los que aún no han entrado.
+    const sendInvites = async () => {
+        setInvitingAll(true);
+        setInviteFeedback(null);
+        try {
+            const res = await fetch(`${API_URL}/groups/${group.id}/invite`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ invitedBy: user.username })
+            });
+            const d = await res.json();
+            if (!res.ok) { setInviteFeedback(d?.error || 'No se pudieron enviar las invitaciones.'); return; }
+            const results: DeliveryResult[] = d.results || [];
+            const failed = results.filter(r => !r.ok);
+            setInviteFeedback(
+                failed.length === 0
+                    ? `Invitación enviada a ${results.length} cliente${results.length === 1 ? '' : 's'}.`
+                    : `No se pudo invitar a ${failed.map(f => f.name || f.phone).join(', ')}${failed.some(f => f.code === 131047) ? ' (llevan más de 24h sin escribir)' : ''}.`
+            );
+        } catch {
+            setInviteFeedback('Error de conexión al enviar las invitaciones.');
+        } finally {
+            setInvitingAll(false);
+        }
+    };
 
     // Autoscroll al final salvo cuando estamos navegando resultados de búsqueda.
     useEffect(() => {
@@ -434,9 +513,18 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                         <Users size={24} />
                     </div>
                     <div className="flex-1 min-w-0">
-                        <h2 className={`font-bold text-xl truncate ${isDark ? 'text-white' : 'text-slate-800'}`}>{group.name}</h2>
+                        <h2 className={`font-bold text-xl truncate flex items-center gap-2 ${isDark ? 'text-white' : 'text-slate-800'}`}>
+                            <span className="truncate">{group.name}</span>
+                            {isNative && (
+                                <span className={`flex-shrink-0 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wide ${isDark ? 'bg-emerald-900/60 text-emerald-300' : 'bg-emerald-100 text-emerald-700'}`}
+                                    title="Grupo real de WhatsApp">
+                                    Grupo WhatsApp
+                                </span>
+                            )}
+                        </h2>
                         <p className={`text-xs font-medium ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                            {group.clientPhones.length} cliente{group.clientPhones.length === 1 ? '' : 's'} ·{' '}
+                            {group.clientPhones.length} cliente{group.clientPhones.length === 1 ? '' : 's'}
+                            {isNative && participants.length > 0 && ` (${participants.filter(p => p.joined).length} dentro)`} ·{' '}
                             {group.agentNames.length} trabajador{group.agentNames.length === 1 ? '' : 'es'} · Línea: {group.lineName}
                         </p>
                     </div>
@@ -509,14 +597,22 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                             <p className={`font-bold uppercase mb-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Clientes</p>
                             <div className="flex flex-wrap gap-1.5">
                                 {group.clientPhones.map(phone => {
+                                    // En nativo importa si ha ACEPTADO la invitación;
+                                    // en fanout, si está dentro de la ventana de 24h.
+                                    const part = participants.find(p => p.phone === phone);
                                     const st = clientStatus.find(c => c.phone === phone);
+                                    // Sin dato de participante se asume NO aceptado:
+                                    // es el lado seguro (mejor avisar de más que dar
+                                    // por entregado algo que no ha llegado).
+                                    const warn = isNative ? !part?.joined : !!(st && !st.inWindow);
                                     return (
                                         <span key={phone}
-                                            className={`px-2 py-1 rounded-full border flex items-center gap-1 ${st && !st.inWindow
+                                            className={`px-2 py-1 rounded-full border flex items-center gap-1 ${warn
                                                 ? (isDark ? 'bg-amber-900/30 border-amber-700 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-700')
                                                 : (isDark ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-white border-slate-200 text-slate-600')}`}>
-                                            {st && !st.inWindow && <Clock size={11} />}
-                                            {st?.name || phone}
+                                            {warn && (isNative ? <UserPlus size={11} /> : <Clock size={11} />)}
+                                            {part?.name || st?.name || phone}
+                                            {isNative && warn && <span className="opacity-70">· sin aceptar</span>}
                                         </span>
                                     );
                                 })}
@@ -531,10 +627,23 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                             </div>
                         </div>
                         <p className={`pt-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                            {group.clientsSeeEachOther
-                                ? '👁️ Los clientes SÍ ven los mensajes de los demás clientes.'
-                                : '🔒 Los clientes NO se ven entre sí: cada uno solo recibe los mensajes del equipo.'}
+                            {isNative
+                                ? '🟢 Grupo real de WhatsApp: todos los participantes se ven entre sí.'
+                                : group.clientsSeeEachOther
+                                    ? '👁️ Los clientes SÍ ven los mensajes de los demás clientes.'
+                                    : '🔒 Los clientes NO se ven entre sí: cada uno solo recibe los mensajes del equipo.'}
                         </p>
+                        {isNative && group.inviteLink && (
+                            <div className={`pt-1 flex items-center gap-2 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                <Link2 size={12} className="flex-shrink-0" />
+                                <a href={group.inviteLink} target="_blank" rel="noreferrer" className="underline truncate">{group.inviteLink}</a>
+                                <button type="button"
+                                    onClick={() => navigator.clipboard?.writeText(group.inviteLink || '')}
+                                    className={`px-1.5 py-0.5 rounded text-[10px] flex-shrink-0 ${isDark ? 'bg-slate-700 hover:bg-slate-600' : 'bg-slate-200 hover:bg-slate-300'}`}>
+                                    Copiar
+                                </button>
+                            </div>
+                        )}
                     </div>
                 )}
             </div>
@@ -545,13 +654,41 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                     <AlertTriangle size={14} className="flex-shrink-0" /> {setupError}
                 </div>
             )}
-            {outOfWindow.length > 0 && (
+            {!isNative && outOfWindow.length > 0 && (
                 <div className={`px-4 py-2 border-b text-xs flex items-start gap-2 ${isDark ? 'bg-amber-900/20 border-amber-800 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
                     <Clock size={14} className="flex-shrink-0 mt-0.5" />
                     <span>
                         <strong>{outOfWindow.map(c => c.name).join(', ')}</strong> lleva{outOfWindow.length === 1 ? '' : 'n'} más de 24h sin escribir:
                         WhatsApp no permite enviarle{outOfWindow.length === 1 ? '' : 's'} texto libre. Habría que llamarle{outOfWindow.length === 1 ? '' : 's'} o usar una plantilla aprobada.
                     </span>
+                </div>
+            )}
+            {/* Invitaciones pendientes — en un grupo real el cliente NO entra solo:
+                mientras no acepte, no recibe nada de lo que se escriba aquí. */}
+            {isNative && pending.length > 0 && (
+                <div className={`px-4 py-2 border-b text-xs flex items-start gap-2 ${isDark ? 'bg-amber-900/20 border-amber-800 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
+                    <UserPlus size={14} className="flex-shrink-0 mt-0.5" />
+                    <span className="flex-1">
+                        <strong>{pending.map(p => p.name).join(', ')}</strong> todavía no ha{pending.length === 1 ? '' : 'n'} aceptado
+                        la invitación, así que no recibirá{pending.length === 1 ? '' : 'n'} lo que escribas aquí.
+                        {/* La invitación se manda por el chat privado, así que le
+                            afecta la ventana de 24h aunque el grupo no dependa de ella. */}
+                        {(() => {
+                            const unreachable = pending.filter(p => clientStatus.some(c => c.phone === p.phone && !c.inWindow));
+                            return unreachable.length > 0 ? (
+                                <span className="block mt-0.5">
+                                    ⚠️ A {unreachable.map(u => u.name).join(', ')} no se le puede enviar la invitación ahora
+                                    (más de 24h sin escribir). Habría que llamarle o pasarle el enlace por otra vía.
+                                </span>
+                            ) : null;
+                        })()}
+                        {inviteFeedback && <span className="block mt-0.5 opacity-80">{inviteFeedback}</span>}
+                    </span>
+                    <button type="button" onClick={sendInvites} disabled={invitingAll}
+                        className={`flex-shrink-0 px-2 py-1 rounded-lg font-bold flex items-center gap-1 disabled:opacity-50 ${isDark ? 'bg-amber-800/60 hover:bg-amber-800 text-amber-100' : 'bg-amber-200 hover:bg-amber-300 text-amber-900'}`}>
+                        {invitingAll ? <Loader2 size={12} className="animate-spin" /> : <Send size={12} />}
+                        {invitingAll ? 'Enviando...' : 'Enviar invitación'}
+                    </button>
                 </div>
             )}
 
@@ -562,8 +699,9 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                         <MessageSquare size={48} className="opacity-40" />
                         <p className="font-medium">Aún no hay mensajes en este grupo.</p>
                         <p className="text-xs max-w-sm">
-                            Lo que escribas aquí le llegará a cada cliente en su chat de WhatsApp habitual,
-                            precedido de <span className="font-mono">[{group.name}]</span>.
+                            {isNative
+                                ? <>Esto es un grupo real de WhatsApp. Lo que escribas aquí lo verán todos los participantes que hayan aceptado la invitación.</>
+                                : <>Lo que escribas aquí le llegará a cada cliente en su chat de WhatsApp habitual, precedido de <span className="font-mono">[{group.name}]</span>.</>}
                         </p>
                     </div>
                 )}
@@ -723,7 +861,9 @@ export function GroupChatWindow({ socket, user, group, onEdit }: GroupChatWindow
                     </div>
                 )}
                 <p className={`text-[10px] text-center mt-2 ${isDark ? 'text-slate-600' : 'text-slate-400'}`}>
-                    Cada cliente lo recibe en su chat individual de WhatsApp. Laura responde a los clientes del grupo, salvo que un trabajador esté atendiendo.
+                    {isNative
+                        ? 'Grupo real de WhatsApp: un solo mensaje para todos. Laura no responde automáticamente aquí.'
+                        : 'Cada cliente lo recibe en su chat individual de WhatsApp. Laura responde a los clientes del grupo, salvo que un trabajador esté atendiendo.'}
                 </p>
             </form>
         </div>

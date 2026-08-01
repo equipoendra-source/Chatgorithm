@@ -172,16 +172,110 @@ Nuevo campo `TallerConfig.reservedIncidentHoursPerDay` (horas/día reservadas pa
 
 ---
 
+## Sesión 2026-08-01 — Grupos REALES de WhatsApp (Groups API nativa)
+
+### Qué cambió
+⚠️ **Meta SÍ tiene Groups API desde 2026** (docs act. 16-jun-2026). La nota de la sesión anterior
+("la API oficial no soporta grupos") ya NO es cierta. Ahora conviven **dos modos**:
+
+| | `fanout` (anterior) | `native` (nuevo) |
+|---|---|---|
+| Envío | N llamadas, una por cliente | 1 llamada a `recipient_type:'group'` |
+| Prefijo | `*[Grupo] Quien:*` | `*Quien:*` (el grupo ya es el contexto) |
+| Entrar | Automático | **Enlace de invitación, lo acepta el cliente** |
+| Máx. | Sin límite | **8 participantes** |
+| Reenvío entre clientes | Lo hacemos nosotros | Lo hace WhatsApp |
+| Laura | Responde | **NO responde** (ver limitación abajo) |
+
+**Requisito bloqueante: Official Business Account (OBA).** Sin OBA la Groups API devuelve 403.
+Comprobarlo con `curl "$API/$WHATSAPP_PHONE_ID?fields=is_official_business_account" -H "Authorization: Bearer $WHATSAPP_TOKEN"`.
+
+### Principio de diseño: ADITIVO
+`Mode` vacío = `fanout`. Los grupos anteriores no tienen el campo → **comportamiento idéntico**.
+Todo el código nativo cuelga de `mode === 'native'`, así que está **dormido** hasta que se cree
+un grupo nativo a propósito. Las ramas son `if (native) {...} else { código de antes intacto }`.
+
+### Backend (`server/src/index.ts`)
+- `GroupMode`, campos nuevos en `ChatGroup`: `mode`, `waGroupId`, `inviteLink`, `joinedPhones`.
+- `GROUP_BY_WA_ID` (waGroupId → groupId) + `getGroupByWaId()`. **`GROUP_BY_PHONE` ahora solo
+  indexa grupos fanout**: en nativo el chat 1-a-1 del cliente debe seguir siendo un chat normal.
+- Sección "GROUPS API NATIVA": `createNativeWhatsAppGroup`, `fetchNativeGroupInviteLink`,
+  `fetchNativeGroupParticipants`, `removeNativeGroupParticipants`, `deleteNativeWhatsAppGroup`,
+  `describeGroupsApiError` (traduce el 403 de "no eres OBA"). Usan `GRAPH_GROUPS_VERSION = 'v25.0'`
+  (el resto del proyecto usa v21.0).
+- `sendNativeGroupMessage` + `nativeDeliveryResult`. Salida temprana en `fanOutGroupMessage`,
+  `fanOutGroupMedia` y en el bucle de `/api/groups/:id/send-template`.
+- Endpoints nuevos: `GET /api/groups/:id/invite-link`, `POST /api/groups/:id/invite`,
+  `GET /api/groups/:id/participants`.
+- POST `/api/groups` crea primero el grupo en Meta y hace **rollback** (borra el grupo en WhatsApp)
+  si falla Airtable. PUT expulsa de verdad a los clientes que se quiten. DELETE borra el grupo real.
+- Webhook: rama nativa **antes** de `handleContactUpdate` con su propio `return` — no toca el
+  contacto, no reenvía (lo hace WhatsApp) y no entra en flujos de citas/opt-out.
+- `validateGroupPayload` cambió de `(body, excludeGroupId)` a `(body, existing?: ChatGroup)`.
+  **El modo es inmutable tras crear.**
+
+### Frontend
+- `GroupCreateModal`: selector de modo (solo al crear), contador 8/8, aviso RGPD distinto en nativo
+  (se ven entre sí obligatoriamente, no hay toggle).
+- `GroupChatWindow`: badge "Grupo WhatsApp", panel de participantes con quién aceptó, banner de
+  invitaciones pendientes con botón "Enviar invitación", enlace copiable.
+- `Sidebar`: badge "WA" + "N sin aceptar".
+
+### Airtable — CREAR A MANO en `ChatGroups`
+`Mode`, `WaGroupId`, `InviteLink`, `JoinedPhones` (los 4, texto). Sin ellos solo funciona fanout.
+
+### Aislamiento hilo ↔ chat 1-a-1 (CRÍTICO, no tocar sin entenderlo)
+`NOT_GROUP_THREAD_ONLY` = `NOT(AND({group_msg_id}!='', {recipient}=''))`, aplicado vía
+`selectMessagesExcludingGroupThread()` en las 3 consultas del chat privado:
+`request_conversation`, el historial que recibe Gemini y `getClientWindowState`.
+
+**Por qué:** en nativo el mensaje entrante se guarda con el TELÉFONO como `sender` (para que el hilo
+lo pinte como del cliente). Esas 3 consultas filtran por `OR(sender=X, recipient=X)` → sin el filtro,
+lo dicho en un grupo se colaba en la conversación privada, en el contexto de Laura (respondería en
+privado a algo del grupo) y reabría falsamente la ventana de 24h.
+
+**El matiz que lo hace seguro para fanout:** ahí el entrante del cliente es a la vez del hilo y del
+chat 1-a-1, pero lleva `recipient` relleno (el phoneId), así que NO se excluye. Si alguna vez cambias
+cómo se guarda el `recipient`, revisa esto primero.
+
+### Limitaciones asumidas (no son bugs, son decisiones)
+- **Sin push en grupos nativos.** FCM/WebPush viven dentro de `saveAndEmitMessage`, que el camino
+  nativo evita a propósito (para no tocar el contacto). Con la app cerrada no llega aviso; el badge
+  del Sidebar sí funciona con la app abierta.
+- **`joinedPhones` puede ir momentáneamente desfasado** si dos participantes escriben a la vez. Se
+  autocorrige en `GET /participants` y en el webhook de ciclo de vida, que sobrescriben con la
+  verdad de Meta.
+- **`PUT` expulsa de WhatsApp antes de guardar en Airtable**: si el guardado falla, el cliente ya
+  está fuera y hay que reinvitarlo.
+- **`/invite` no tiene fallback a plantilla**: a un cliente fuera de la ventana de 24h no se le puede
+  invitar por WhatsApp (la UI lo avisa antes de pulsar).
+
+### LIMITACIÓN CONOCIDA — Laura no responde en grupos nativos
+Su historial se construye leyendo `Messages` por `sender`/`recipient` = teléfono (chat 1-a-1). En un
+grupo nativo NO existe ese chat: los mensajes del hilo tienen `recipient=''`. Laura vería los
+mensajes del cliente pero **no sus propias respuestas** → se repetiría. Para habilitarla habría que
+darle un historial basado en `group_id`. Decisión consciente, no un olvido.
+
+### Verificado
+Backend `tsc` y frontend `npm run build` limpios. **Sin probar contra la API real de Meta** (requiere
+OBA + despliegue).
+
+---
+
 ## Sesión 2026-07-22 — Grupos en el chat con clientes
 
 ### Qué cambió
 Nuevo tipo de conversación: **grupos** con varios clientes y varios trabajadores en un mismo hilo.
 
-⚠️ **La API oficial de WhatsApp Cloud NO soporta grupos** (Meta no expone el endpoint). Lo
-implementado es un **grupo propio de Chatgorithm**: el equipo ve un hilo único y el servidor reparte
-(fan-out) cada mensaje al chat 1-a-1 de cada cliente, con el prefijo `*[Nombre del grupo] Quien:*`.
-Para el cliente es un chat normal — no ve la lista de miembros ni puede salirse. Se descartaron las
-librerías no oficiales (Baileys / whatsapp-web.js) por riesgo de baneo del número.
+⚠️ **DESFASADO** (ver sesión 2026-08-01): en esta fecha la API oficial de WhatsApp Cloud no
+soportaba grupos, pero Meta publicó la Groups API en junio de 2026. Lo de abajo describe el modo
+`fanout`, que sigue existiendo y funcionando, no la única opción posible.
+
+Lo implementado entonces fue un **grupo propio de Chatgorithm**: el equipo ve un hilo único y el
+servidor reparte (fan-out) cada mensaje al chat 1-a-1 de cada cliente, con el prefijo
+`*[Nombre del grupo] Quien:*`. Para el cliente es un chat normal — no ve la lista de miembros ni
+puede salirse. Se descartaron las librerías no oficiales (Baileys / whatsapp-web.js) por riesgo de
+baneo del número.
 
 ### Modelo de datos
 - **Registro CANÓNICO del hilo**: `group_msg_id` relleno + `recipient` vacío → no aparece en ningún
