@@ -2993,7 +2993,8 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
             const templateObj: any = { name: templateName, language: { code: langCode } };
             if (components.length > 0) templateObj.components = components;
 
-            await axios.post(
+            const timestamp = new Date().toISOString();
+            const sendResp = await axios.post(
                 `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
                 { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj },
                 { headers: { Authorization: `Bearer ${token}` } }
@@ -3004,10 +3005,11 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
                 text: `[Notificación] ${templateName}`,
                 sender: "Sistema",
                 recipient: cleanTo,
-                timestamp: new Date().toISOString(),
+                timestamp,
                 type: "template",
                 origin_phone_id: originPhoneId
             });
+            registerPendingDelivery(sendResp.data?.messages?.[0]?.id, { recipient: cleanTo, sender: "Sistema", timestamp });
             return true;
         } catch (e: any) {
             const metaErr = e.response?.data?.error;
@@ -3044,6 +3046,24 @@ const PICKUP_READY_WITH_INVOICE_TEMPLATE = 'coche_listo_recogida_factura';
 // el error #132001 ("Template name does not exist in es_ES"). Preguntamos a Meta
 // el idioma real una vez y lo cacheamos para no repetir la llamada.
 const templateLangCache = new Map<string, string>();
+
+// Correlaciona el wamid que devuelve Meta al ACEPTAR un envío (200 OK) con la
+// burbuja del chat (recipient/sender/timestamp). Que Meta acepte la llamada no
+// significa que el mensaje llegue al móvil: el fallo real (plantilla
+// rechazada, número no válido, WABA restringida...) llega después, por
+// separado, en el webhook de "statuses". Sin este mapa esa confirmación solo
+// se veía en los logs de Render y la burbuja se quedaba mostrando "enviado"
+// para siempre. Ver uso en el webhook, rama `st.status === 'failed'`.
+const pendingDeliveryByMsgId = new Map<string, { recipient: string; sender: string; timestamp: string }>();
+function registerPendingDelivery(metaMsgId: string | undefined, info: { recipient: string; sender: string; timestamp: string }) {
+    if (!metaMsgId) return;
+    pendingDeliveryByMsgId.set(metaMsgId, info);
+    // El status asíncrono de Meta llega en segundos/minutos, no horas. 24h de
+    // margen de sobra para no dejar crecer el mapa indefinidamente.
+    const t = setTimeout(() => pendingDeliveryByMsgId.delete(metaMsgId), 24 * 60 * 60 * 1000);
+    t.unref();
+}
+
 async function resolveTemplateLanguage(templateName: string, originPhoneId: string): Promise<string | null> {
     if (templateLangCache.has(templateName)) return templateLangCache.get(templateName)!;
 
@@ -3138,7 +3158,8 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
     let lastErr = '';
     for (const langCode of candidates) {
         try {
-            await axios.post(
+            const timestamp = new Date().toISOString();
+            const sendResp = await axios.post(
                 `https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`,
                 { messaging_product: "whatsapp", to: cleanTo, type: "template", template: { name: templateName, language: { code: langCode }, components } },
                 { headers: { Authorization: `Bearer ${token}` } }
@@ -3150,10 +3171,11 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
                 text: `[Factura] ${templateName}`,
                 sender: "Sistema",
                 recipient: cleanTo,
-                timestamp: new Date().toISOString(),
+                timestamp,
                 type: "template",
                 origin_phone_id: originPhoneId
             });
+            registerPendingDelivery(sendResp.data?.messages?.[0]?.id, { recipient: cleanTo, sender: "Sistema", timestamp });
             return true;
         } catch (e: any) {
             const metaErr = e.response?.data?.error;
@@ -9764,8 +9786,11 @@ app.post('/api/send-template', async (req, res) => {
         const parameters = variables.map((val: string) => ({ type: "text", text: val }));
         const templateObj: any = { name: templateName, language: { code: language } };
         if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
-        await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
-        await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender: senderName || "Agente", recipient: cleanTo, timestamp: new Date().toISOString(), type: "template", origin_phone_id: originPhoneId });
+        const timestamp = new Date().toISOString();
+        const sendResp = await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
+        const sender = senderName || "Agente";
+        await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender, recipient: cleanTo, timestamp, type: "template", origin_phone_id: originPhoneId });
+        registerPendingDelivery(sendResp.data?.messages?.[0]?.id, { recipient: cleanTo, sender, timestamp });
         // Enviar una plantilla manual también ES atender la alarma de la
         // pestaña "Atención". Camino crítico: fuera de la ventana de 24h el
         // texto libre falla (Meta 131047) y la plantilla es LA única forma de
@@ -11268,6 +11293,17 @@ app.post('/webhook', async (req, res) => {
                     notifyTeam('send_failed', 'error',
                         `WhatsApp no llegó a ${targetLabel}: ${detail}`,
                         { phone: st.recipient_id, messageId: st.id, errorCode: err.code || 0 });
+                    // Si el wamid corresponde a un mensaje que guardamos al enviarlo
+                    // (plantilla manual, recordatorio, factura...), marcamos esa
+                    // burbuja concreta como fallida en vez de dejarla como "enviado".
+                    const pending = pendingDeliveryByMsgId.get(st.id);
+                    if (pending) {
+                        io.emit('message_status', {
+                            recipient: pending.recipient, sender: pending.sender, timestamp: pending.timestamp,
+                            status: 'failed', code: err.code || 0, metaError: detail
+                        });
+                        pendingDeliveryByMsgId.delete(st.id);
+                    }
                 } else {
                     console.log(`📊 [WEBHOOK] Status "${st.status}" para ${targetLabel} (msg ${st.id})`);
                 }
