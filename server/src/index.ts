@@ -465,6 +465,7 @@ const TABLE_VEHICLES = 'Vehicles'; // Vehículos/items registrados por cliente (
 const TABLE_APPOINTMENT_EVENTS = 'AppointmentEvents'; // Historial de reservas y cancelaciones (auditoría)
 const TABLE_AUDIT_LOG = 'AuditLog'; // Audit log: quién hizo qué cambio en cuándo (admin/agente)
 const TABLE_CHAT_GROUPS = 'ChatGroups'; // Grupos de conversación (varios clientes + varios trabajadores)
+const TABLE_PART_ORDERS = 'PartOrders'; // Pedidos de piezas a proveedores (panel Recambios)
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
 // BUSINESS_ACCOUNTS: phoneId → token. Se puebla desde la tabla WhatsAppAccounts
@@ -7950,6 +7951,160 @@ app.get('/api/groups/:id/participants', async (req, res) => {
         const detail = describeGroupsApiError(e);
         console.error('[API] Error GET /groups/:id/participants:', detail);
         res.status(500).json({ error: detail });
+    }
+});
+
+// ==========================================
+//  PEDIDOS DE PIEZAS A PROVEEDORES (Recambios)
+// ==========================================
+// Tabla PartOrders en Airtable (campos: matricula, pieza, referencia,
+// proveedor, orderedAt, arrivedAt, orderedBy — texto — y arrived — checkbox).
+// El panel del frontend (PartOrdersDashboard) solo lo ven los perfiles de
+// Recambios. Fase 1: alta manual + marcar llegada + export Excel. Fase 2
+// (pendiente): captura automática desde el mensaje en clave al proveedor.
+
+let partOrdersTableMissing = false;
+
+// Traduce errores de setup de Airtable (tabla o columna inexistente) en un
+// mensaje accionable para el frontend, igual que groupsSetupError.
+function partOrdersSetupError(e: any): string | null {
+    const msg = e?.message || '';
+    if (e?.statusCode === 404 || /NOT_FOUND|could not be found/i.test(msg)) {
+        partOrdersTableMissing = true;
+        return `Falta la tabla "${TABLE_PART_ORDERS}" en Airtable. Créala con los campos: matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy (texto) y arrived (checkbox).`;
+    }
+    if (/unknown field|UNKNOWN_FIELD_NAME/i.test(msg)) {
+        return `A la tabla "${TABLE_PART_ORDERS}" le falta algún campo. Necesita: matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy (texto) y arrived (checkbox). (${msg})`;
+    }
+    return null;
+}
+
+function serializePartOrder(r: any) {
+    return {
+        id: r.id,
+        matricula: (r.get('matricula') as string) || '',
+        pieza: (r.get('pieza') as string) || '',
+        referencia: (r.get('referencia') as string) || '',
+        proveedor: (r.get('proveedor') as string) || '',
+        orderedAt: (r.get('orderedAt') as string) || '',
+        arrived: !!r.get('arrived'),
+        arrivedAt: (r.get('arrivedAt') as string) || '',
+        orderedBy: (r.get('orderedBy') as string) || ''
+    };
+}
+
+app.get('/api/part-orders', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const records = await base(TABLE_PART_ORDERS).select().all();
+        const orders = records.map(serializePartOrder)
+            // Más recientes primero (orderedAt es ISO → el orden alfabético vale)
+            .sort((a, b) => (b.orderedAt || '').localeCompare(a.orderedAt || ''));
+        partOrdersTableMissing = false;
+        res.json({ orders, tableMissing: false });
+    } catch (e: any) {
+        const setup = partOrdersSetupError(e);
+        // Tabla sin crear → no es un error para la UI: responde vacío con la
+        // pista de setup para que el panel muestre las instrucciones.
+        if (setup && partOrdersTableMissing) return res.json({ orders: [], tableMissing: true, setupHint: setup });
+        console.error('[API] Error GET /part-orders:', e?.message);
+        res.status(500).json({ error: setup || 'Error cargando pedidos' });
+    }
+});
+
+app.post('/api/part-orders', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const { matricula, pieza, referencia, proveedor, orderedBy } = req.body || {};
+    if (!String(pieza || '').trim() && !String(referencia || '').trim()) {
+        return res.status(400).json({ error: 'Indica al menos la pieza o la referencia.' });
+    }
+    try {
+        const created = await base(TABLE_PART_ORDERS).create([{
+            fields: {
+                matricula: String(matricula || '').trim(),
+                pieza: String(pieza || '').trim(),
+                referencia: String(referencia || '').trim(),
+                proveedor: String(proveedor || '').trim(),
+                orderedAt: new Date().toISOString(),
+                arrived: false,
+                arrivedAt: '',
+                orderedBy: String(orderedBy || '').trim()
+            }
+        }], { typecast: true });
+        res.json({ success: true, order: serializePartOrder(created[0]) });
+    } catch (e: any) {
+        const setup = partOrdersSetupError(e);
+        console.error('[API] Error POST /part-orders:', e?.message);
+        res.status(500).json({ error: setup || 'Error creando el pedido' });
+    }
+});
+
+app.put('/api/part-orders/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    const body = req.body || {};
+    try {
+        const fields: any = {};
+        for (const k of ['matricula', 'pieza', 'referencia', 'proveedor'] as const) {
+            if (body[k] !== undefined) fields[k] = String(body[k] || '').trim();
+        }
+        // Marcar / desmarcar llegada estampa o limpia arrivedAt automáticamente.
+        if (body.arrived !== undefined) {
+            fields.arrived = !!body.arrived;
+            fields.arrivedAt = body.arrived ? new Date().toISOString() : '';
+        }
+        if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'Nada que actualizar' });
+        const updated = await base(TABLE_PART_ORDERS).update([{ id: req.params.id, fields }], { typecast: true });
+        res.json({ success: true, order: serializePartOrder(updated[0]) });
+    } catch (e: any) {
+        const setup = partOrdersSetupError(e);
+        console.error('[API] Error PUT /part-orders/:id:', e?.message);
+        res.status(500).json({ error: setup || 'Error actualizando el pedido' });
+    }
+});
+
+app.delete('/api/part-orders/:id', async (req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        await base(TABLE_PART_ORDERS).destroy([req.params.id]);
+        res.json({ success: true });
+    } catch (e: any) {
+        console.error('[API] Error DELETE /part-orders/:id:', e?.message);
+        res.status(500).json({ error: 'Error borrando el pedido' });
+    }
+});
+
+// Export a Excel (.xlsx). El frontend lo descarga vía fetch → blob (el
+// interceptor installAuthFetch añade el Bearer solo; un <a href> pelado no
+// llevaría auth cuando ENFORCE_API_AUTH esté activo).
+app.get('/api/part-orders/export', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
+    try {
+        const records = await base(TABLE_PART_ORDERS).select().all();
+        const fmt = (iso: string) => iso ? new Date(iso).toLocaleString('es-ES', { timeZone: 'Europe/Madrid', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+        const rows = records.map(serializePartOrder)
+            .sort((a, b) => (b.orderedAt || '').localeCompare(a.orderedAt || ''))
+            .map(o => ({
+                'Matrícula': o.matricula,
+                'Pieza': o.pieza,
+                'Referencia': o.referencia,
+                'Proveedor': o.proveedor,
+                'Fecha pedido': fmt(o.orderedAt),
+                'Estado': o.arrived ? 'Llegada' : 'Pendiente',
+                'Fecha llegada': fmt(o.arrivedAt),
+                'Pedido por': o.orderedBy
+            }));
+        const ws = XLSX.utils.json_to_sheet(rows);
+        ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 16 }, { wch: 16 }, { wch: 17 }, { wch: 10 }, { wch: 17 }, { wch: 14 }];
+        const wb = XLSX.utils.book_new();
+        XLSX.utils.book_append_sheet(wb, ws, 'Pedidos');
+        const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+        res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+        res.setHeader('Content-Disposition', 'attachment; filename="pedidos-piezas.xlsx"');
+        res.send(buf);
+    } catch (e: any) {
+        const setup = partOrdersSetupError(e);
+        console.error('[API] Error GET /part-orders/export:', e?.message);
+        res.status(500).json({ error: setup || 'Error exportando' });
     }
 });
 

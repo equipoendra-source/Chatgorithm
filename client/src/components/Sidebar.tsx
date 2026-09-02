@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useLayoutEffect } from 'react';
 import {
     Users, Search, RefreshCw, UserCheck, Briefcase, Filter as FilterIcon,
     Smartphone, UserPlus, Upload, FileSpreadsheet, Phone, MessageSquare,
-    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone
+    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone, Package
 } from 'lucide-react';
 import { PhoneDialer } from './PhoneDialer';
 import { API_URL } from '../config/api';
@@ -48,7 +48,7 @@ interface SidebarProps {
     isConnected?: boolean;
     onlineUsers: string[];
     typingStatus: { [chatId: string]: string };
-    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'group_chat') => void;
+    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'group_chat' | 'part_orders') => void;
     currentView?: string;
 
     selectedAccountId: string | null;
@@ -1023,6 +1023,15 @@ export function Sidebar({
                             Online ({onlineUsers.length})
                         </h3>
                         <div className="flex items-center gap-1.5">
+                            {/* 🔩 Pedidos de Piezas — SOLO para perfiles de Recambios
+                                (decisión de Diego: opción A). Los roles no-Admin son
+                                nombres de departamento del CRM, así que comparamos
+                                contra 'recambios' normalizado. */}
+                            {user.role?.toLowerCase() === 'recambios' && (
+                                <button onClick={() => setView('part_orders')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Pedidos de Piezas">
+                                    <Package className="w-4 h-4" />
+                                </button>
+                            )}
                             <button onClick={() => setView('campaigns')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-orange-400 hover:border-orange-500' : 'bg-white border-slate-200 text-slate-400 hover:text-orange-600 hover:border-orange-200'}`} title="Campañas de marketing">
                                 <Megaphone className="w-4 h-4" />
                             </button>

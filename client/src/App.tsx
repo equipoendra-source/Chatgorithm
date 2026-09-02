@@ -11,6 +11,7 @@ import ChatTemplateSelector from './components/ChatTemplateSelector';
 import CalendarDashboard from './components/CalendarDashboard';
 // @ts-ignore
 import CampaignsDashboard from './components/CampaignsDashboard';
+import PartOrdersDashboard from './components/PartOrdersDashboard';
 import { TeamChat } from './components/TeamChat';
 import { GroupChatWindow, ChatGroup } from './components/GroupChatWindow';
 import { GroupCreateModal } from './components/GroupCreateModal';
@@ -103,7 +104,7 @@ function App() {
     });
 
     // VIEW STATE
-    const [view, setView] = useState<'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'group_chat'>('chat');
+    const [view, setView] = useState<'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'group_chat' | 'part_orders'>('chat');
     const [selectedAccountId, setSelectedAccountId] = useState<string | null>(null);
 
     // NUEVAS CITAS — toasts in-app + fecha a la que saltar al pinchar
@@ -712,6 +713,7 @@ function App() {
             if (view === 'settings') { setView('chat'); return; }
             if (view === 'calendar') { setView('chat'); return; }
             if (view === 'campaigns') { setView('chat'); return; }
+            if (view === 'part_orders') { setView('chat'); return; }
             if (selectedContact) { setSelectedContact(null); return; }
             if (view === 'team_chat' && mobileTeamChatActive) { setMobileTeamChatActive(false); return; }
             if (view === 'team_chat') { setView('chat'); return; }
@@ -907,6 +909,28 @@ function App() {
                     <div className={`flex-1 flex flex-col relative h-full overflow-hidden ${isDark ? 'bg-slate-900/40 backdrop-blur-md' : 'bg-white'}`}>
                         <CampaignsDashboard
                             readOnly={user.role === 'agent'}
+                            currentUser={user}
+                            onBack={() => setView('chat')}
+                        />
+                    </div>
+                </div>
+                {appointmentToastNode}
+            {globalSearchNode}
+            </div>
+        );
+    }
+
+    // Pedidos de Piezas — panel de Recambios (el botón del Sidebar solo lo
+    // muestra a los perfiles con rol 'Recambios'; la vista reusa el mismo
+    // wrapper de página que Campañas).
+    if (view === 'part_orders') {
+        return (
+            <div className={`h-screen w-screen overflow-hidden p-0 md:p-4 md:py-6 ${isDark
+                ? 'bg-[radial-gradient(ellipse_at_top,_var(--tw-gradient-stops))] from-slate-900 via-[#0f172a] to-black text-slate-200'
+                : 'bg-slate-100 text-slate-800'}`}>
+                <div className={`flex w-full h-full max-w-[1920px] mx-auto overflow-hidden md:rounded-3xl relative shadow-2xl ${isDark ? 'glass-panel' : 'bg-white border border-slate-200'}`}>
+                    <div className={`flex-1 flex flex-col relative h-full overflow-hidden ${isDark ? 'bg-slate-900/40 backdrop-blur-md' : 'bg-white'}`}>
+                        <PartOrdersDashboard
                             currentUser={user}
                             onBack={() => setView('chat')}
                         />
