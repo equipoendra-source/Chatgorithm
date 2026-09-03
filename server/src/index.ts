@@ -7993,7 +7993,76 @@ function serializePartOrder(r: any) {
     };
 }
 
+// FASE 2 — Captura automática del "mensaje en clave" a proveedores.
+// Cuando un agente de Recambios escribe al proveedor con la plantilla:
+//     Ref: 889
+//     Pieza: Embrague
+//     Matricula: 1234-ABC
+// creamos el pedido solo en la tabla PartOrders, sin teclear nada más.
+// El proveedor se saca del CONTACTO al que se le escribe (no va en el
+// mensaje). Diego eligió el formato de 3 etiquetas SIN palabra mágica, así
+// que para no crear pedidos por error exigimos que estén las TRES etiquetas
+// (Ref/Pieza/Matricula) presentes y que la referencia tenga algún valor.
+//
+// Devuelve el objeto pedido a crear, o null si el mensaje no es una clave.
+function parsePartOrderClave(text: string): { referencia: string; pieza: string; matricula: string } | null {
+    if (!text) return null;
+    const low = text.toLowerCase();
+    // Las 3 etiquetas tienen que estar (la plantilla siempre las lleva).
+    if (!low.includes('ref:') || !low.includes('pieza:') || !low.includes('matricula:')) return null;
+    // Extrae el valor que va tras cada etiqueta hasta el fin de línea.
+    // Tolerante a acentos en "matrícula" y a espacios variables.
+    const grab = (labels: string[]): string => {
+        for (const lab of labels) {
+            const re = new RegExp(`${lab}\\s*:\\s*(.*)`, 'i');
+            const m = text.match(re);
+            if (m && m[1] !== undefined) return m[1].trim();
+        }
+        return '';
+    };
+    const referencia = grab(['ref', 'referencia']);
+    const pieza = grab(['pieza']);
+    const matricula = grab(['matricula', 'matrícula']);
+    // La referencia es lo mínimo imprescindible para que sea un pedido real.
+    if (!referencia) return null;
+    return { referencia, pieza, matricula };
+}
+
+// Crea el pedido si el mensaje saliente es una clave de pedido. Fire-and-forget:
+// nunca lanza ni bloquea el envío del mensaje al proveedor.
+async function maybeCreatePartOrderFromMessage(text: string, recipientPhone: string, agentName: string): Promise<void> {
+    if (!base) return;
+    const parsed = parsePartOrderClave(text);
+    if (!parsed) return;
+    try {
+        // Nombre del proveedor = nombre del contacto al que se escribe.
+        let proveedor = '';
+        const clean = cleanNumber(recipientPhone);
+        const cs = await base('Contacts').select({ filterByFormula: `{phone}='${clean}'`, maxRecords: 1 }).firstPage();
+        if (cs.length > 0) proveedor = (cs[0].get('name') as string) || '';
+        if (!proveedor) proveedor = clean;
+
+        await base(TABLE_PART_ORDERS).create([{
+            fields: {
+                matricula: parsed.matricula.toUpperCase(),
+                pieza: parsed.pieza,
+                referencia: parsed.referencia,
+                proveedor,
+                orderedAt: new Date().toISOString(),
+                arrived: false,
+                arrivedAt: '',
+                orderedBy: agentName || ''
+            }
+        }], { typecast: true });
+        console.log(`🔩 [PartOrder] Pedido AUTO creado desde clave: ref="${parsed.referencia}" prov="${proveedor}" por "${agentName}"`);
+    } catch (e: any) {
+        // Si falta la tabla/campos, avisamos pero NUNCA rompemos el envío.
+        console.warn('[PartOrder] No se pudo crear el pedido automático:', partOrdersSetupError(e) || e?.message);
+    }
+}
+
 app.get('/api/part-orders', async (_req, res) => {
+    if (!base) return res.status(500).json({ error: 'DB no disponible' });
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     try {
         const records = await base(TABLE_PART_ORDERS).select().all();
@@ -11902,6 +11971,14 @@ io.on('connection', (socket) => {
             console.log(`🛑 [IA] Cancelando respuesta en curso de Laura para ${cleanTo} (agente intervino)`);
             try { inflight.abort(); } catch (_) {}
             aiAbortControllers.delete(cleanTo);
+        }
+
+        // 🔩 PEDIDOS DE PIEZAS (fase 2): si este mensaje saliente al proveedor
+        // es una "clave de pedido" (Ref:/Pieza:/Matricula:), lo registramos solo
+        // en la tabla PartOrders. Las notas internas (type='note') NO cuentan:
+        // esas no se envían al proveedor. Fire-and-forget: nunca bloquea el envío.
+        if (msg.type !== 'note') {
+            maybeCreatePartOrderFromMessage(msg.text || '', cleanTo, msg.sender || '').catch(() => {});
         }
 
         // FIX: Forzar estado "En Curso" para evitar reactivación por "Nuevo"
