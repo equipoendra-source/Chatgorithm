@@ -10429,7 +10429,52 @@ function computeConversionKpis(contacts: readonly any[], messages: readonly any[
     };
 }
 
-app.get('/api/media/:id', async (req, res) => { if (!waToken) return res.sendStatus(500); try { const urlRes = await axios.get(`https://graph.facebook.com/v21.0/${req.params.id}`, { headers: { 'Authorization': `Bearer ${waToken}` } }); const mediaRes = await axios.get(urlRes.data.url, { headers: { 'Authorization': `Bearer ${waToken}` }, responseType: 'stream' }); res.setHeader('Content-Type', mediaRes.headers['content-type']); mediaRes.data.pipe(res); } catch (e) { res.sendStatus(404); } });
+// Sirve al frontend las fotos/audios/vídeos/documentos que el cliente manda
+// por WhatsApp. Chatgorithm es MULTI-LÍNEA: el media que llega a la línea de
+// Recambios SOLO se puede descargar de Meta con el token de Recambios, no con
+// el de la línea principal. Antes este endpoint usaba SIEMPRE waToken, así que
+// cualquier media de una línea distinta a la principal daba 404 → no se veían
+// las fotos ni sonaban los audios de esos chats. Ahora probamos, en orden, el
+// token de la línea que sugiere el frontend (?origin=), luego el principal, y
+// luego el de cada línea configurada, hasta que uno funcione. Solo el token de
+// la línea dueña del media resuelve su metadata, así que el primero que
+// responde es siempre el correcto.
+app.get('/api/media/:id', async (req, res) => {
+    const mediaId = req.params.id;
+    const hintOrigin = typeof req.query.origin === 'string' ? req.query.origin : '';
+    // Lista de tokens candidatos SIN duplicados: pista del frontend → línea
+    // principal → todas las líneas configuradas.
+    const candidates: string[] = [];
+    const pushTok = (t?: string) => { if (t && !candidates.includes(t)) candidates.push(t); };
+    if (hintOrigin) pushTok(BUSINESS_ACCOUNTS[hintOrigin]);
+    pushTok(waToken);
+    for (const t of Object.values(BUSINESS_ACCOUNTS)) pushTok(t);
+    if (candidates.length === 0) return res.sendStatus(500);
+
+    for (const token of candidates) {
+        try {
+            const urlRes = await axios.get(`https://graph.facebook.com/v21.0/${mediaId}`, {
+                headers: { 'Authorization': `Bearer ${token}` }
+            });
+            if (!urlRes.data?.url) continue;
+            const mediaRes = await axios.get(urlRes.data.url, {
+                headers: { 'Authorization': `Bearer ${token}` },
+                responseType: 'stream'
+            });
+            if (mediaRes.headers['content-type']) res.setHeader('Content-Type', mediaRes.headers['content-type']);
+            // El media de un id no cambia: lo cacheamos en el navegador para no
+            // volver a bajarlo de Meta cada vez que se hace scroll por el chat.
+            res.setHeader('Cache-Control', 'private, max-age=86400');
+            return mediaRes.data.pipe(res);
+        } catch (_e) {
+            // Ese token no es dueño de este media (Meta responde 400/401) →
+            // probamos con el de la siguiente línea.
+            continue;
+        }
+    }
+    console.warn(`[Media] No se pudo servir "${mediaId}" con ninguna de las ${candidates.length} líneas configuradas.`);
+    return res.sendStatus(404);
+});
 // Función para convertir audio WebM a OGG Opus usando FFmpeg
 async function convertAudioToOggOpus(inputBuffer: Buffer, originalMimeType: string): Promise<{ buffer: Buffer, mimeType: string, filename: string }> {
     // Si ya es OGG real (no webm disfrazado), retornamos tal cual
