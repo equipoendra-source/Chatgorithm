@@ -128,7 +128,7 @@ export function Sidebar({
     // State for initial load
     const [isLoadingContacts, setIsLoadingContacts] = useState(true);
 
-    const [viewScope, setViewScope] = useState<ViewScope>('mine');
+    const [viewScope, setViewScope] = useState<ViewScope>('all');
     const [contacts, setContacts] = useState<Contact[]>([]);
     const [searchQuery, setSearchQuery] = useState('');
     const [showFilters, setShowFilters] = useState(false);
