@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import EmojiPicker, { EmojiClickData } from 'emoji-picker-react';
 import { Contact } from './Sidebar';
-import { API_BASE_URL, API_URL } from '../config/api';
+import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
 import { shouldShowTour, markTourAsComplete, startChatTour } from './ProductTour';
 import { exportChatToPdf } from '../services/chatPdfExport';
@@ -201,7 +201,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
 
-    const API_URL = API_BASE_URL;
+    // (Antes: const API_URL = API_BASE_URL; sombreaba el API_URL importado y
+    // hacía que /media/:id se sirviera SIN /api → todas las fotos/audios
+    // salían rotas. Ya no lo redefinimos: usamos el API_URL del módulo, que
+    // sí termina en /api.)
 
     const scrollToBottom = () => {
         if (!chatSearchQuery) {
@@ -345,7 +348,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     useEffect(() => {
         if (!showDetailsPanel || !contact.phone) return;
         setVehiclesLoading(true);
-        fetch(`${API_URL}/api/contacts/${contact.phone}/vehicles`)
+        fetch(`${API_URL}/contacts/${contact.phone}/vehicles`)
             .then(r => r.json())
             .then(d => setVehicles(Array.isArray(d?.vehicles) ? d.vehicles : []))
             .catch(() => setVehicles([]))
@@ -354,7 +357,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
 
     const deleteVehicle = async (vehicleId: string) => {
         try {
-            const res = await fetch(`${API_URL}/api/contacts/${contact.phone}/vehicles/${vehicleId}`, { method: 'DELETE' });
+            const res = await fetch(`${API_URL}/contacts/${contact.phone}/vehicles/${vehicleId}`, { method: 'DELETE' });
             if (res.ok) {
                 // Solo lo quitamos de la lista si el backend confirmó el borrado.
                 setVehicles(prev => prev.filter(v => v.id !== vehicleId));
@@ -391,8 +394,8 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         try {
             const isNew = editingVehicleId === 'new';
             const url = isNew
-                ? `${API_URL}/api/contacts/${contact.phone}/vehicles`
-                : `${API_URL}/api/contacts/${contact.phone}/vehicles/${editingVehicleId}`;
+                ? `${API_URL}/contacts/${contact.phone}/vehicles`
+                : `${API_URL}/contacts/${contact.phone}/vehicles/${editingVehicleId}`;
             const res = await fetch(url, {
                 method: isNew ? 'POST' : 'PUT',
                 headers: { 'Content-Type': 'application/json' },
@@ -551,7 +554,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         setOptInMarketing(newValue);
         setSavingOptIn(true);
         try {
-            const r = await fetch(`${API_URL}/api/contacts/${contact.phone}/marketing-opt-in`, {
+            const r = await fetch(`${API_URL}/contacts/${contact.phone}/marketing-opt-in`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ optedIn: newValue, source: 'manual_dashboard' })
             });
@@ -587,7 +590,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         formData.append('senderName', user.username);
         formData.append('originPhoneId', currentAccountId || ''); // ENVÍO DE ORIGEN EN ARCHIVOS
         try {
-            const res = await fetch(`${API_URL}/api/upload`, { method: 'POST', body: formData });
+            const res = await fetch(`${API_URL}/upload`, { method: 'POST', body: formData });
             if (!res.ok) {
                 const errText = await res.text();
                 throw new Error(`Status ${res.status}: ${errText}`);
