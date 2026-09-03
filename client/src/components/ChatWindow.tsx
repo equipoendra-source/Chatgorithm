@@ -521,7 +521,7 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
     const COUNTER_VISIBLE_AT = 3500;
     const countMessageChars = (s: string) => Array.from(s || '').length;
 
-    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleInputChange = (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => {
         const next = e.target.value;
         // Bloqueamos en el handler para que pegar 50k caracteres no llene el
         // input. Si el usuario ya estaba en el límite y teclea, la longitud no
@@ -1236,18 +1236,31 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                         )}
 
                         <div className="flex-1 min-w-0 relative">
-                            <input
+                            {/* textarea (no <input type="text">) para admitir saltos de línea:
+                                las respuestas rápidas multilínea se pegaban en una sola línea porque
+                                <input> convierte "\n" en un espacio. Ahora Enter envía (mantiene el
+                                comportamiento chat estándar) y Shift+Enter hace un salto de línea.
+                                rows=1 + resize-none + textarea que crece según lineas = casi idéntico
+                                visualmente al input anterior cuando solo hay una línea. */}
+                            <textarea
                                 id="chat-input"
-                                type="text"
+                                rows={Math.min(6, Math.max(1, (input.match(/\n/g)?.length || 0) + 1))}
                                 value={input}
                                 onChange={handleInputChange}
+                                onKeyDown={(e) => {
+                                    // Enter envía (igual que antes); Shift+Enter = salto de línea.
+                                    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                        e.preventDefault();
+                                        sendMessage(e as any);
+                                    }
+                                }}
                                 placeholder={isUploading ? "Enviando..." : isRecording ? "Grabando..." : (isInternalMode ? "Nota interna..." : (pendingFile ? "Comentario..." : "Mensaje"))}
                                 disabled={isUploading || isRecording}
-                                className={`w-full py-2.5 md:py-3 px-3 md:px-4 rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm transition-all ${isInternalMode
+                                className={`w-full py-2.5 md:py-3 px-3 md:px-4 rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500/50 text-sm transition-all resize-none leading-tight ${isInternalMode
                                     ? 'bg-yellow-100 border-yellow-300 placeholder-yellow-600/50 text-yellow-900'
                                     : (isDark
                                         ? 'glass-input'
-                                        : 'bg-slate-50 border-slate-200'
+                                        : 'bg-slate-50 border-slate-200 text-slate-900 placeholder-slate-400'
                                     )
                                     }`}
                             />
