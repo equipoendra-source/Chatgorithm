@@ -8025,11 +8025,16 @@ function parsePartOrderClave(text: string): { referencia: string; pieza: string;
     const referencia = grabFrom(['ref', 'referencia']);
     const pieza = grabFrom(['pieza']);
     const matricula = grabFrom(['matricula', 'matrícula']);
-    // Señal de que es una clave de pedido (no un mensaje normal): referencia
-    // CON valor + al menos otra etiqueta presente (pieza o matrícula).
+    // Señal de que es una clave de pedido (no un mensaje normal):
+    //  1) estructura: está la etiqueta "Pieza:" Y al menos otra (Ref/Matrícula).
+    //  2) contenido: al menos la pieza O la referencia tiene valor.
+    // La REFERENCIA es OPCIONAL: muchas veces se pide la pieza sin tener aún la
+    // ref (se la pides al proveedor). Basta con describir la pieza.
     const low = text.toLowerCase();
-    const hasOther = low.includes('pieza:') || low.includes('matricula:') || low.includes('matrícula:');
-    if (!referencia || !hasOther) return null;
+    const hasMatriculaLabel = low.includes('matricula:') || low.includes('matrícula:');
+    const hasStructure = low.includes('pieza:') && (low.includes('ref:') || low.includes('referencia:') || hasMatriculaLabel);
+    if (!hasStructure) return null;
+    if (!pieza && !referencia) return null; // plantilla totalmente vacía → no crear
     return { referencia, pieza, matricula };
 }
 
