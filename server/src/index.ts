@@ -8007,24 +8007,29 @@ function serializePartOrder(r: any) {
 // Devuelve el objeto pedido a crear, o null si el mensaje no es una clave.
 function parsePartOrderClave(text: string): { referencia: string; pieza: string; matricula: string } | null {
     if (!text) return null;
-    const low = text.toLowerCase();
-    // Las 3 etiquetas tienen que estar (la plantilla siempre las lleva).
-    if (!low.includes('ref:') || !low.includes('pieza:') || !low.includes('matricula:')) return null;
-    // Extrae el valor que va tras cada etiqueta hasta el fin de línea.
-    // Tolerante a acentos en "matrícula" y a espacios variables.
-    const grab = (labels: string[]): string => {
-        for (const lab of labels) {
-            const re = new RegExp(`${lab}\\s*:\\s*(.*)`, 'i');
-            const m = text.match(re);
-            if (m && m[1] !== undefined) return m[1].trim();
+    // Leemos LÍNEA A LÍNEA: para cada línea partimos por el PRIMER ':' y
+    // comparamos la etiqueta (antes del ':') con los alias. El valor es lo que
+    // queda en ESA MISMA línea. Así evitamos el bug de que, si "Ref:" va vacío,
+    // el valor "salte" a la línea siguiente (antes cogía "Pieza: embrague"
+    // como referencia porque el \s* del regex se comía el salto de línea).
+    const lines = text.split(/\r?\n/);
+    const grabFrom = (aliases: string[]): string => {
+        for (const line of lines) {
+            const idx = line.indexOf(':');
+            if (idx === -1) continue;
+            const label = line.slice(0, idx).trim().toLowerCase();
+            if (aliases.includes(label)) return line.slice(idx + 1).trim();
         }
         return '';
     };
-    const referencia = grab(['ref', 'referencia']);
-    const pieza = grab(['pieza']);
-    const matricula = grab(['matricula', 'matrícula']);
-    // La referencia es lo mínimo imprescindible para que sea un pedido real.
-    if (!referencia) return null;
+    const referencia = grabFrom(['ref', 'referencia']);
+    const pieza = grabFrom(['pieza']);
+    const matricula = grabFrom(['matricula', 'matrícula']);
+    // Señal de que es una clave de pedido (no un mensaje normal): referencia
+    // CON valor + al menos otra etiqueta presente (pieza o matrícula).
+    const low = text.toLowerCase();
+    const hasOther = low.includes('pieza:') || low.includes('matricula:') || low.includes('matrícula:');
+    if (!referencia || !hasOther) return null;
     return { referencia, pieza, matricula };
 }
 
