@@ -1023,11 +1023,16 @@ export function Sidebar({
                             Online ({onlineUsers.length})
                         </h3>
                         <div className="flex items-center gap-1.5">
-                            {/* 🔩 Pedidos de Piezas — visible para perfiles de Recambios
-                                Y Taller (Diego lo pidió también en Taller). Los roles
-                                no-Admin son nombres de departamento del CRM, así que
-                                comparamos contra la lista normalizada. */}
-                            {['recambios', 'taller'].includes((user.role || '').toLowerCase()) && (
+                            {/* 🔩 Pedidos de Piezas — visible para Recambios y Taller.
+                                OJO: el perfil "TALLER" tiene ROL "Admin" (no "Taller"),
+                                así que además del rol comprobamos el NOMBRE del perfil.
+                                Así funciona tanto el perfil RECAMBIOS (rol recambios)
+                                como el perfil TALLER (nombre taller, rol admin). */}
+                            {(() => {
+                                const r = (user.role || '').toLowerCase();
+                                const u = (user.username || '').toLowerCase();
+                                return ['recambios', 'taller'].includes(r) || u.includes('recambios') || u.includes('taller');
+                            })() && (
                                 <button onClick={() => setView('part_orders')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Pedidos de Piezas">
                                     <Package className="w-4 h-4" />
                                 </button>
