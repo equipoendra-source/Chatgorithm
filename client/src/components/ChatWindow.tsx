@@ -64,7 +64,37 @@ interface SearchMatch {
 
 const CustomAudioPlayer = ({ src, isMe }: { src: string, isMe: boolean }) => {
     const [isPlaying, setIsPlaying] = useState(false); const [progress, setProgress] = useState(0); const [duration, setDuration] = useState(0); const [currentTime, setCurrentTime] = useState(0); const [playbackRate, setPlaybackRate] = useState(1); const [volume, setVolume] = useState(1); const [isMuted, setIsMuted] = useState(false); const [showVolumeSlider, setShowVolumeSlider] = useState(false); const [audioUrl, setAudioUrl] = useState<string | null>(null); const [isReady, setIsReady] = useState(false); const audioRef = useRef<HTMLAudioElement>(null);
-    useEffect(() => { fetch(src).then(r => r.blob()).then(blob => { setAudioUrl(URL.createObjectURL(blob)); setIsReady(true); }).catch(e => console.error(e)); }, [src]);
+    // Descargamos el audio como blob para tener control sobre errores y para
+    // que Safari no bloquee la reproducción por CORS/content-type raros del
+    // stream directo. Antes se ignoraba el status y se creaba un blob-URL
+    // aunque el fetch devolviera HTML de 404 → reproductor visible pero mudo.
+    // Ahora comprobamos el status, el content-type y avisamos en la UI si algo va mal.
+    const [loadError, setLoadError] = useState<string | null>(null);
+    useEffect(() => {
+        let revokeUrl: string | null = null;
+        setLoadError(null);
+        setIsReady(false);
+        fetch(src)
+            .then(async r => {
+                if (!r.ok) throw new Error(`HTTP ${r.status}`);
+                const ct = r.headers.get('content-type') || '';
+                if (!ct.startsWith('audio/') && !ct.startsWith('application/octet-stream')) {
+                    console.warn(`[Audio] Content-Type inesperado para ${src}: ${ct}`);
+                }
+                const blob = await r.blob();
+                if (blob.size < 100) throw new Error(`respuesta vacía (${blob.size} bytes)`);
+                const url = URL.createObjectURL(blob);
+                revokeUrl = url;
+                setAudioUrl(url);
+                setIsReady(true);
+            })
+            .catch(e => {
+                console.error('[Audio] No se pudo cargar', src, e);
+                setLoadError(e?.message || 'no se pudo cargar');
+                setIsReady(true); // que se pinte el reproductor con el error visible
+            });
+        return () => { if (revokeUrl) URL.revokeObjectURL(revokeUrl); };
+    }, [src]);
     useEffect(() => { if (audioRef.current) { audioRef.current.playbackRate = playbackRate; audioRef.current.volume = isMuted ? 0 : volume; } }, [playbackRate, volume, isMuted]);
     const togglePlay = () => { const audio = audioRef.current; if (!audio) return; if (isPlaying) audio.pause(); else audio.play(); setIsPlaying(!isPlaying); };
     const toggleSpeed = () => { const speeds = [1, 1.25, 1.5, 2]; setPlaybackRate(speeds[(speeds.indexOf(playbackRate) + 1) % speeds.length]); };
@@ -75,6 +105,7 @@ const CustomAudioPlayer = ({ src, isMe }: { src: string, isMe: boolean }) => {
     const handleSeek = (e: React.ChangeEvent<HTMLInputElement>) => { const audio = audioRef.current; if (!audio) return; const newTime = (Number(e.target.value) / 100) * duration; audio.currentTime = newTime; setProgress(Number(e.target.value)); };
     const formatTime = (time: number) => { if (isNaN(time)) return "0:00"; const min = Math.floor(time / 60); const sec = Math.floor(time % 60); return `${min}:${sec < 10 ? '0' : ''}${sec}`; };
     if (!isReady) return <div className="text-xs text-slate-400 p-2 italic">Cargando...</div>;
+    if (loadError) return <div className="text-xs text-red-500 p-2 italic">Audio no disponible ({loadError}) — <a href={src} target="_blank" rel="noreferrer" className="underline">descargar</a></div>;
     return (<div className={`flex items-start gap-2 p-2 rounded-xl w-full max-w-[320px] select-none transition-colors ${isMe ? 'bg-white/10 backdrop-blur-sm border border-white/10 text-white' : 'bg-white border border-slate-100'}`}> <audio ref={audioRef} src={audioUrl!} onTimeUpdate={onTimeUpdate} onLoadedMetadata={onLoadedMetadata} onEnded={onEnded} className="hidden" /> <button onClick={togglePlay} className={`w-10 h-10 flex items-center justify-center rounded-full transition shadow-sm flex-shrink-0 mt-0.5 ${isMe ? 'bg-white/20 hover:bg-white/30 text-white border border-white/10' : 'bg-indigo-100 text-indigo-600 hover:bg-indigo-200'}`}> {isPlaying ? <Pause className="w-4 h-4 fill-current" /> : <Play className="w-4 h-4 fill-current ml-0.5" />} </button> <div className="flex-1 flex flex-col gap-1 w-full min-w-0"> <div className="h-5 flex items-center"><input type="range" min="0" max="100" value={progress} onChange={handleSeek} className={`w-full h-1.5 rounded-lg appearance-none cursor-pointer ${isMe ? 'accent-white bg-white/20' : 'accent-indigo-500 bg-indigo-100'}`} /></div> <div className={`flex justify-between items-center text-[10px] font-medium h-5 w-full ${isMe ? 'text-white/80' : 'text-slate-500'}`}> <span className="font-mono tabular-nums min-w-[35px]">{currentTime === 0 && !isPlaying ? formatTime(duration) : formatTime(currentTime)}</span> <div className="flex items-center gap-2"> <button onClick={toggleSpeed} className={`px-1.5 py-0.5 rounded text-[9px] font-bold min-w-[22px] text-center ${isMe ? 'bg-black/20 text-white/90' : 'bg-slate-100 text-slate-600'}`}>{playbackRate}x</button> <div className="relative flex items-center group hidden sm:flex" onMouseEnter={() => setShowVolumeSlider(true)} onMouseLeave={() => setShowVolumeSlider(false)}> <button onClick={toggleMute} className={`p-1 ${isMe ? 'hover:bg-white/10' : 'hover:text-slate-800'}`}><Volume2 className="w-3.5 h-3.5" /></button> {showVolumeSlider && <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 bg-white shadow-xl rounded-lg p-2 z-20"><div className="h-16 w-4 flex items-center justify-center"><input type="range" min="0" max="1" step="0.1" value={isMuted ? 0 : volume} onChange={(e) => { setVolume(parseFloat(e.target.value)); setIsMuted(parseFloat(e.target.value) === 0); }} className="-rotate-90 w-14 h-1 bg-gray-200 rounded-lg appearance-none cursor-pointer accent-blue-600" /></div></div>} </div> <a href={src} download="audio.webm" target="_blank" rel="noreferrer" className={`p-1 rounded-full ${isMe ? 'hover:bg-white/10' : 'hover:bg-black/5'}`}><Download className="w-3.5 h-3.5" /></a> </div> </div> </div> </div>);
 };
 
