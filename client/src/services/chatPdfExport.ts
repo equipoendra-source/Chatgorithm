@@ -156,7 +156,7 @@ export async function exportChatToPdf({ messages, contact, companyName }: Export
         pdf.setTextColor(25);
 
         if (m.type === 'image' && m.mediaId) {
-            const url = `${API_URL}/api/media/${m.mediaId}`;
+            const url = `${API_URL}/media/${m.mediaId}`;
             const img = await fetchImageAsDataUrl(url);
             if (img && img.width > 0) {
                 const maxW = Math.min(80, contentWidth);
@@ -193,7 +193,7 @@ export async function exportChatToPdf({ messages, contact, companyName }: Export
                 video: '[VÍDEO]',
                 document: '[DOCUMENTO]'
             };
-            const url = `${API_URL}/api/media/${m.mediaId}`;
+            const url = `${API_URL}/media/${m.mediaId}`;
             const label = labelMap[m.type];
             const caption = m.type === 'document' && m.text ? ` ${m.text}` : '';
             const text = `${label}${caption}\n${url}`;
