@@ -8034,7 +8034,9 @@ function parsePartOrderClave(text: string): { referencia: string; pieza: string;
     const hasMatriculaLabel = low.includes('matricula:') || low.includes('matrícula:');
     const hasStructure = low.includes('pieza:') && (low.includes('ref:') || low.includes('referencia:') || hasMatriculaLabel);
     if (!hasStructure) return null;
-    if (!pieza && !referencia) return null; // plantilla totalmente vacía → no crear
+    // Cualquier hueco vacío se queda vacío y ya está; solo NO creamos el pedido
+    // si mandas la plantilla entera en blanco (los 3 campos vacíos).
+    if (!pieza && !referencia && !matricula) return null;
     return { referencia, pieza, matricula };
 }
 
