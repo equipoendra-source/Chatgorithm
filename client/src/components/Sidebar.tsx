@@ -1023,11 +1023,11 @@ export function Sidebar({
                             Online ({onlineUsers.length})
                         </h3>
                         <div className="flex items-center gap-1.5">
-                            {/* 🔩 Pedidos de Piezas — SOLO para perfiles de Recambios
-                                (decisión de Diego: opción A). Los roles no-Admin son
-                                nombres de departamento del CRM, así que comparamos
-                                contra 'recambios' normalizado. */}
-                            {user.role?.toLowerCase() === 'recambios' && (
+                            {/* 🔩 Pedidos de Piezas — visible para perfiles de Recambios
+                                Y Taller (Diego lo pidió también en Taller). Los roles
+                                no-Admin son nombres de departamento del CRM, así que
+                                comparamos contra la lista normalizada. */}
+                            {['recambios', 'taller'].includes((user.role || '').toLowerCase()) && (
                                 <button onClick={() => setView('part_orders')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Pedidos de Piezas">
                                     <Package className="w-4 h-4" />
                                 </button>
