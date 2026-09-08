@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import {
     Calendar as CalendarIcon, Clock, Plus, Trash2, User, CheckCircle,
     RefreshCw, Phone, ChevronLeft, ChevronRight, ChevronDown, Zap, X, Save, Eye, Loader2, Layers, History, Wrench,
-    PackageCheck, Search, RotateCcw, FileText, Upload
+    PackageCheck, Search, RotateCcw, FileText, Upload, Car
 } from 'lucide-react';
 import { useTheme } from '../context/ThemeContext';
 import { API_URL as API_URL_BASE } from '../config/api';
@@ -1628,6 +1628,15 @@ const CalendarDashboard: React.FC<CalendarDashboardProps> = ({ readOnly = false,
                             </div>
                             <div className="flex items-center gap-3 text-xs text-slate-400 mt-0.5 flex-wrap">
                                 {s.clientPhone && <span className="flex items-center gap-1"><Phone size={11} />{s.clientPhone}</span>}
+                                {/* Matrícula: se pinta al lado del teléfono cuando la cita la tiene.
+                                    Fuente monoespaciada y en mayúsculas para que se lea como una matrícula
+                                    ("1234-ABC"), no como texto normal. Petición del taller (Diego): así el
+                                    mecánico ve de un vistazo qué coche entra sin tener que abrir la cita. */}
+                                {s.matricula && (
+                                    <span className={`flex items-center gap-1 font-mono font-bold uppercase tracking-wide ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>
+                                        <Car size={11} />{s.matricula}
+                                    </span>
+                                )}
                                 {agendas.length > 1 && s.agenda && (
                                     <span className="flex items-center gap-1">
                                         <span className="w-2 h-2 rounded-full" style={{ backgroundColor: agendaColor(s.agenda) }} />
