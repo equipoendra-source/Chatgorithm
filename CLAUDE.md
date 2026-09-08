@@ -83,15 +83,25 @@ Al intentarlo aparecieron dos bloqueos que no eran obvios:
 opcionales que falten (`MirroredWabas`, `Footer`, `MetaId`, `VariableMapping`) se
 detectan y se omiten sin romper la importación.
 
-### Verificado
-`tsc` limpio en server y client, `vite build` OK, y 24 pruebas de lógica ejecutadas
-sobre las 8 plantillas reales de producción + casos de snake_case y falsos positivos.
-**Sin probar contra la API real de Meta**: requiere que la plantilla
-`pedidos_proveedor` esté aprobada.
+### Verificado EN PRODUCCIÓN (2026-09-08, tras desplegar)
+`tsc` limpio en server y client, `vite build` OK, 24 pruebas de lógica sobre las
+plantillas reales + snake_case + falsos positivos, y **la sincronización ejecutada
+contra la API real**:
+```
+{"updated":0,"imported":2,"importErrors":[],
+ "skipped":["coche_listo_recogida_factura: variables en el encabezado multimedia",
+            "factura_entrega_: variables en el encabezado multimedia"]}
+```
+Importó `pedido_proveedor` (ojo: **singular**) con
+`variableMapping = {referencia, pieza, matricula}`, y se comprobó que genera los
+`parameter_name` correctos y que el emparejador de pedidos extrae bien los 3 campos.
 
-### ⚠️ Pendiente al desplegar
-Hasta que `pedidos_proveedor` esté APROBADA y sincronizada **no hay ninguna vía de
-registro de pedidos**, porque la del mensaje en clave se ha retirado.
+Las dos plantillas de FACTURA se omiten a propósito: llevan encabezado de documento
+y se envían por `sendTemplateWithDocument`, no por el selector genérico. No es una
+regresión — tampoco estaban antes en la lista de la app.
+
+**Lo único sin probar es un envío real** (mandaría un WhatsApp a un proveedor de
+verdad y crearía un pedido real en el panel).
 
 ---
 
