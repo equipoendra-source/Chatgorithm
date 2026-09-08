@@ -951,8 +951,13 @@ const CampaignWizard: React.FC<{
         return body?.text || selectedTemplate.body || '';
     }, [selectedTemplate]);
     const templateVarCount = useMemo(() => {
-        const matches = templateBodyText.match(/\{\{\d+\}\}/g);
-        return matches ? matches.length : 0;
+        // Cuenta variables DISTINTAS, numeradas ({{1}}) y con nombre
+        // ({{referencia}}). Solo contar {{\d+}} hacía que una plantilla
+        // importada de la consola de Meta apareciera como "sin variables" y se
+        // enviara sin parámetros, con el consiguiente rechazo de Meta.
+        const matches = templateBodyText.match(/\{\{\s*[A-Za-z0-9_]+\s*\}\}/g);
+        if (!matches) return 0;
+        return new Set(matches.map((m: string) => m.replace(/[{}\s]/g, ''))).size;
     }, [templateBodyText]);
 
     // Ajustar tamaño del array de variables al cambiar de plantilla

@@ -26,6 +26,75 @@
 
 ---
 
+## Sesión 2026-09-08 — Importar plantillas de Meta + pedidos de piezas por plantilla
+
+### El problema real
+El pedido de recambio al proveedor se registraba parseando el **mensaje en clave**
+(`Ref:` / `Pieza:` / `Matricula:`) en texto libre. Fuera de la ventana de 24h Meta
+rechaza el texto libre (131047): el proveedor **no recibía nada** y aun así se creaba
+el pedido → pedidos fantasma. La solución es enviarlo como plantilla aprobada.
+
+Al intentarlo aparecieron dos bloqueos que no eran obvios:
+1. **`sync-status` nunca importó plantillas.** Nació así (commit `0ee859f`): recorre
+   los registros que YA están en Airtable y solo actualiza `Status`. Una plantilla
+   creada en la consola web de Meta era invisible para la app, porque
+   `/api/templates` lee solo de Airtable.
+2. **La consola de Meta ya no deja crear variables numeradas.** Obliga a
+   `{{referencia}}` en minúsculas con guion bajo. La app solo enviaba parámetros
+   posicionales, que Meta rechaza en una plantilla nombrada.
+
+### Qué cambió (`server/src/index.ts`)
+- **Importación en `POST /api/templates/sync-status`**: además de actualizar estados,
+  da de alta en Airtable las plantillas que están en Meta y no en la app. Pagina
+  siguiendo `paging.next` (una WABA admite 250 plantillas, 6.000 si está verificada).
+  Devuelve `{updated, imported, skipped, importErrors}`.
+- **Variables con nombre**: `buildTemplateBodyParameters()` emite `parameter_name`
+  cuando el cuerpo usa `{{nombre}}`, y posicional cuando usa `{{1}}`. Lo usan los
+  cuatro caminos de envío (`send-template`, `sendTemplateMessage`,
+  `sendTemplateWithDocument` y grupos nativos), no solo uno.
+- **`getTemplateBody()` cacheado** (`templateBodyCache`): `sendTemplateMessage` se
+  llama una vez POR DESTINATARIO en campañas y fanout; sin caché serían 1.000
+  consultas contra el límite de 5/s de Airtable. Se invalida al crear, borrar e importar.
+- **Captura del pedido movida a `POST /api/send-template`**. Identifica qué variable
+  es referencia/pieza/matrícula por la CLAVE (`{{referencia}}`) o, en las numeradas,
+  por la etiqueta de `VariableMapping`. Exige un hueco de "pieza" para no registrar
+  pedidos desde otras plantillas que lleven matrícula.
+- **Se retiró** la captura desde el mensaje en clave (socket `chatMessage`) y la
+  función `parsePartOrderClave`.
+- **`v18.0` → `GRAPH_TEMPLATES_VERSION = 'v21.0'`** en las 5 llamadas de plantillas.
+  v18.0 expiró el 26-ene-2026; Graph reenrutaba solo a otra versión sin avisar.
+
+### Trampas encontradas en revisión (no repetir)
+- **`\b` NO sirve para `snake_case`**: `_` es carácter de palabra, así que
+  `\bpieza\b` no casa con `nombre_pieza` — justo el formato que obliga Meta. Se
+  trocea el identificador con `split(/[^a-z0-9]+/)` y se comparan palabras enteras.
+  Con `includes` a secas el problema es el contrario: "limpieza" contiene "pieza" y
+  "refrigerante" contiene "ref".
+- **Buscar la plantilla por nombre + idioma necesita fallback a solo nombre**: las
+  campañas mandan `es_ES` por defecto y una plantilla importada de Meta puede ser `es`.
+- **Un fallo de Airtable no es lo mismo que "no existe"**: el flag `tplLookupOk`
+  evita bloquear un envío que hoy funciona si Airtable da un 429.
+- Un regex con `/g` es stateful con `.test()` → existe `HAS_PLACEHOLDER_RE` sin `/g`.
+- Airtable tumba el lote ENTERO si falta una columna, y `typecast` NO crea campos:
+  el import reintenta registro a registro quitando columnas opcionales.
+
+### Airtable
+**Nada que crear.** Se reutiliza la tabla `Templates` existente. Las columnas
+opcionales que falten (`MirroredWabas`, `Footer`, `MetaId`, `VariableMapping`) se
+detectan y se omiten sin romper la importación.
+
+### Verificado
+`tsc` limpio en server y client, `vite build` OK, y 24 pruebas de lógica ejecutadas
+sobre las 8 plantillas reales de producción + casos de snake_case y falsos positivos.
+**Sin probar contra la API real de Meta**: requiere que la plantilla
+`pedidos_proveedor` esté aprobada.
+
+### ⚠️ Pendiente al desplegar
+Hasta que `pedidos_proveedor` esté APROBADA y sincronizada **no hay ninguna vía de
+registro de pedidos**, porque la del mensaje en clave se ha retirado.
+
+---
+
 ## Sesión 2026-03-30 — Fix audio chat de equipo (TeamChat)
 
 ### Problema reportado

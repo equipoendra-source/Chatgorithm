@@ -128,8 +128,10 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
   };
 
   const renderPreview = (text: string) => {
-    return text.split(/({{\d+}})/g).map((part, i) => {
-      if (part.match(/^{{\d+}}$/)) {
+    // Acepta variables numeradas ({{1}}) y con nombre ({{referencia}}). Las
+    // creadas desde la consola de Meta siempre son con nombre.
+    return text.split(/({{[A-Za-z0-9_]+}})/g).map((part, i) => {
+      if (part.match(/^{{[A-Za-z0-9_]+}}$/)) {
         const num = part.replace(/[{}]/g, '');
         const val = variableValues[num];
         return <span key={i} className="font-bold text-slate-900 bg-yellow-100 px-1 rounded mx-0.5">{val || '...'}</span>;
@@ -201,7 +203,11 @@ const ChatTemplateSelector: React.FC<ChatTemplateSelectorProps> = ({ isOpen, onC
               {selectedTemplate.variableMapping && Object.keys(selectedTemplate.variableMapping).length > 0 ? (
                 <div className="space-y-3">
                   <h4 className="text-xs font-bold text-slate-400 uppercase">Rellenar datos</h4>
-                  {Object.keys(selectedTemplate.variableMapping).sort().map(key => (
+                  {/* Sin .sort(): las claves vienen en orden de aparición en el
+                      cuerpo, que es el orden en que el servidor espera los
+                      valores. Ordenar alfabéticamente descolocaba los campos en
+                      las plantillas con variables por nombre. */}
+                  {Object.keys(selectedTemplate.variableMapping).map(key => (
                     <div key={key}>
                       <label className="text-xs font-semibold text-blue-600 mb-1 flex items-center gap-1"><User size={12} /> {selectedTemplate.variableMapping![key] || `Variable {{${key}}}`}</label>
                       <input

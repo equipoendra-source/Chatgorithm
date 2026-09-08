@@ -320,7 +320,7 @@ app.post('/api/admin/migrate-templates', async (req, res) => {
                 }
 
                 const metaRes = await axios.post(
-                    `https://graph.facebook.com/v18.0/${waBusinessId}/message_templates`,
+                    graphTemplatesUrl(waBusinessId),
                     metaPayload,
                     { headers: { Authorization: `Bearer ${waToken}`, 'Content-Type': 'application/json' }, timeout: 15000 }
                 );
@@ -796,6 +796,14 @@ async function getClientWindowState(phone: string): Promise<{ inWindow: boolean;
 //
 // La Groups API vive en una versión de Graph más nueva que el resto de llamadas
 // del proyecto (que usan v21.0), por eso su propia constante.
+// Plantillas: estaban en v18.0, que Meta retiró el 26-ene-2026. Una versión
+// caducada no falla — Graph la reenruta sola a la siguiente viva — pero eso
+// significa correr contra una versión que cambia sin avisar. Fijamos la misma
+// que ya usa el resto de la app para mensajes (viva hasta el 21-ene-2027).
+const GRAPH_TEMPLATES_VERSION = 'v21.0';
+const graphTemplatesUrl = (businessId: string) =>
+    `https://graph.facebook.com/${GRAPH_TEMPLATES_VERSION}/${businessId}/message_templates`;
+
 const GRAPH_GROUPS_VERSION = 'v25.0';
 const graphGroupsUrl = (path: string) => `https://graph.facebook.com/${GRAPH_GROUPS_VERSION}/${path}`;
 
@@ -2962,6 +2970,65 @@ async function runScheduleMaintenance() {
 //  SISTEMA DE NOTIFICACIONES AUTOMÁTICAS
 // ==========================================
 
+// Construye los `parameters` del componente body de una plantilla.
+// Meta admite dos formatos y NO se pueden mezclar en la misma plantilla:
+//   - posicional: {{1}} {{2}}  -> [{type:'text', text}]              (el de siempre)
+//   - con nombre: {{referencia}} -> [{type:'text', parameter_name, text}]
+// Las creadas desde la consola web de Meta son siempre con nombre (su UI ya no
+// deja usar números), así que hay que mirar el cuerpo para saber cuál toca.
+// `templateBody` puede venir vacío: entonces caemos a posicional, que es el
+// formato por defecto de la API y el de todas las plantillas creadas por la app.
+function buildTemplateBodyParameters(templateBody: string, variables: string[]): any[] {
+    const keys = extractPlaceholderKeys(templateBody || '');
+    const named = keys.some(k => !/^\d+$/.test(k));
+    // Con formato nombrado hay que recortar a los huecos que existen: un
+    // parámetro sobrante saldría SIN parameter_name, y Meta rechaza el mensaje
+    // entero si el array mezcla los dos formatos.
+    const vals = named ? (variables || []).slice(0, keys.length) : (variables || []);
+    return vals.map((val, i) => (
+        named && keys[i]
+            ? { type: "text", parameter_name: keys[i].toLowerCase(), text: val }
+            : { type: "text", text: val }
+    ));
+}
+
+// Cuerpo de una plantilla tal y como lo tenemos en Airtable. Devuelve '' si no
+// la conocemos (entonces se asume el formato posicional).
+//
+// CACHEADO igual que templateLangCache y por el mismo motivo: sendTemplateMessage
+// se llama UNA VEZ POR DESTINATARIO en las campañas y en el fanout de grupos. Sin
+// caché, una campaña de 1.000 añadiría 1.000 consultas a Airtable, cuyo límite es
+// de 5/s — y un 429 aquí devolvería '' en silencio, mandando parámetros
+// posicionales para una plantilla con nombre a mitad de campaña.
+const templateBodyCache = new Map<string, string>();
+
+async function getTemplateBody(templateName: string, language?: string): Promise<string> {
+    if (!base || !templateName) return '';
+    const cacheKey = `${templateName}|${language || ''}`;
+    const cached = templateBodyCache.get(cacheKey);
+    if (cached !== undefined) return cached;
+    try {
+        const pick = async (formula: string) => {
+            const r = await base!(TABLE_TEMPLATES).select({ filterByFormula: formula, maxRecords: 1 }).firstPage();
+            return r.length > 0 ? String(r[0].get('Body') || '') : null;
+        };
+        let body: string | null = null;
+        if (language) body = await pick(`AND({Name}='${escAt(templateName)}', {Language}='${escAt(language)}')`);
+        // Fallback por nombre a secas: el idioma que nos pasan no siempre coincide
+        // con el guardado ('es' vs 'es_ES'). Las campañas, por ejemplo, mandan
+        // 'es_ES' por defecto aunque la plantilla importada de Meta sea 'es'.
+        if (body === null) body = await pick(`{Name}='${escAt(templateName)}'`);
+        const result = body || '';
+        templateBodyCache.set(cacheKey, result);
+        return result;
+    } catch (e: any) {
+        // NO cacheamos el fallo: un 429 puntual no debe dejar la plantilla
+        // marcada como "sin cuerpo" durante toda la campaña.
+        console.warn(`[Template] No se pudo leer el cuerpo de "${templateName}":`, e?.message);
+        return '';
+    }
+}
+
 // --- Enviar plantilla WhatsApp (reutilizable) ---
 // Devuelve true si OK, o un string con el mensaje de error si falla.
 async function sendTemplateMessage(phone: string, templateName: string, variables: string[], originPhoneId: string, language?: string): Promise<true | string> {
@@ -2969,7 +3036,7 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
     if (!token) { const msg = `Token no encontrado para ${originPhoneId}`; console.error(`❌ [Notif] ${msg}`); return msg; }
     const cleanTo = cleanNumber(phone);
 
-    const parameters = variables.map(val => ({ type: "text", text: val }));
+    const parameters = buildTemplateBodyParameters(await getTemplateBody(templateName, language), variables);
     const components: any[] = parameters.length > 0 ? [{ type: "body", parameters }] : [];
 
     // Resolución de idioma (evita el error #132001 "la plantilla no existe en es_ES").
@@ -3095,7 +3162,7 @@ async function resolveTemplateLanguage(templateName: string, originPhoneId: stri
     const allNames: string[] = [];
     for (const t of wabaTargets) {
         try {
-            const r = await axios.get(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
+            const r = await axios.get(graphTemplatesUrl(t.businessId), {
                 params: { fields: 'name,language,status', limit: 200 },
                 headers: { Authorization: `Bearer ${t.token}` }
             });
@@ -3145,7 +3212,7 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
         { type: "header", parameters: [{ type: "document", document: { link: documentUrl, filename: filename || 'Factura.pdf' } }] }
     ];
     if (bodyVars.length > 0) {
-        components.push({ type: "body", parameters: bodyVars.map(v => ({ type: "text", text: v })) });
+        components.push({ type: "body", parameters: buildTemplateBodyParameters(await getTemplateBody(templateName), bodyVars) });
     }
     // El idioma de la plantilla puede ser "es", "es_ES", "es_MX"… Enviar con el
     // código equivocado da el error #132001 ("does not exist in es_ES").
@@ -7993,59 +8060,15 @@ function serializePartOrder(r: any) {
     };
 }
 
-// FASE 2 — Captura automática del "mensaje en clave" a proveedores.
-// Cuando un agente de Recambios escribe al proveedor con la plantilla:
-//     Ref: 889
-//     Pieza: Embrague
-//     Matricula: 1234-ABC
-// creamos el pedido solo en la tabla PartOrders, sin teclear nada más.
-// El proveedor se saca del CONTACTO al que se le escribe (no va en el
-// mensaje). Diego eligió el formato de 3 etiquetas SIN palabra mágica, así
-// que para no crear pedidos por error exigimos que estén las TRES etiquetas
-// (Ref/Pieza/Matricula) presentes y que la referencia tenga algún valor.
-//
-// Devuelve el objeto pedido a crear, o null si el mensaje no es una clave.
-function parsePartOrderClave(text: string): { referencia: string; pieza: string; matricula: string } | null {
-    if (!text) return null;
-    // Leemos LÍNEA A LÍNEA: para cada línea partimos por el PRIMER ':' y
-    // comparamos la etiqueta (antes del ':') con los alias. El valor es lo que
-    // queda en ESA MISMA línea. Así evitamos el bug de que, si "Ref:" va vacío,
-    // el valor "salte" a la línea siguiente (antes cogía "Pieza: embrague"
-    // como referencia porque el \s* del regex se comía el salto de línea).
-    const lines = text.split(/\r?\n/);
-    const grabFrom = (aliases: string[]): string => {
-        for (const line of lines) {
-            const idx = line.indexOf(':');
-            if (idx === -1) continue;
-            const label = line.slice(0, idx).trim().toLowerCase();
-            if (aliases.includes(label)) return line.slice(idx + 1).trim();
-        }
-        return '';
-    };
-    const referencia = grabFrom(['ref', 'referencia']);
-    const pieza = grabFrom(['pieza']);
-    const matricula = grabFrom(['matricula', 'matrícula']);
-    // Señal de que es una clave de pedido (no un mensaje normal):
-    //  1) estructura: está la etiqueta "Pieza:" Y al menos otra (Ref/Matrícula).
-    //  2) contenido: al menos la pieza O la referencia tiene valor.
-    // La REFERENCIA es OPCIONAL: muchas veces se pide la pieza sin tener aún la
-    // ref (se la pides al proveedor). Basta con describir la pieza.
-    const low = text.toLowerCase();
-    const hasMatriculaLabel = low.includes('matricula:') || low.includes('matrícula:');
-    const hasStructure = low.includes('pieza:') && (low.includes('ref:') || low.includes('referencia:') || hasMatriculaLabel);
-    if (!hasStructure) return null;
-    // Cualquier hueco vacío se queda vacío y ya está; solo NO creamos el pedido
-    // si mandas la plantilla entera en blanco (los 3 campos vacíos).
-    if (!pieza && !referencia && !matricula) return null;
-    return { referencia, pieza, matricula };
-}
-
-// Crea el pedido si el mensaje saliente es una clave de pedido. Fire-and-forget:
-// nunca lanza ni bloquea el envío del mensaje al proveedor.
-async function maybeCreatePartOrderFromMessage(text: string, recipientPhone: string, agentName: string): Promise<void> {
+// Crea el registro del pedido. Fire-and-forget: nunca lanza ni bloquea el envío
+// del mensaje al proveedor. `origen` solo sirve para el log.
+async function createPartOrderRecord(
+    parsed: { referencia: string; pieza: string; matricula: string },
+    recipientPhone: string,
+    agentName: string,
+    origen: string
+): Promise<void> {
     if (!base) return;
-    const parsed = parsePartOrderClave(text);
-    if (!parsed) return;
     try {
         // Nombre del proveedor = nombre del contacto al que se escribe.
         let proveedor = '';
@@ -8066,11 +8089,68 @@ async function maybeCreatePartOrderFromMessage(text: string, recipientPhone: str
                 orderedBy: agentName || ''
             }
         }], { typecast: true });
-        console.log(`🔩 [PartOrder] Pedido AUTO creado desde clave: ref="${parsed.referencia}" prov="${proveedor}" por "${agentName}"`);
+        console.log(`🔩 [PartOrder] Pedido AUTO creado desde ${origen}: ref="${parsed.referencia}" pieza="${parsed.pieza}" prov="${proveedor}" por "${agentName}"`);
     } catch (e: any) {
         // Si falta la tabla/campos, avisamos pero NUNCA rompemos el envío.
         console.warn('[PartOrder] No se pudo crear el pedido automático:', partOrdersSetupError(e) || e?.message);
     }
+}
+
+// --- Captura del pedido al enviar la PLANTILLA de pedido a proveedor -------
+// Sustituye al mensaje en clave: fuera de la ventana de 24h el texto libre lo
+// rechaza Meta (131047) y la plantilla es la única vía. Aquí no parseamos texto
+// renderizado (las etiquetas del cuerpo son prosa: "Referencia de la pieza:"),
+// sino que identificamos cada variable por su CLAVE ({{referencia}}) o, en
+// plantillas numeradas, por su etiqueta en VariableMapping ({{1}} = "Referencia").
+const normalizePartOrderIdent = (s: string) => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim();
+
+function partOrderFromTemplateVars(
+    placeholderKeys: string[],
+    variableMapping: Record<string, string>,
+    variables: string[]
+): { referencia: string; pieza: string; matricula: string } | null {
+    let referencia = '', pieza = '', matricula = '';
+    let sawPieza = false;
+
+    // Troceamos el identificador en PALABRAS y comparamos completas. No sirve
+    // `includes` (en un taller "limpieza" contiene "pieza" y "refrigerante"
+    // contiene "ref" → pedidos con los campos cruzados), pero tampoco sirve
+    // `\b`: Meta obliga a nombrar las variables en minúsculas con guion bajo, y
+    // en un regex `_` es carácter de palabra, así que `\bpieza\b` NO casa con
+    // "nombre_pieza" — que es justo la forma que tendrán las plantillas reales.
+    const MATRICULA = ['matricula', 'matriculas'];
+    const REFERENCIA = ['ref', 'refs', 'referencia', 'referencias'];
+    const PIEZA = ['pieza', 'piezas', 'recambio', 'recambios'];
+
+    placeholderKeys.forEach((key, i) => {
+        const value = String(variables[i] ?? '').trim();
+        // Miramos la clave Y la etiqueta. En las nombradas la clave ya es
+        // descriptiva ({{referencia}}); en las numeradas ({{1}}) la clave no
+        // dice nada y hay que mirar la etiqueta de VariableMapping.
+        const keyNorm = normalizePartOrderIdent(key);
+        const labelNorm = normalizePartOrderIdent(String(variableMapping?.[key] || ''));
+        const ident = /^\d+$/.test(keyNorm) ? labelNorm : `${keyNorm} ${labelNorm}`;
+        const tokens = ident.split(/[^a-z0-9]+/).filter(Boolean);
+        const casa = (lista: string[]) => tokens.some(t => lista.includes(t));
+
+        // Orden deliberado: "referencia_pieza" casa con las dos y debe ganar
+        // referencia. Se evalúa matrícula, luego referencia, luego pieza.
+        if (casa(MATRICULA)) { if (!matricula) matricula = value; }
+        else if (casa(REFERENCIA)) { if (!referencia) referencia = value; }
+        else if (casa(PIEZA)) {
+            sawPieza = true;
+            if (!pieza) pieza = value;
+            else console.warn(`[PartOrder] La plantilla tiene más de un hueco de pieza ("${key}"); solo se registra el primero.`);
+        }
+    });
+
+    // Exigimos que la plantilla TENGA un hueco de pieza — es la señal de que es
+    // un pedido de recambio y no otra plantilla que casualmente lleve matrícula
+    // (p. ej. un recordatorio de ITV). Y que se haya rellenado algo, para no
+    // registrar pedidos vacíos.
+    if (!sawPieza) return null;
+    if (!pieza && !referencia && !matricula) return null;
+    return { referencia, pieza, matricula };
 }
 
 app.get('/api/part-orders', async (_req, res) => {
@@ -9759,7 +9839,7 @@ app.post('/api/create-template', async (req, res) => {
             try {
                 console.log(`📤 [Template] Creando "${formattedName}" en WABA ${target.label} (${target.businessId})`);
                 const metaRes = await axios.post(
-                    `https://graph.facebook.com/v18.0/${target.businessId}/message_templates`,
+                    graphTemplatesUrl(target.businessId),
                     metaPayload,
                     { headers: { 'Authorization': `Bearer ${target.token}`, 'Content-Type': 'application/json' } }
                 );
@@ -9817,6 +9897,9 @@ app.post('/api/create-template', async (req, res) => {
                 createdRecords = await base(TABLE_TEMPLATES).create([{ fields: recordFields }]);
             } else throw e;
         }
+        // Puede haber una entrada negativa cacheada de un intento de envío
+        // anterior a la creación.
+        templateBodyCache.clear();
 
         res.json({
             success: true,
@@ -9859,7 +9942,7 @@ app.delete('/api/delete-template/:id', async (req, res) => {
             }
             for (const t of wabaTargets) {
                 try {
-                    await axios.delete(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
+                    await axios.delete(graphTemplatesUrl(t.businessId), {
                         params: { name: templateName },
                         headers: { Authorization: `Bearer ${t.token}` }
                     });
@@ -9876,6 +9959,7 @@ app.delete('/api/delete-template/:id', async (req, res) => {
 
         // 3. Borrar la copia local en Airtable.
         try { await base(TABLE_TEMPLATES).destroy([req.params.id]); } catch { /* ya no existía */ }
+        templateBodyCache.clear();
 
         const metaWarnings = metaResults.filter(r => !r.ok).map(r => r.error).filter(Boolean);
         res.json({
@@ -9894,6 +9978,101 @@ app.delete('/api/delete-template/:id', async (req, res) => {
 // dejando plantillas como "PENDING" en Airtable aunque Meta ya las aprobó. Este
 // endpoint consulta el estado real en cada WABA y actualiza Airtable. Empareja
 // por nombre+idioma (más robusto que por MetaId en multi-WABA).
+// --- Importación de plantillas creadas fuera de la app --------------------
+// Una plantilla creada en la consola de Meta no existía para Chatgorithm:
+// /api/templates lee solo de Airtable. Estos helpers traducen la forma que
+// devuelve el Graph API al esquema de la tabla Templates.
+
+interface MetaTemplateSummary {
+    name: string;
+    language: string;
+    status: string;
+    category: string;
+    metaId: string;
+    components: any[];
+    mirrored: Record<string, { metaId: string, status: string }>;
+}
+
+// Acepta variables numeradas ({{1}}) y con NOMBRE ({{referencia}}). Meta obliga
+// a las segundas desde 2026 en su consola web, así que las plantillas creadas
+// ahí siempre llegan con nombre.
+// SIN tolerancia a espacios interiores a propósito: Meta no los genera y el
+// frontend (vista previa y sustitución de valores) tampoco los reconoce; ser
+// más laxo aquí que allí descuadraba el número de variables entre los dos.
+const TEMPLATE_PLACEHOLDER_RE = /{{([A-Za-z0-9_]+)}}/g;
+// Versión SIN /g para usar con .test(): un regex global es stateful (test()
+// avanza lastIndex y la siguiente llamada empieza donde lo dejó), lo que da
+// falsos negativos alternos si se reutiliza el mismo objeto.
+const HAS_PLACEHOLDER_RE = /{{[A-Za-z0-9_]+}}/;
+
+function extractComponentText(components: any[], type: 'BODY' | 'FOOTER'): string {
+    const c = (components || []).find(x => String(x?.type || '').toUpperCase() === type);
+    return String(c?.text || '');
+}
+
+// La app solo rellena variables del cuerpo. Devuelve dónde hay variables que no
+// sabemos enviar ('el encabezado', 'los botones'), o '' si la plantilla es
+// enviable tal cual.
+function templateHasVarsOutsideBody(components: any[]): string {
+    const sitios: string[] = [];
+    for (const c of (components || [])) {
+        const type = String(c?.type || '').toUpperCase();
+        if (type === 'HEADER') {
+            // Encabezado de texto con variables, o de media (que exige pasar el
+            // handle del archivo en cada envío).
+            const fmt = String(c?.format || 'TEXT').toUpperCase();
+            if (fmt !== 'TEXT') sitios.push('el encabezado multimedia');
+            else if (HAS_PLACEHOLDER_RE.test(String(c?.text || ''))) sitios.push('el encabezado');
+        } else if (type === 'BUTTONS') {
+            for (const b of (c?.buttons || [])) {
+                if (HAS_PLACEHOLDER_RE.test(String(b?.url || '')) ||
+                    String(b?.type || '').toUpperCase() === 'COPY_CODE') {
+                    sitios.push('los botones');
+                    break;
+                }
+            }
+        }
+    }
+    return [...new Set(sitios)].join(' y ');
+}
+
+// Devuelve las claves de variable EN ORDEN DE APARICIÓN en el cuerpo, sin
+// repetir. Ese orden es el contrato con el frontend: ChatTemplateSelector
+// construye el array de valores recorriendo las claves de VariableMapping,
+// así que el orden aquí determina a qué hueco va cada valor.
+function extractPlaceholderKeys(body: string): string[] {
+    const keys: string[] = [];
+    for (const m of String(body || '').matchAll(TEMPLATE_PLACEHOLDER_RE)) {
+        const k = m[1];
+        if (!keys.includes(k)) keys.push(k);
+    }
+    return keys;
+}
+
+// VariableMapping = { clave -> etiqueta legible para el agente }.
+// Preferimos los ejemplos que Meta ya guarda (se ven como "Referencia: A12345"
+// al rellenar); si no hay, usamos el propio nombre de la variable, que en las
+// nombradas ya es descriptivo, y "Variable N" en las numeradas.
+function buildVariableMapping(body: string, components: any[]): Record<string, string> {
+    const keys = extractPlaceholderKeys(body);
+    const bodyComp = (components || []).find(x => String(x?.type || '').toUpperCase() === 'BODY');
+    const example = bodyComp?.example || {};
+
+    // Nombradas: [{ param_name: 'referencia', example: 'A12345' }]
+    const namedExamples: Record<string, string> = {};
+    for (const p of (example.body_text_named_params || [])) {
+        if (p?.param_name) namedExamples[String(p.param_name)] = String(p.example || '');
+    }
+    // Numeradas: [["A12345", "turbo", "7605NKJ"]]
+    const positionalExamples: string[] = Array.isArray(example.body_text?.[0]) ? example.body_text[0] : [];
+
+    const map: Record<string, string> = {};
+    keys.forEach((k, i) => {
+        map[k] = namedExamples[k] || positionalExamples[i] || (/^\d+$/.test(k) ? `Variable ${k}` : k);
+    });
+    return map;
+}
+
 app.post('/api/templates/sync-status', async (_req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     try {
@@ -9911,18 +10090,51 @@ app.post('/api/templates/sync-status', async (_req, res) => {
         }
         if (wabaTargets.length === 0) return res.status(400).json({ error: 'No hay WABAs configuradas.' });
 
-        // 2. Mapa nombre(+idioma) -> status real desde Meta
+        // 2. Mapa nombre(+idioma) -> plantilla real desde Meta.
+        // Guardamos la plantilla ENTERA (no solo el status) porque ahora también
+        // importamos las que existen en Meta pero no en Airtable — el caso de
+        // crear una plantilla desde la consola de Meta en vez de desde la app.
         const metaStatus = new Map<string, string>();
+        const metaTemplates = new Map<string, MetaTemplateSummary>();
         for (const t of wabaTargets) {
             try {
-                const r = await axios.get(`https://graph.facebook.com/v18.0/${t.businessId}/message_templates`, {
-                    params: { fields: 'name,status,language,id', limit: 200 },
-                    headers: { Authorization: `Bearer ${t.token}` }
-                });
-                for (const tpl of (r.data?.data || [])) {
-                    const nm = String(tpl.name || '').toLowerCase();
-                    metaStatus.set(`${nm}|${tpl.language || ''}`, tpl.status);
-                    if (!metaStatus.has(nm)) metaStatus.set(nm, tpl.status); // fallback sin idioma
+                // PAGINADO: una WABA admite 250 plantillas (6.000 si el negocio
+                // está verificado) y Graph puede recortar la página por su
+                // cuenta, así que seguimos el cursor en vez de fiarnos del
+                // limit. El tope de vueltas evita un bucle infinito si Meta
+                // devolviera siempre el mismo cursor.
+                let url: string | null = graphTemplatesUrl(t.businessId);
+                let params: any = { fields: 'name,status,language,id,category,components', limit: 200 };
+                for (let page = 0; page < 50 && url; page++) {
+                    const r: any = await axios.get(url, { params, headers: { Authorization: `Bearer ${t.token}` } });
+                    for (const tpl of (r.data?.data || [])) {
+                        const nm = String(tpl.name || '').toLowerCase();
+                        const lang = String(tpl.language || '');
+                        metaStatus.set(`${nm}|${lang}`, tpl.status);
+                        if (!metaStatus.has(nm)) metaStatus.set(nm, tpl.status); // fallback sin idioma
+
+                        // Una misma plantilla puede vivir en varias WABAs. Acumulamos
+                        // los metaId por businessId para rellenar MirroredWabas igual
+                        // que hace create-template.
+                        const key = `${nm}|${lang}`;
+                        const prev = metaTemplates.get(key);
+                        if (prev) {
+                            prev.mirrored[t.businessId] = { metaId: String(tpl.id || ''), status: String(tpl.status || 'PENDING') };
+                        } else {
+                            metaTemplates.set(key, {
+                                name: String(tpl.name || ''),
+                                language: lang,
+                                status: String(tpl.status || 'PENDING'),
+                                category: String(tpl.category || 'UTILITY'),
+                                metaId: String(tpl.id || ''),
+                                components: Array.isArray(tpl.components) ? tpl.components : [],
+                                mirrored: { [t.businessId]: { metaId: String(tpl.id || ''), status: String(tpl.status || 'PENDING') } }
+                            });
+                        }
+                    }
+                    // La URL de paging ya lleva todos los parámetros embebidos.
+                    url = r.data?.paging?.next || null;
+                    params = undefined;
                 }
             } catch (e: any) {
                 console.warn('[TemplateSync] WABA fallo:', e.response?.data?.error?.message || e.message);
@@ -9932,10 +10144,13 @@ app.post('/api/templates/sync-status', async (_req, res) => {
         // 3. Actualizar Airtable donde el estado difiera
         const records = await base(TABLE_TEMPLATES).select().all();
         const updates: { id: string, fields: any }[] = [];
+        const knownKeys = new Set<string>();
         for (const rec of records) {
             const nm = String(rec.get('Name') || '').toLowerCase();
             const lang = String(rec.get('Language') || '');
             const current = String(rec.get('Status') || '');
+            knownKeys.add(`${nm}|${lang}`);
+            knownKeys.add(nm); // una plantilla ya registrada con otro idioma no se re-importa
             const real = metaStatus.get(`${nm}|${lang}`) || metaStatus.get(nm);
             if (real && real !== current) updates.push({ id: rec.id, fields: { Status: real } });
         }
@@ -9944,7 +10159,105 @@ app.post('/api/templates/sync-status', async (_req, res) => {
             await base(TABLE_TEMPLATES).update(updates.slice(i, i + 10));
             updated += Math.min(10, updates.length - i);
         }
-        res.json({ success: true, updated, checked: records.length });
+
+        // 4. IMPORTAR las que están en Meta pero no en Airtable.
+        // Sin esto, una plantilla creada en la consola de Meta era invisible para
+        // la app: /api/templates lee solo de Airtable, así que no aparecía ni en
+        // el gestor ni en el selector de plantillas del chat.
+        const toImport: { fields: any }[] = [];
+        const skipped: string[] = [];
+        for (const [key, tpl] of metaTemplates) {
+            const nmLower = tpl.name.toLowerCase();
+            if (knownKeys.has(key) || knownKeys.has(nmLower)) continue;
+
+            const body = extractComponentText(tpl.components, 'BODY');
+            // Sin cuerpo no hay nada que representar en la app (p. ej. plantillas
+            // solo-media o de autenticación generadas por Meta). Las saltamos en
+            // vez de crear un registro vacío que rompería el selector.
+            if (!body) {
+                skipped.push(`${tpl.name}: sin texto en el cuerpo`);
+                continue;
+            }
+            // La app solo sabe rellenar variables del BODY: construye
+            // components:[{type:'body'}] al enviar. Una plantilla con variables
+            // en el encabezado o en botones dinámicos se importaría "bien" y
+            // luego Meta rechazaría el envío por faltarle componentes. Mejor no
+            // importarla y decirlo.
+            const unsupported = templateHasVarsOutsideBody(tpl.components);
+            if (unsupported) {
+                skipped.push(`${tpl.name}: variables en ${unsupported} (no soportado)`);
+                continue;
+            }
+
+            // Marcamos el nombre como visto SOLO cuando la plantilla es
+            // realmente importable, y antes de encolarla: si la misma plantilla
+            // está en Meta en dos idiomas y ninguno en Airtable, sin esto se
+            // crearían DOS filas con el mismo Name en una sola pulsación. Y
+            // marcarlo antes de los descartes de arriba haría que una variante
+            // válida se perdiera por culpa de otra que no lo era.
+            knownKeys.add(nmLower);
+            knownKeys.add(key);
+
+            toImport.push({
+                fields: {
+                    "Name": tpl.name,
+                    "Category": tpl.category,
+                    "Language": tpl.language,
+                    "Body": body,
+                    "Footer": extractComponentText(tpl.components, 'FOOTER'),
+                    "Status": tpl.status,
+                    "MetaId": tpl.metaId,
+                    "VariableMapping": JSON.stringify(buildVariableMapping(body, tpl.components)),
+                    "MirroredWabas": JSON.stringify(tpl.mirrored)
+                }
+            });
+        }
+
+        // Airtable rechaza el lote ENTERO si una sola columna no existe en la
+        // base (UNKNOWN_FIELD_NAME), y `typecast` no crea campos: solo coacciona
+        // valores. Por eso, si un lote falla, reintentamos registro a registro
+        // quitando las columnas opcionales, para no perder 10 plantillas por una.
+        const OPTIONAL_FIELDS = ['MirroredWabas', 'Footer', 'MetaId', 'VariableMapping'];
+        let imported = 0;
+        const importErrors: string[] = [];
+
+        const createOne = async (fields: any, intento = 0): Promise<void> => {
+            try {
+                await base!(TABLE_TEMPLATES).create([{ fields }], { typecast: true });
+                imported++;
+                return;
+            } catch (e: any) {
+                const msg = String(e?.message || '');
+                // `f in fields` es imprescindible: sin él, si el mensaje de error
+                // menciona una columna que ya habíamos quitado (p. ej. porque la
+                // plantilla se llama "footer_promo" y Airtable hace eco del dato),
+                // el destructuring no cambiaría nada y la recursión sería infinita.
+                const culprit = OPTIONAL_FIELDS.find(f => f in fields && new RegExp(f, 'i').test(msg));
+                if (culprit && intento < OPTIONAL_FIELDS.length) {
+                    const { [culprit]: _drop, ...rest } = fields;
+                    console.warn(`[TemplateSync] La columna "${culprit}" no existe en Airtable — reintentando sin ella.`);
+                    return createOne(rest, intento + 1); // puede faltar más de una
+                }
+                importErrors.push(`${fields.Name}: ${msg || 'error desconocido'}`);
+            }
+        };
+
+        for (let i = 0; i < toImport.length; i += 10) {
+            const batch = toImport.slice(i, i + 10);
+            try {
+                await base(TABLE_TEMPLATES).create(batch, { typecast: true });
+                imported += batch.length;
+            } catch (_e) {
+                for (const b of batch) await createOne(b.fields);
+            }
+        }
+        // El cuerpo de las plantillas acaba de cambiar en Airtable.
+        if (imported > 0) templateBodyCache.clear();
+        if (imported > 0) console.log(`📥 [TemplateSync] Importadas ${imported} plantilla(s) creadas fuera de la app.`);
+        if (skipped.length > 0) console.warn('[TemplateSync] Omitidas:', skipped.join(' | '));
+        if (importErrors.length > 0) console.warn('[TemplateSync] Fallos importando:', importErrors.join(' | '));
+
+        res.json({ success: true, updated, imported, checked: records.length, importErrors, skipped });
     } catch (e: any) {
         console.error('[TemplateSync] Error:', e.message);
         res.status(500).json({ error: e.message });
@@ -9956,6 +10269,18 @@ app.post('/api/send-template', async (req, res) => {
     const token = getToken(originPhoneId);
     if (!token) return res.status(500).json({ error: "Credenciales" });
     const cleanTo = cleanNumber(phone);
+    // Cuerpo de la plantilla tal y como lo tenemos registrado. Lo necesitamos
+    // más abajo para saber si sus variables son numeradas ({{1}}) o con nombre
+    // ({{referencia}}): Meta exige `parameter_name` en las segundas.
+    let tplBody = '';
+    // VariableMapping de la plantilla ({{clave}} -> etiqueta). Lo usa el
+    // registro automático de pedidos de piezas para saber qué variable es la
+    // referencia, cuál la pieza y cuál la matrícula.
+    let tplVarMapping: Record<string, string> = {};
+    // ¿Pudimos consultar Airtable? Si la consulta falla (429, timeout), NO
+    // podemos concluir que la plantilla no está registrada, y bloquear el envío
+    // sería una regresión: antes de este cambio el mensaje salía igualmente.
+    let tplLookupOk = false;
     try {
         // Validar que la plantilla esté APPROVED antes de gastar la llamada
         // a Meta. En multi-WABA, cada WABA aprueba la plantilla por separado:
@@ -9966,12 +10291,36 @@ app.post('/api/send-template', async (req, res) => {
         // fallback al campo Status global del registro.
         if (base && templateName) {
             try {
-                const tplRecords = await base(TABLE_TEMPLATES).select({
-                    filterByFormula: `{Name}='${escAt(templateName)}'`,
+                // Nombre + IDIOMA: en Meta la identidad de una plantilla son las
+                // dos cosas, y dos idiomas pueden tener cuerpos distintos (y por
+                // tanto variables distintas). Buscar solo por nombre devolvía una
+                // fila al azar cuando había varias traducciones.
+                let tplRecords = await base(TABLE_TEMPLATES).select({
+                    filterByFormula: language
+                        ? `AND({Name}='${escAt(templateName)}', {Language}='${escAt(language)}')`
+                        : `{Name}='${escAt(templateName)}'`,
                     maxRecords: 1
                 }).firstPage();
+                // Fallback por nombre a secas: el código de idioma no siempre
+                // coincide con el guardado ('es' vs 'es_ES'), y sin esto una
+                // plantilla perfectamente registrada se trataría como desconocida.
+                if (tplRecords.length === 0 && language) {
+                    tplRecords = await base(TABLE_TEMPLATES).select({
+                        filterByFormula: `{Name}='${escAt(templateName)}'`,
+                        maxRecords: 1
+                    }).firstPage();
+                }
+                // La consulta ha ido bien (encuentre o no fila). Lo distinguimos
+                // de "Airtable falló", porque solo en el primer caso podemos
+                // afirmar que la plantilla no está registrada.
+                tplLookupOk = true;
                 if (tplRecords.length > 0) {
                     const tpl = tplRecords[0];
+                    tplBody = String(tpl.get('Body') || '');
+                    try {
+                        const vmRaw = tpl.get('VariableMapping') as string;
+                        if (vmRaw) tplVarMapping = JSON.parse(vmRaw);
+                    } catch (_) { /* mapping corrupto: seguimos sin él */ }
                     const globalStatus = String(tpl.get('Status') || '').toUpperCase();
 
                     // Resolver el businessId de la WABA desde la que enviamos
@@ -10019,7 +10368,34 @@ app.post('/api/send-template', async (req, res) => {
             }
         }
 
-        const parameters = variables.map((val: string) => ({ type: "text", text: val }));
+        // Variables con NOMBRE vs numeradas. Las plantillas creadas desde la
+        // consola de Meta (obligatorio desde 2026) usan {{referencia}}; las que
+        // crea esta app usan {{1}}. Meta RECHAZA una plantilla nombrada si le
+        // mandas parámetros posicionales, así que hay que etiquetarlos.
+        // El orden de `variables` es el de aparición en el cuerpo — mismo
+        // contrato que usa buildVariableMapping al importar.
+        const vars: string[] = Array.isArray(variables) ? variables : [];
+        const placeholderKeys = extractPlaceholderKeys(tplBody);
+
+        // Si la plantilla lleva variables pero NO la tenemos registrada, no
+        // sabemos si es numerada o con nombre. Mandarla "a ver si suena" acaba
+        // en un error críptico de Meta (132000), así que paramos y decimos qué
+        // hacer. Es justo el caso de una plantilla recién creada en la consola.
+        if (tplLookupOk && !tplBody && vars.length > 0) {
+            return res.status(400).json({
+                error: `No tenemos registrada la plantilla "${templateName}", así que no sabemos cómo enviar sus variables. Pulsa "Sincronizar" en Plantillas de WhatsApp y vuelve a intentarlo.`,
+                templateStatus: 'NOT_SYNCED'
+            });
+        }
+        // Más valores que huecos: sobrarían parámetros sin nombre y Meta
+        // rechazaría el mensaje entero. Avisamos con un mensaje entendible.
+        if (placeholderKeys.length > 0 && vars.length !== placeholderKeys.length) {
+            return res.status(400).json({
+                error: `La plantilla "${templateName}" espera ${placeholderKeys.length} variable(s) y se han enviado ${vars.length}.`,
+                templateStatus: 'VARS_MISMATCH'
+            });
+        }
+        const parameters = buildTemplateBodyParameters(tplBody, vars);
         const templateObj: any = { name: templateName, language: { code: language } };
         if (parameters.length > 0) templateObj.components = [{ type: "body", parameters }];
         const timestamp = new Date().toISOString();
@@ -10032,6 +10408,21 @@ app.post('/api/send-template', async (req, res) => {
         // texto libre falla (Meta 131047) y la plantilla es LA única forma de
         // responder — justo el caso típico de una alarma antigua pendiente.
         clearAttentionForContact(cleanTo, 'plantilla').catch(() => {});
+
+        // 🔩 PEDIDOS DE PIEZAS: si la plantilla enviada es un pedido de recambio
+        // (tiene un hueco de "pieza"), registramos el pedido en PartOrders para
+        // que aparezca en el panel de Recambios. Sustituye a la captura del
+        // mensaje en clave, que solo funcionaba dentro de la ventana de 24h.
+        // Fire-and-forget: el pedido nunca puede tumbar el envío ya realizado.
+        try {
+            const partOrder = partOrderFromTemplateVars(placeholderKeys, tplVarMapping, variables || []);
+            if (partOrder) {
+                createPartOrderRecord(partOrder, cleanTo, sender, `plantilla "${templateName}"`).catch(() => {});
+            }
+        } catch (poErr: any) {
+            console.warn('[PartOrder] No se pudo evaluar la plantilla para crear el pedido:', poErr?.message);
+        }
+
         res.json({ success: true });
     } catch (e: any) {
         const metaError = e?.response?.data?.error?.message || e?.message || "Error envío";
@@ -10825,7 +11216,7 @@ app.post('/api/groups/:id/send-template', async (req, res) => {
             // NATIVO: una sola plantilla al grupo. Se resuelve el idioma igual que
             // en 1-a-1 para no chocar con el error #132001 ("la plantilla no existe
             // en es_ES"), reutilizando la caché que ya mantiene el proyecto.
-            const parameters = vars.map(v => ({ type: 'text', text: v }));
+            const parameters = buildTemplateBodyParameters(await getTemplateBody(templateName, language), vars);
             const components = parameters.length > 0 ? [{ type: 'body', parameters }] : [];
             const langCode = language
                 || templateLangCache.get(templateName)
@@ -11985,13 +12376,13 @@ io.on('connection', (socket) => {
             aiAbortControllers.delete(cleanTo);
         }
 
-        // 🔩 PEDIDOS DE PIEZAS (fase 2): si este mensaje saliente al proveedor
-        // es una "clave de pedido" (Ref:/Pieza:/Matricula:), lo registramos solo
-        // en la tabla PartOrders. Las notas internas (type='note') NO cuentan:
-        // esas no se envían al proveedor. Fire-and-forget: nunca bloquea el envío.
-        if (msg.type !== 'note') {
-            maybeCreatePartOrderFromMessage(msg.text || '', cleanTo, msg.sender || '').catch(() => {});
-        }
+        // 🔩 PEDIDOS DE PIEZAS: la captura desde el "mensaje en clave"
+        // (Ref:/Pieza:/Matricula: en texto libre) se retiró a propósito. Ese
+        // camino solo funcionaba dentro de la ventana de 24h: pasada esa,
+        // Meta rechaza el texto libre (131047), el proveedor no recibía nada
+        // y aun así se registraba el pedido — daba pedidos fantasma.
+        // Ahora el pedido se crea al enviar la PLANTILLA de pedido a proveedor,
+        // en POST /api/send-template (busca "PEDIDOS DE PIEZAS" allí).
 
         // FIX: Forzar estado "En Curso" para evitar reactivación por "Nuevo"
         // FIX: Forzar estado "En Curso" (Con AWAIT real) para evitar conflictos con webhook

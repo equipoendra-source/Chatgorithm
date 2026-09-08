@@ -87,9 +87,22 @@ const WhatsAppTemplatesManager = () => {
       const data = await res.json();
       if (res.ok) {
         await fetchTemplates();
-        alert(data.updated > 0
-          ? `✅ ${data.updated} plantilla(s) actualizada(s) con el estado real de Meta.`
-          : 'Todo al día: los estados ya coincidían con Meta.');
+        // La sincronización hace dos cosas: actualizar el estado de las que ya
+        // conocíamos e IMPORTAR las creadas fuera de la app (consola de Meta).
+        const partes = [];
+        if (data.imported > 0) partes.push(`📥 ${data.imported} plantilla(s) nueva(s) importada(s) de Meta`);
+        if (data.updated > 0) partes.push(`🔄 ${data.updated} estado(s) actualizado(s)`);
+        if (data.skipped?.length > 0) {
+          // Recortamos: una WABA con muchas plantillas de cabecera multimedia
+          // generaría un alert ilegible.
+          const muestra = data.skipped.slice(0, 5);
+          const resto = data.skipped.length - muestra.length;
+          partes.push(`⏭️ Omitidas por no ser compatibles:\n   · ${muestra.join('\n   · ')}${resto > 0 ? `\n   · …y ${resto} más` : ''}`);
+        }
+        if (data.importErrors?.length > 0) partes.push(`⚠️ ${data.importErrors.length} no se pudieron importar (revisa los logs)`);
+        alert(partes.length > 0
+          ? `✅ ${partes.join('\n')}`
+          : 'Todo al día: no hay plantillas nuevas y los estados ya coincidían con Meta.');
       } else {
         alert(`❌ ${data.error || 'No se pudo sincronizar.'}`);
       }
@@ -259,9 +272,11 @@ const WhatsAppTemplatesManager = () => {
 
   const renderPreviewText = (text, values, mapping) => {
     if (!text) return <span className="text-gray-400 italic">Escribe el contenido...</span>;
-    const parts = text.split(/({{\d+}})/g);
+    // Numeradas ({{1}}) y con nombre ({{referencia}}): estas últimas llegan de
+    // las plantillas importadas desde la consola de Meta.
+    const parts = text.split(/({{[A-Za-z0-9_]+}})/g);
     return parts.map((part, i) => {
-      if (part.match(/^{{\d+}}$/)) {
+      if (part.match(/^{{[A-Za-z0-9_]+}}$/)) {
         const num = part.replace(/[{}]/g, '');
         // Si estamos en modo envío, mostramos el valor real que escribe el usuario
         if (values) {
