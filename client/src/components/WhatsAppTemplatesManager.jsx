@@ -206,6 +206,22 @@ const WhatsAppTemplatesManager = () => {
   // válida de "editar" es crear una versión nueva. Pre-rellenamos todo y
   // sugerimos un nombre nuevo (Meta exige nombres únicos).
   const duplicateForEdit = (template) => {
+    // El formulario de creacion solo sabe generar variables NUMERADAS: detecta
+    // {{n}} y construye el example.body_text posicional que espera Meta. Una
+    // plantilla importada de la consola usa {{referencia}}, asi que al duplicarla
+    // se enviaria sin ejemplos y Meta la rechazaria con un error opaco. Mejor
+    // avisar aqui que dejar al usuario pelearse con el rechazo.
+    const conNombre = /{{[A-Za-z_][A-Za-z0-9_]*}}/.test(template.body || '');
+    if (conNombre) {
+      alert(
+        'Esta plantilla usa variables con NOMBRE (por ejemplo {{referencia}}), ' +
+        'que es el formato que obliga la consola de Meta.\n\n' +
+        'El formulario de la app solo crea variables numeradas ({{1}}, {{2}}...), ' +
+        'asi que duplicarla desde aqui la haria rechazar.\n\n' +
+        'Duplicala en la consola de Meta y luego pulsa "Sincronizar" para traerla.'
+      );
+      return;
+    }
     const suggestedName = `${template.name}_v2`;
     setFormData({
       name: suggestedName,

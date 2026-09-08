@@ -2045,11 +2045,19 @@ function toLocalDateTimeInput(iso: string): string {
 }
 
 function previewWithVariables(body: string, variables: string[]): string {
-    return body.replace(/\{\{(\d+)\}\}/g, (_m, idx) => {
-        const i = Number(idx) - 1;
-        const v = variables[i] || `{{${idx}}}`;
-        // Mostrar el placeholder de personalización tal cual
-        return v;
+    // Soporta variables numeradas ({{1}}) y con nombre ({{referencia}}, el
+    // formato que obliga la consola de Meta). Para las nombradas no hay indice
+    // dentro del placeholder, asi que nos guiamos por el ORDEN DE APARICION en
+    // el cuerpo: el mismo contrato que usa el servidor al construir los
+    // parametros. Sin esto, la vista previa de una plantilla importada mostraba
+    // {{referencia}} en crudo mientras los campos de al lado decian "Variable 1".
+    const orden: string[] = [];
+    for (const m of body.matchAll(/\{\{([A-Za-z0-9_]+)\}\}/g)) {
+        if (!orden.includes(m[1])) orden.push(m[1]);
+    }
+    return body.replace(/\{\{([A-Za-z0-9_]+)\}\}/g, (_m, clave) => {
+        const i = orden.indexOf(clave);
+        return variables[i] || `{{${clave}}}`;
     });
 }
 
