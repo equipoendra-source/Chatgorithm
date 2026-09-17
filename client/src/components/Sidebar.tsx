@@ -87,9 +87,25 @@ const getInitial = (name?: any, phone?: any) => String(name || phone || "?").cha
 
 const cleanMessagePreview = (msg: any) => {
     if (!msg) return "Haz clic para ver";
-    if (typeof msg === 'string') return msg.includes('[object Object]') ? "Mensaje" : msg;
     if (typeof msg === 'object') return "Mensaje";
-    return String(msg);
+    if (typeof msg !== 'string') return String(msg);
+    if (msg.includes('[object Object]')) return "Mensaje";
+    // Desde 2026-09-17 los envíos de plantilla se persisten como
+    // "📝 [Plantilla] nombre\n\n<cuerpo renderizado>". En la bandeja no queremos
+    // el nombre técnico ni saltos de línea — mostramos "📝 <primera línea del
+    // cuerpo>" para que se vea de qué va (p.ej. "📝 Ref: 889"). Si no hay
+    // cuerpo (plantilla vieja), un icono + "Plantilla" basta.
+    const PREFIXES = ['📝 [Plantilla] ', '[Plantilla] ', '[Notificación] ', '[Factura] '];
+    const prefix = PREFIXES.find(p => msg.startsWith(p));
+    if (prefix) {
+        const rest = msg.slice(prefix.length);
+        const nlIdx = rest.search(/\r?\n/);
+        if (nlIdx === -1) return `📝 Plantilla · ${rest.trim().replace(/_/g, ' ')}`;
+        const body = rest.slice(nlIdx).replace(/^(?:\r?\n)+/, '');
+        const firstBodyLine = body.split(/\r?\n/)[0].trim();
+        return firstBodyLine ? `📝 ${firstBodyLine}` : `📝 Plantilla`;
+    }
+    return msg;
 };
 
 export function Sidebar({

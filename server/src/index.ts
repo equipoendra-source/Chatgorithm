@@ -2600,6 +2600,36 @@ function buildTemplateBodyParameters(templateBody: string, variables: string[]):
     ));
 }
 
+// Renderiza el cuerpo de la plantilla sustituyendo cada {{X}} / {{clave}} por el
+// valor real. Devuelve '' si no había cuerpo o si tras la sustitución el texto
+// queda vacío. NO añade prefijos — de eso se encarga formatTemplateMessageText.
+function renderTemplateBody(templateBody: string, variables: string[]): string {
+    if (!templateBody) return '';
+    const keys = extractPlaceholderKeys(templateBody);
+    if (keys.length === 0) return templateBody.trim();
+    let out = templateBody;
+    // Un placeholder puede aparecer varias veces en el cuerpo (raro, pero
+    // posible). Sustituimos TODAS las ocurrencias de cada clave por su valor.
+    keys.forEach((key, idx) => {
+        const val = variables[idx] != null ? String(variables[idx]) : '';
+        const re = new RegExp(`\\{\\{\\s*${key.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\$&')}\\s*\\}\\}`, 'g');
+        out = out.replace(re, val);
+    });
+    return out.trim();
+}
+
+// Texto que guardamos en Airtable Messages para un envío de plantilla. Antes
+// solo persistíamos "📝 [Plantilla] <nombre>" y perdíamos por completo el
+// contenido — el agente y el cliente veían cosas distintas y no había
+// trazabilidad de qué se pidió. Ahora conservamos ambos: nombre en la primera
+// línea (compatibilidad con humanizeTemplateText, filtros de IA, badges del
+// frontend) y cuerpo renderizado debajo.
+function formatTemplateMessageText(prefix: string, templateName: string, templateBody: string, variables: string[]): string {
+    const rendered = renderTemplateBody(templateBody || '', variables || []);
+    const header = `${prefix}${templateName}`;
+    return rendered ? `${header}\n\n${rendered}` : header;
+}
+
 // Cuerpo de una plantilla tal y como lo tenemos en Airtable. Devuelve '' si no
 // la conocemos (entonces se asume el formato posicional).
 //
@@ -2677,8 +2707,12 @@ async function sendTemplateMessage(phone: string, templateName: string, variable
             );
 
             templateLangCache.set(templateName, langCode); // aprende el idioma que funcionó
+            // Guardamos también el cuerpo renderizado — nombre en la 1ª línea
+            // por compatibilidad con humanizeTemplateText y prefijos de IA.
+            const tplBodyForText = await getTemplateBody(templateName, langCode);
+            const persistedText = formatTemplateMessageText('[Notificación] ', templateName, tplBodyForText, variables);
             await saveAndEmitMessage({
-                text: `[Notificación] ${templateName}`,
+                text: persistedText,
                 sender: "Sistema",
                 recipient: cleanTo,
                 timestamp,
@@ -2843,8 +2877,12 @@ async function sendTemplateWithDocument(phone: string, templateName: string, bod
             // Funcionó: cacheamos el idioma bueno para no reintentar la próxima vez.
             templateLangCache.set(templateName, langCode);
             console.log(`✅ [Factura] Plantilla ${templateName} enviada a ${cleanTo} en idioma ${langCode}`);
+            // Cuerpo renderizado + nombre en la 1ª línea (mismo patrón que
+            // sendTemplateMessage / POST /api/send-template).
+            const tplBodyForText = await getTemplateBody(templateName, langCode);
+            const persistedText = formatTemplateMessageText('[Factura] ', templateName, tplBodyForText, bodyVars);
             await saveAndEmitMessage({
-                text: `[Factura] ${templateName}`,
+                text: persistedText,
                 sender: "Sistema",
                 recipient: cleanTo,
                 timestamp,
@@ -5679,7 +5717,12 @@ function humanizeTemplateText(rawText: string, type?: string): string {
     const PREFIXES = ['[Notificación] ', '📝 [Plantilla] ', '[Plantilla] ', '[Factura] '];
     const matchedPrefix = PREFIXES.find(p => text.startsWith(p));
     if (!matchedPrefix && type !== 'template') return text;
-    const name = (matchedPrefix ? text.slice(matchedPrefix.length) : text).trim();
+    // Solo la PRIMERA LÍNEA es el nombre de la plantilla. Desde 2026-09-17 el
+    // texto persistido puede llevar el cuerpo renderizado debajo (separado por
+    // \n\n), así que hay que cortar por el primer salto de línea antes de
+    // buscar el nombre en el mapa. Los envíos antiguos (solo nombre) siguen
+    // funcionando idénticamente porque split[0] devuelve el string entero.
+    const name = (matchedPrefix ? text.slice(matchedPrefix.length) : text).split(/\r?\n/)[0].trim();
     if (!name) return text;
     if (name === '__team_internal') return '(aviso interno para el equipo sobre una cita inminente)';
     const mapped = TEMPLATE_HUMAN_MAP[name];
@@ -9237,7 +9280,12 @@ app.post('/api/send-template', async (req, res) => {
         const timestamp = new Date().toISOString();
         const sendResp = await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, { messaging_product: "whatsapp", to: cleanTo, type: "template", template: templateObj }, { headers: { Authorization: `Bearer ${token}` } });
         const sender = senderName || "Agente";
-        await saveAndEmitMessage({ text: `📝 [Plantilla] ${templateName}`, sender, recipient: cleanTo, timestamp, type: "template", origin_phone_id: originPhoneId });
+        // Guardamos nombre + cuerpo renderizado (con las variables sustituidas)
+        // para que el agente vea EXACTAMENTE lo que envió al proveedor / cliente.
+        // El nombre queda en la primera línea → filtros de IA y prefijos siguen
+        // funcionando; humanizeTemplateText corta por \n y sigue reconociéndola.
+        const persistedText = formatTemplateMessageText('📝 [Plantilla] ', templateName, tplBody, vars);
+        await saveAndEmitMessage({ text: persistedText, sender, recipient: cleanTo, timestamp, type: "template", origin_phone_id: originPhoneId });
         registerPendingDelivery(sendResp.data?.messages?.[0]?.id, { recipient: cleanTo, sender, timestamp });
         // Enviar una plantilla manual también ES atender la alarma de la
         // pestaña "Atención". Camino crítico: fuera de la ventana de 24h el

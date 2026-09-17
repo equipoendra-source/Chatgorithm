@@ -771,12 +771,34 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
         const isTemplate = m.type === 'template';
         const isBot = m.sender === 'Bot IA';
 
-        let messageContent: React.ReactNode = String(m.text || "");
+        // Texto a MOSTRAR en la burbuja. Para plantillas WhatsApp desde 2026-09-17
+        // el backend persiste "📝 [Plantilla] nombre\n\n<cuerpo renderizado>",
+        // pero el chip verde "PLANTILLA WHATSAPP" arriba ya identifica el
+        // mensaje — la primera línea con el nombre técnico sobra visualmente.
+        // Quitamos ese header y mostramos solo el cuerpo. Para plantillas viejas
+        // (sin cuerpo persistido) mostramos el nombre humanizado para que la
+        // burbuja no se quede vacía.
+        const displayText: string = (() => {
+            const raw = String(m.text || "");
+            if (!isTemplate) return raw;
+            const PREFIXES = ['📝 [Plantilla] ', '[Plantilla] ', '[Notificación] ', '[Factura] '];
+            const prefix = PREFIXES.find(p => raw.startsWith(p));
+            if (!prefix) return raw;
+            const rest = raw.slice(prefix.length);
+            const nlIdx = rest.search(/\r?\n/);
+            if (nlIdx === -1) {
+                const readable = rest.trim().replace(/_/g, ' ');
+                return readable ? `Plantilla enviada: "${readable}"` : raw;
+            }
+            return rest.slice(nlIdx).replace(/^(?:\r?\n)+/, '');
+        })();
 
-        if (chatSearchQuery && m.text && typeof m.text === 'string') {
+        let messageContent: React.ReactNode = displayText;
+
+        if (chatSearchQuery && displayText) {
             let localMatchCounter = 0;
             const regex = new RegExp(`(${chatSearchQuery})`, 'gi');
-            const parts = m.text.split(regex);
+            const parts = displayText.split(regex);
             messageContent = (<>{parts.map((part, idx) => { if (part.toLowerCase() === chatSearchQuery.toLowerCase()) { const isCurrentMatch = searchMatches[currentMatchIdx]?.msgIndex === i && searchMatches[currentMatchIdx]?.matchIndex === localMatchCounter; const elementId = `match-${i}-${localMatchCounter}`; localMatchCounter++; return (<span key={idx} id={elementId} className={`font-bold rounded px-0.5 transition-colors duration-300 ${isCurrentMatch ? 'bg-orange-400 text-white ring-2 ring-orange-400' : 'bg-yellow-300 text-slate-900'}`}>{part}</span>); } return <span key={idx}>{part}</span>; })}</>);
         }
 
