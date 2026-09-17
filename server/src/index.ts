@@ -863,6 +863,11 @@ function makeKeyedLock() {
 const withPhoneLock = makeKeyedLock();
 // Lock por recordId de Appointment — serializa reservas de una misma cita
 const withAppointmentLock = makeKeyedLock();
+// Lock por recordId de Agents — pone en fila las escrituras de Agents.Preferences de un
+// trabajador (chats fijados, tours, reglas del admin): las tres leen el JSON entero y
+// lo reescriben, y sin esto dos a la vez perderían el cambio de una de ellas. Solo
+// ordena, no fusiona: lo que cada una sobrescribe sigue siendo cosa suya.
+const withAgentPrefsLock = makeKeyedLock();
 
 // =========================================================================
 // TIMEOUT + ABORT — para no dejar al cliente esperando si Gemini se cuelga
@@ -10566,6 +10571,48 @@ app.post('/webhook', async (req, res) => {
 });
 
 // ==========================================
+//  CHATS FIJADOS (por trabajador, como WhatsApp)
+// ==========================================
+// Viven en Agents.Preferences.pinnedChats: ids de Contacts, el último fijado
+// primero. Cada trabajador tiene los suyos.
+const MAX_PINNED_CHATS = 3;
+
+const CONTACT_RECORD_ID_RE = /^rec[A-Za-z0-9]{14}$/;
+
+// Solo ids con forma de registro de Airtable: acaban dentro de una fórmula
+// (RECORD_ID()='...') y no deben poder romperla.
+function readPinnedChats(prefs: any): string[] {
+    return Array.isArray(prefs?.pinnedChats)
+        ? prefs.pinnedChats.filter((id: any) => typeof id === 'string' && CONTACT_RECORD_ID_RE.test(id))
+        : [];
+}
+
+// Un mismo trabajador puede tener la app abierta en el PC y en el móvil: todos
+// sus sockets reciben el cambio, no solo el que lo pidió. `opId` es el de la
+// petición que lo causó, para que ese dispositivo sepa que es su respuesta.
+function emitPinnedChatsToAgent(agentId: string, pinnedChats: string[], opId?: string) {
+    for (const s of io.sockets.sockets.values()) {
+        if (s.data?.agentId === agentId) s.emit('my_pinned_chats_updated', { pinnedChats, opId });
+    }
+}
+
+// Los chats fijados los gestiona cada trabajador, nunca el admin. Al guardar las
+// reglas de notificación de un agente (update_agent) el panel manda el objeto de
+// preferencias entero, sin los fijados o con una copia vieja: se toman siempre
+// los que hay ahora en Airtable. Llamar dentro de withAgentPrefsLock. Si no se
+// pueden leer, lanza: mejor que el guardado falle a escribir los fijados a ciegas.
+async function preferencesKeepingPins(agentId: string, prefs: any): Promise<any> {
+    if (!base) return prefs;
+    const rec = await base('Agents').find(agentId);
+    const raw = rec.get('Preferences') as string | undefined;
+    const pins = readPinnedChats(raw ? JSON.parse(raw) : {});
+    const next = { ...(prefs || {}) };
+    delete next.pinnedChats;
+    if (pins.length > 0) next.pinnedChats = pins;
+    return next;
+}
+
+// ==========================================
 //  SOCKETS
 // ==========================================
 io.on('connection', (socket) => {
@@ -10723,7 +10770,7 @@ io.on('connection', (socket) => {
     // Aplica también al create.
     socket.on('create_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; await base('Agents').create([{ fields: { "name": d.newAgent.name, "role": d.newAgent.role, "password": d.newAgent.password ? await bcrypt.hash(d.newAgent.password, 10) : "" } }], { typecast: true }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Creado'); });
     socket.on('delete_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; await base('Agents').destroy([d.agentId]); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Eliminado'); });
-    socket.on('update_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(d.updates.preferences); await base('Agents').update([{ id: d.agentId, fields: f }], { typecast: true }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
+    socket.on('update_agent', async (d) => { if (ENFORCE_API_AUTH && socket.data.role === 'agent') { socket.emit('action_error', 'Sin permisos para gestionar agentes.'); return; } if (!base) return; try { const f: any = { "name": d.updates.name, "role": d.updates.role }; if (d.updates.password !== undefined) f["password"] = d.updates.password ? await bcrypt.hash(d.updates.password, 10) : ""; await withAgentPrefsLock(d.agentId, async () => { if (d.updates.preferences !== undefined) f["Preferences"] = JSON.stringify(await preferencesKeepingPins(d.agentId, d.updates.preferences)); await base!('Agents').update([{ id: d.agentId, fields: f }], { typecast: true }); }); const r = await base('Agents').select().all(); io.emit('agents_list', r.map(x => ({ id: x.id, name: x.get('name'), role: x.get('role'), hasPassword: !!x.get('password'), preferences: x.get('Preferences') ? JSON.parse(x.get('Preferences') as string) : {} }))); socket.emit('action_success', 'Actualizado'); } catch (e) { socket.emit('action_error', 'Error guardando'); } });
 
     // El usuario actualiza SOLO SUS preferencias (tour state, theme, etc.).
     // No requiere agentId del cliente — usamos socket.data.agentId (rellenado en login).
@@ -10734,23 +10781,113 @@ io.on('connection', (socket) => {
         if (!agentId) return socket.emit('action_error', 'Sesión sin agentId. Vuelve a iniciar sesión.');
         if (!partialPrefs || typeof partialPrefs !== 'object') return socket.emit('action_error', 'Preferencias inválidas');
         try {
-            // 1. Cargar preferencias actuales
-            const rec = await base('Agents').find(agentId);
-            const currentRaw = rec.get('Preferences') as string | undefined;
-            const current = currentRaw ? JSON.parse(currentRaw) : {};
-            // 2. Merge profundo (shallow basta para el caso de uso: toursSeen es un objeto)
-            const merged = { ...current, ...partialPrefs };
-            // Si las dos partes tienen toursSeen, mergear ese sub-objeto también
-            if (current.toursSeen && partialPrefs.toursSeen) {
-                merged.toursSeen = { ...current.toursSeen, ...partialPrefs.toursSeen };
-            }
-            // 3. Guardar
-            await base('Agents').update([{ id: agentId, fields: { Preferences: JSON.stringify(merged) } }]);
+            // Lock: los chats fijados escriben el mismo JSON (ver withAgentPrefsLock).
+            const merged = await withAgentPrefsLock(agentId, async () => {
+                // 1. Cargar preferencias actuales
+                const rec = await base!('Agents').find(agentId);
+                const currentRaw = rec.get('Preferences') as string | undefined;
+                const current = currentRaw ? JSON.parse(currentRaw) : {};
+                // 2. Merge profundo (shallow basta para el caso de uso: toursSeen es un objeto)
+                // Los chats fijados solo cambian por toggle_pin_chat: una copia vieja
+                // del cliente no debe poder pisarlos por aquí.
+                const incoming = { ...partialPrefs };
+                delete incoming.pinnedChats;
+                const next = { ...current, ...incoming };
+                // Si las dos partes tienen toursSeen, mergear ese sub-objeto también
+                if (current.toursSeen && incoming.toursSeen) {
+                    next.toursSeen = { ...current.toursSeen, ...incoming.toursSeen };
+                }
+                // 3. Guardar
+                await base!('Agents').update([{ id: agentId, fields: { Preferences: JSON.stringify(next) } }]);
+                return next;
+            });
             // 4. Confirmar al cliente con las preferencias finales
             socket.emit('my_preferences_updated', merged);
         } catch (e: any) {
             console.error('[update_my_preferences] Error:', e.message);
             socket.emit('action_error', 'Error guardando preferencias');
+        }
+    });
+
+    // Fijar / desfijar un chat. Se resuelve aquí leyendo Airtable (y no con la
+    // copia de preferencias del cliente) porque esa copia puede estar desfasada
+    // si se fijó algo desde otro dispositivo, y la pisaría.
+    // Responde SIEMPRE una vez a quien lo pide: 'my_pinned_chats_updated' (a todos
+    // sus dispositivos) o 'pin_chat_error', las dos con el `opId` recibido.
+    // No va en DESTRUCTIVE_SOCKET_EVENTS a propósito: si el middleware lo
+    // descartara, el cliente se quedaría esperando respuesta. El requisito de
+    // socket.data.agentId (solo lo rellenan el login y authenticate_socket) ya
+    // exige sesión.
+    socket.on('toggle_pin_chat', async (payload: any) => {
+        const agentId = socket.data.agentId;
+        const opId = typeof payload?.opId === 'string' ? payload.opId.slice(0, 64) : undefined;
+        const fail = (message: string) => socket.emit('pin_chat_error', { message, opId });
+        if (!base) return fail('Base de datos no disponible.');
+        // Pasa sobre todo al reconectar: el socket aún no se ha vuelto a autenticar.
+        if (!agentId) return fail('La conexión aún no está lista. Inténtalo de nuevo en unos segundos.');
+        const contactId = String(payload?.contactId || '');
+        const pin = payload?.pin === true;
+        if (!CONTACT_RECORD_ID_RE.test(contactId)) return fail('Chat no válido.');
+        try {
+            const result = await withAgentPrefsLock(agentId, async (): Promise<{ pins: string[] } | { error: string }> => {
+                const rec = await base!('Agents').find(agentId);
+                const raw = rec.get('Preferences') as string | undefined;
+                const current = raw ? JSON.parse(raw) : {};
+                let pins = readPinnedChats(current);
+
+                if (pin) {
+                    if (pins.includes(contactId)) return { pins };
+                    if (pins.length >= MAX_PINNED_CHATS) {
+                        // Solo cuentan los chats que siguen existiendo: un contacto
+                        // borrado o fusionado no debe ocupar hueco para siempre.
+                        // Se comprueba solo al llegar al tope, para no gastar una
+                        // consulta a Airtable en cada fijado.
+                        const found = await base!('Contacts').select({
+                            filterByFormula: `OR(${pins.map(id => `RECORD_ID()='${id}'`).join(',')})`,
+                            fields: ['phone']
+                        }).all();
+                        const existing = new Set(found.map(r => r.id));
+                        pins = pins.filter(id => existing.has(id));
+                        if (pins.length >= MAX_PINNED_CHATS) {
+                            return { error: `Solo puedes fijar hasta ${MAX_PINNED_CHATS} chats. Desfija uno para fijar este.` };
+                        }
+                    }
+                    pins = [contactId, ...pins];
+                } else {
+                    if (!pins.includes(contactId)) return { pins };
+                    pins = pins.filter(id => id !== contactId);
+                }
+
+                await base!('Agents').update([{ id: agentId, fields: { Preferences: JSON.stringify({ ...current, pinnedChats: pins }) } }]);
+                return { pins };
+            });
+            if ('error' in result) {
+                // El cliente deshace lo que había pintado por adelantado al recibir esto.
+                fail(result.error);
+            } else {
+                emitPinnedChatsToAgent(agentId, result.pins, opId);
+            }
+        } catch (e: any) {
+            console.error('[toggle_pin_chat] Error:', e.message);
+            fail('No se pudo guardar el chat fijado.');
+        }
+    });
+
+    // Cada dispositivo pide sus chats fijados al (re)autenticarse: si se fijó
+    // algo desde otro dispositivo mientras este estaba cerrado, aquí se entera.
+    // Dentro del lock para que su respuesta no llegue después de un cambio más nuevo.
+    socket.on('request_my_pinned_chats', async () => {
+        const agentId = socket.data.agentId;
+        if (!base || !agentId) return;
+        try {
+            const pinnedChats = await withAgentPrefsLock(agentId, async () => {
+                const rec = await base!('Agents').find(agentId);
+                const raw = rec.get('Preferences') as string | undefined;
+                return readPinnedChats(raw ? JSON.parse(raw) : {});
+            });
+            socket.emit('my_pinned_chats_updated', { pinnedChats });
+        } catch (e: any) {
+            console.warn('[request_my_pinned_chats] Error:', e.message);
         }
     });
 

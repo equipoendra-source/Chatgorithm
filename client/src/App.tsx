@@ -276,6 +276,10 @@ function App() {
         return () => { socket.off('contacts_update', handleContactsForHydration); };
     }, [socket]);
 
+    // Socket (por id) con el que ya pedimos los chats fijados. authenticate_socket
+    // se repite al abrir cada chat; así solo se consulta Airtable una vez por conexión.
+    const pinnedChatsSyncedSocketRef = useRef<string | null>(null);
+
     useEffect(() => {
         if (!socket) return;
         const reAuth = () => {
@@ -305,7 +309,15 @@ function App() {
         // bandeja se leía bien, y escribir fallaba en silencio. Ahora lo
         // detectamos y devolvemos al login con un aviso claro.
         const onAuthResult = (res: any) => {
-            if (res?.ok) return;
+            if (res?.ok) {
+                // La copia local de los chats fijados puede estar desfasada si se
+                // fijó algo desde otro dispositivo mientras este estaba cerrado.
+                if (socket.id && pinnedChatsSyncedSocketRef.current !== socket.id) {
+                    pinnedChatsSyncedSocketRef.current = socket.id;
+                    socket.emit('request_my_pinned_chats');
+                }
+                return;
+            }
             console.warn('🔒 [Socket] Sesión caducada: el servidor no reconoce el token. Volviendo al login.');
             try { localStorage.removeItem('chatgorithm_user'); } catch (_) { /* no bloquear */ }
             try { sessionStorage.removeItem(SELECTED_CONTACT_KEY); } catch (_) { /* no bloquear */ }
@@ -619,6 +631,9 @@ function App() {
     const handleLogin = (u: string, r: string, p: string, m: boolean, prefs: any = {}, id?: string, sessionToken?: string) => {
         const newUser = { id, username: u, role: r, preferences: prefs, sessionToken };
         setUser(newUser);
+        // Los chats fijados del login vienen recién leídos de Airtable: mandan sobre
+        // lo que quedara de una sesión anterior en este dispositivo.
+        setPinnedChatsState(null);
         localStorage.setItem('chatgorithm_user', JSON.stringify(newUser));
     };
 
@@ -643,6 +658,43 @@ function App() {
         };
         socket.on('my_preferences_updated', onUpdated);
         return () => { socket.off('my_preferences_updated', onUpdated); };
+    }, [socket]);
+
+    // Chats fijados: el servidor manda la lista cuando cambia (desde cualquiera de
+    // mis dispositivos) o cuando la pedimos al autenticar el socket.
+    // Van en un estado APARTE y no dentro de `user`: el efecto principal del socket
+    // depende de `user` y, al re-ejecutarse, su limpieza quita todos los listeners
+    // de 'connect' (incluida la re-autenticación). Cambiar `user` en cada fijado
+    // dejaría el socket sin re-autenticar tras la siguiente reconexión.
+    // Se guarda junto al usuario al que pertenece: si en este dispositivo se cierra
+    // sesión y entra otro, no se le muestran los del anterior. Mientras no llegue
+    // nada del servidor se usan los de user.preferences (login o copia guardada).
+    const [pinnedChatsState, setPinnedChatsState] = useState<{ username: string; pins: string[] } | null>(null);
+    const currentUsernameRef = useRef<string | null>(null);
+    currentUsernameRef.current = user?.username || null;
+    const pinnedChats = pinnedChatsState && pinnedChatsState.username === user?.username ? pinnedChatsState.pins : null;
+    useEffect(() => {
+        if (!socket) return;
+        const onPinned = (data: any) => {
+            const username = currentUsernameRef.current;
+            if (!username) return;
+            const next: string[] = Array.isArray(data?.pinnedChats)
+                ? data.pinnedChats.filter((id: any) => typeof id === 'string')
+                : [];
+            setPinnedChatsState(prev => (prev && prev.username === username && prev.pins.length === next.length && prev.pins.every((id, i) => id === next[i]))
+                ? prev
+                : { username, pins: next });
+            // Copia guardada, para que al recargar la app se vean ya los buenos.
+            try {
+                const saved = JSON.parse(localStorage.getItem('chatgorithm_user') || 'null');
+                if (saved && saved.username === username) {
+                    saved.preferences = { ...(saved.preferences || {}), pinnedChats: next };
+                    localStorage.setItem('chatgorithm_user', JSON.stringify(saved));
+                }
+            } catch (_) { /* no bloquear */ }
+        };
+        socket.on('my_pinned_chats_updated', onPinned);
+        return () => { socket.off('my_pinned_chats_updated', onPinned); };
     }, [socket]);
 
     const handleLogout = () => {
@@ -699,6 +751,8 @@ function App() {
         if (!Capacitor.isNativePlatform()) return;
 
         const backButtonListener = CapacitorApp.addListener('backButton', () => {
+            // Menú "Fijar chat" abierto en la lista: atrás solo lo cierra.
+            if (document.querySelector('[data-pin-chat-menu]')) { window.dispatchEvent(new Event('chatgorithm:close-pin-menu')); return; }
             if (view === 'settings') { setView('chat'); return; }
             if (view === 'calendar') { setView('chat'); return; }
             if (view === 'campaigns') { setView('chat'); return; }
@@ -933,6 +987,7 @@ function App() {
                                 setTeamChannel(channel);
                                 setMobileTeamChatActive(true);
                             }}
+                            pinnedChats={pinnedChats ?? user.preferences?.pinnedChats}
                         />
                     </div>
 

@@ -1,12 +1,15 @@
 import { useState, useEffect, useRef, useLayoutEffect } from 'react';
+import { createPortal } from 'react-dom';
 import {
     Users, Search, RefreshCw, UserCheck, Briefcase, Filter as FilterIcon,
     Smartphone, UserPlus, Upload, FileSpreadsheet, Phone, MessageSquare,
-    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone, Package
+    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone, Package,
+    Pin, PinOff
 } from 'lucide-react';
 import { PhoneDialer } from './PhoneDialer';
 import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
+import { useToast } from '../context/ToastContext';
 import { colorForAccount, nameForAccount } from '../utils/accountColors';
 import { normalizeForSearch } from '../utils/searchNormalize';
 
@@ -56,6 +59,9 @@ interface SidebarProps {
     // Nuevas props para el Chat de Equipo integrado
     teamChannel?: string;
     setTeamChannel?: (channel: string) => void;
+
+    // Chats fijados de este trabajador (ids de Contacts, el último fijado primero).
+    pinnedChats?: string[];
 }
 
 // 'attention' sustituye al antiguo 'unassigned' (Libres). "Libres" mostraba
@@ -63,6 +69,14 @@ interface SidebarProps {
 // no importaban. "Atención" muestra solo los que tienen una alarma sin
 // atender → es lo que de verdad hay que responder ya.
 type ViewScope = 'all' | 'mine' | 'attention';
+
+// Chats fijados por trabajador, como en WhatsApp. El servidor aplica el mismo tope.
+const MAX_PINNED_CHATS = 3;
+// Pulsación larga en móvil para abrir el menú de fijar.
+const LONG_PRESS_MS = 500;
+// Si el servidor no contesta a un fijado en este tiempo (conexión caída a mitad),
+// se deja de mostrar la versión adelantada y se pide la lista real.
+const PIN_OP_TIMEOUT_MS = 12000;
 
 const normalizePhone = (phone: string) => {
     if (!phone) return "";
@@ -121,7 +135,8 @@ export function Sidebar({
     selectedAccountId,
     onSelectAccount,
     teamChannel,
-    setTeamChannel
+    setTeamChannel,
+    pinnedChats
 }: SidebarProps) {
 
     const { theme } = useTheme();
@@ -174,6 +189,24 @@ export function Sidebar({
     // otro compañero para los DMs. No se persiste — se resetea al recargar la
     // app (mismo comportamiento que el contador de clientes en memoria).
     const [teamUnread, setTeamUnread] = useState<{ [channel: string]: number }>({});
+
+    // CHATS FIJADOS — `pinnedChats` llega de App.tsx. Al fijar/desfijar se pinta
+    // al momento (optimisticPins) y el servidor contesta a esa petición (opId) con
+    // 'my_pinned_chats_updated' o 'pin_chat_error'.
+    const { showToast } = useToast();
+    const [optimisticPins, setOptimisticPins] = useState<string[] | null>(null);
+    // Peticiones de fijar en curso de ESTE dispositivo: opId → timer de seguridad.
+    const pendingPinOpsRef = useRef(new Map<string, number>());
+    const [pinMenu, setPinMenu] = useState<{ contact: Contact; x: number; y: number } | null>(null);
+    const longPressTimerRef = useRef<number | null>(null);
+    const longPressStartRef = useRef<{ x: number; y: number } | null>(null);
+    const suppressClickRef = useRef(false);
+    const suppressResetTimerRef = useRef<number | null>(null);
+    const serverPins: string[] = Array.isArray(pinnedChats)
+        ? pinnedChats.filter((id: any) => typeof id === 'string')
+        : [];
+    const pinnedIds = optimisticPins ?? serverPins;
+
     const audioRef = useRef<HTMLAudioElement | null>(null);
     // B1: Refs para preservar el scroll del Sidebar cuando llega un
     // contacts_update (polling 60s o cambios). listScrollRef apunta al
@@ -403,6 +436,163 @@ export function Sidebar({
         });
     }, [currentView, teamChannel]);
 
+    // ─── CHATS FIJADOS ───────────────────────────────────────────────────────
+    // Solo las respuestas a peticiones de este dispositivo (por opId) cierran la
+    // versión adelantada; los avisos de otros dispositivos ya los aplica App.tsx.
+    // Cuando no queda ninguna en curso, manda la lista del servidor.
+    const finishPinOp = (opId?: string) => {
+        const pending = pendingPinOpsRef.current;
+        if (!opId || !pending.has(opId)) return;
+        window.clearTimeout(pending.get(opId));
+        pending.delete(opId);
+        if (pending.size === 0) setOptimisticPins(null);
+    };
+
+    useEffect(() => {
+        if (!socket) return;
+        const onPinned = (data: any) => finishPinOp(data?.opId);
+        const onPinError = (data: any) => {
+            finishPinOp(data?.opId);
+            showToast('error', data?.message || 'No se pudo fijar el chat.');
+            // Si el rechazo es porque este dispositivo tenía una lista vieja (se
+            // fijó algo desde otro), así se ve la real.
+            socket.emit('request_my_pinned_chats');
+        };
+        socket.on('my_pinned_chats_updated', onPinned);
+        socket.on('pin_chat_error', onPinError);
+        return () => {
+            socket.off('my_pinned_chats_updated', onPinned);
+            socket.off('pin_chat_error', onPinError);
+        };
+    }, [socket, showToast]);
+
+    useEffect(() => {
+        if (!pinMenu) return;
+        const close = () => setPinMenu(null);
+        const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') close(); };
+        window.addEventListener('keydown', onKey);
+        // Botón atrás de Android (lo reenvía App.tsx).
+        window.addEventListener('chatgorithm:close-pin-menu', close);
+        return () => {
+            window.removeEventListener('keydown', onKey);
+            window.removeEventListener('chatgorithm:close-pin-menu', close);
+        };
+    }, [pinMenu]);
+
+    useEffect(() => () => {
+        if (longPressTimerRef.current !== null) window.clearTimeout(longPressTimerRef.current);
+        if (suppressResetTimerRef.current !== null) window.clearTimeout(suppressResetTimerRef.current);
+        pendingPinOpsRef.current.forEach(t => window.clearTimeout(t));
+    }, []);
+
+    const togglePin = (contact: Contact) => {
+        if (!socket || !contact.id) return;
+        if (!socket.connected) {
+            showToast('error', 'Sin conexión con el servidor. Inténtalo cuando vuelva la conexión.');
+            return;
+        }
+        const isPinned = pinnedIds.includes(contact.id);
+        if (isPinned) {
+            setOptimisticPins(pinnedIds.filter(id => id !== contact.id));
+        } else {
+            // Un fijado cuyo contacto ya no existe (borrado, fusionado) no ocupa
+            // hueco. El servidor aplica la misma regla.
+            const existingIds = new Set(contacts.map(c => c.id));
+            const activePins = pinnedIds.filter(id => existingIds.has(id));
+            if (activePins.length >= MAX_PINNED_CHATS) {
+                // Un fijado puede no verse con la línea, pestaña, filtro o búsqueda actual.
+                const visibleIds = new Set(filteredContacts.map(c => c.id));
+                const someHidden = activePins.some(id => !visibleIds.has(id));
+                showToast('error', someHidden
+                    ? `Ya tienes ${MAX_PINNED_CHATS} chats fijados y alguno no se ve con la vista actual (línea, pestaña, filtros o búsqueda). Desfija uno para fijar este.`
+                    : `Solo puedes fijar hasta ${MAX_PINNED_CHATS} chats. Desfija uno para fijar este.`);
+                return;
+            }
+            setOptimisticPins([contact.id, ...activePins]);
+        }
+        const opId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+        pendingPinOpsRef.current.set(opId, window.setTimeout(() => {
+            finishPinOp(opId);
+            if (socket.connected) socket.emit('request_my_pinned_chats');
+        }, PIN_OP_TIMEOUT_MS));
+        socket.emit('toggle_pin_chat', { contactId: contact.id, pin: !isPinned, opId });
+    };
+
+    const openPinMenu = (contact: Contact, x: number, y: number, fromTouch = false) => {
+        // Sin salirse de la pantalla (el menú mide unos 190×48 px). Con el dedo se
+        // abre por encima de él, para que el toque al levantarlo no caiga en la opción.
+        const top = fromTouch ? (y - 64 >= 8 ? y - 64 : y + 24) : y;
+        setPinMenu({
+            contact,
+            x: Math.max(8, Math.min(x, window.innerWidth - 198)),
+            y: Math.max(8, Math.min(top, window.innerHeight - 56))
+        });
+    };
+
+    // Tras abrir el menú con el dedo, el navegador aún manda un click al levantarlo:
+    // suppressClickRef lo ignora. Red de seguridad: si el touchend no llega (la fila
+    // desapareció de la lista mientras se mantenía pulsada), se libera sola.
+    const armClickSuppression = () => {
+        suppressClickRef.current = true;
+        if (suppressResetTimerRef.current !== null) window.clearTimeout(suppressResetTimerRef.current);
+        suppressResetTimerRef.current = window.setTimeout(() => {
+            suppressClickRef.current = false;
+            suppressResetTimerRef.current = null;
+        }, 2500);
+    };
+
+    const cancelLongPress = () => {
+        if (longPressTimerRef.current !== null) {
+            window.clearTimeout(longPressTimerRef.current);
+            longPressTimerRef.current = null;
+        }
+        longPressStartRef.current = null;
+    };
+
+    // Pulsación larga (móvil): abre el menú sin abrir el chat.
+    const handleRowTouchStart = (contact: Contact, e: React.TouchEvent) => {
+        cancelLongPress();
+        const t = e.touches[0];
+        if (!t || e.touches.length > 1) return;
+        const start = { x: t.clientX, y: t.clientY };
+        longPressStartRef.current = start;
+        longPressTimerRef.current = window.setTimeout(() => {
+            longPressTimerRef.current = null;
+            armClickSuppression();
+            openPinMenu(contact, start.x, start.y, true);
+            try { navigator.vibrate?.(30); } catch { /* sin vibración */ }
+        }, LONG_PRESS_MS);
+    };
+
+    const handleRowTouchMove = (e: React.TouchEvent) => {
+        const start = longPressStartRef.current;
+        const t = e.touches[0];
+        if (!start || !t) return;
+        // Si el dedo se mueve es un scroll, no una pulsación larga.
+        if (Math.abs(t.clientX - start.x) > 10 || Math.abs(t.clientY - start.y) > 10) cancelLongPress();
+    };
+
+    const handleRowTouchEnd = () => {
+        cancelLongPress();
+        if (suppressClickRef.current) {
+            // Ya ha llegado el touchend: basta con cubrir el click que viene detrás.
+            if (suppressResetTimerRef.current !== null) window.clearTimeout(suppressResetTimerRef.current);
+            suppressResetTimerRef.current = window.setTimeout(() => {
+                suppressClickRef.current = false;
+                suppressResetTimerRef.current = null;
+            }, 400);
+        }
+    };
+
+    // Clic derecho (PC). En Android la pulsación larga también lanza este evento.
+    const handleRowContextMenu = (contact: Contact, e: React.MouseEvent) => {
+        e.preventDefault();
+        const fromTouch = !!longPressStartRef.current;
+        if (fromTouch) armClickSuppression();
+        cancelLongPress();
+        openPinMenu(contact, e.clientX, e.clientY, fromTouch);
+    };
+
     const resetNewContactForm = () => {
         setNewContactPhone(''); setNewContactName('');
         setNewContactDepartment(''); setNewContactTags('');
@@ -507,6 +697,21 @@ export function Sidebar({
         filteredContacts.sort((a, b) =>
             normalizeForSearch(a.name).localeCompare(normalizeForSearch(b.name))
         );
+    }
+
+    // Los fijados van arriba en el orden en que se fijaron (el último, primero),
+    // sin moverse aunque lleguen mensajes. Solo los que pasan los filtros de la
+    // vista actual. El sort es estable: el resto conserva su orden.
+    const pinOrder = new Map(pinnedIds.map((id, i) => [id, i]));
+    if (pinOrder.size > 0) {
+        filteredContacts.sort((a, b) => {
+            const pa = pinOrder.get(a.id);
+            const pb = pinOrder.get(b.id);
+            if (pa === undefined && pb === undefined) return 0;
+            if (pa === undefined) return 1;
+            if (pb === undefined) return -1;
+            return pa - pb;
+        });
     }
 
     const updateFilter = (key: keyof typeof activeFilters, value: string) => {
@@ -824,11 +1029,17 @@ export function Sidebar({
                                     const multiAccount = accounts.length > 1;
                                     const acc = multiAccount && contact.origin_phone_id ? colorForAccount(contact.origin_phone_id) : null;
                                     const accountFriendlyName = multiAccount && contact.origin_phone_id ? nameForAccount(contact.origin_phone_id, accounts) : '';
+                                    const isPinned = !!contact.id && pinnedIds.includes(contact.id);
 
                                     return (
-                                        <li key={contact.id || contact.phone || `idx-${idx}`} className="mb-2">
+                                        <li key={contact.id || contact.phone || `idx-${idx}`} className="mb-2 relative group/pin">
                                             <button
-                                                onClick={() => onSelectContact(contact)}
+                                                onClick={() => { if (suppressClickRef.current) return; onSelectContact(contact); }}
+                                                onContextMenu={(e) => handleRowContextMenu(contact, e)}
+                                                onTouchStart={(e) => handleRowTouchStart(contact, e)}
+                                                onTouchMove={handleRowTouchMove}
+                                                onTouchEnd={handleRowTouchEnd}
+                                                onTouchCancel={handleRowTouchEnd}
                                                 // Border-left coloreado por cuenta cuando NO está seleccionado.
                                                 // Cuando está seleccionado, mantenemos el border azul/indigo
                                                 // estándar para no confundir el feedback de selección.
@@ -836,7 +1047,8 @@ export function Sidebar({
                                                 // hay cuenta) para que el ancho de los chats no cambie al
                                                 // seleccionar uno.
                                                 style={!isSelected && acc ? { borderLeftColor: acc.hex, borderLeftWidth: '4px', borderLeftStyle: 'solid' } : undefined}
-                                                className={`w-full flex items-start gap-3 p-3 rounded-2xl transition-all text-left group ${isSelected
+                                                // En pantallas táctiles: sin selección de texto ni menú nativo al mantener pulsado.
+                                                className={`w-full flex items-start gap-3 p-3 rounded-2xl transition-all text-left group [@media(hover:none)]:select-none [-webkit-touch-callout:none] ${isSelected
                                                     ? (isDark ? 'bg-indigo-600/20 backdrop-blur-md border border-indigo-500/30 shadow-lg ring-1 ring-indigo-500/20' : 'bg-white border-l-4 border-blue-500 shadow-sm')
                                                     : `border border-transparent border-l-4 ${acc ? '' : 'border-l-transparent'} ${isDark ? 'hover:bg-white/5' : 'hover:bg-white'}`
                                                 }`}>
@@ -853,7 +1065,10 @@ export function Sidebar({
                                                             ? 'text-blue-400'
                                                             : (isDark ? 'text-white' : 'text-slate-700')
                                                             }`}>{String(contact.name || contact.phone || "Desconocido")}</span>
-                                                        <span className={`text-[10px] ml-2 whitespace-nowrap ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{formatTime(contact.last_message_time)}</span>
+                                                        <span className={`text-[10px] ml-2 whitespace-nowrap inline-flex items-center gap-1 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                                            {isPinned && <Pin className="w-3 h-3 rotate-45" aria-label="Chat fijado" />}
+                                                            {formatTime(contact.last_message_time)}
+                                                        </span>
                                                     </div>
 
                                                     <div className="flex justify-between items-center w-full">
@@ -901,6 +1116,20 @@ export function Sidebar({
                                                         )}
                                                     </div>
                                                 </div>
+                                            </button>
+                                            {/* Fijar/desfijar al pasar el ratón. Solo en dispositivos con
+                                                ratón: en táctil se usa la pulsación larga. Va arriba a la
+                                                derecha, sobre la hora, para no tapar el contador de no leídos. */}
+                                            <button
+                                                type="button"
+                                                onClick={(e) => { e.stopPropagation(); togglePin(contact); }}
+                                                title={isPinned ? 'Desfijar chat' : 'Fijar chat'}
+                                                aria-label={isPinned ? 'Desfijar chat' : 'Fijar chat'}
+                                                className={`hidden [@media(hover:hover)]:flex absolute right-2 top-2 p-1.5 rounded-lg border shadow-sm opacity-0 pointer-events-none group-hover/pin:opacity-100 group-hover/pin:pointer-events-auto focus-visible:opacity-100 focus-visible:pointer-events-auto transition-opacity ${isDark
+                                                    ? 'bg-slate-800 border-slate-700 text-slate-300 hover:text-white'
+                                                    : 'bg-white border-slate-200 text-slate-500 hover:text-blue-600'}`}
+                                            >
+                                                {isPinned ? <PinOff className="w-3.5 h-3.5" /> : <Pin className="w-3.5 h-3.5" />}
                                             </button>
                                         </li>
                                     );
@@ -1005,6 +1234,44 @@ export function Sidebar({
             )}
 
             {showDialer && <PhoneDialer isOpen={showDialer} onClose={() => setShowDialer(false)} />}
+
+            {/* Menú Fijar/Desfijar (clic derecho o pulsación larga). Va en un portal a
+                <body>: los contenedores de la barra lateral usan backdrop-blur, que
+                rompe el position:fixed de sus hijos. */}
+            {pinMenu && createPortal(
+                (() => {
+                    const menuPinned = !!pinMenu.contact.id && pinnedIds.includes(pinMenu.contact.id);
+                    return (
+                        <div
+                            data-pin-chat-menu
+                            className="fixed inset-0 z-[200]"
+                            // El click y el menú nativo que llegan al levantar el dedo tras la
+                            // pulsación larga no deben cerrarlo.
+                            onClick={() => { if (!suppressClickRef.current) setPinMenu(null); }}
+                            onContextMenu={(e) => { e.preventDefault(); if (!suppressClickRef.current) setPinMenu(null); }}
+                        >
+                            <div
+                                role="menu"
+                                style={{ left: pinMenu.x, top: pinMenu.y }}
+                                onClick={(e) => e.stopPropagation()}
+                                className={`absolute min-w-[190px] p-1 rounded-xl border shadow-xl animate-in fade-in zoom-in-95 duration-100 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}
+                            >
+                                <button
+                                    type="button"
+                                    role="menuitem"
+                                    autoFocus
+                                    onClick={() => { if (suppressClickRef.current) return; togglePin(pinMenu.contact); setPinMenu(null); }}
+                                    className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-left transition ${isDark ? 'text-slate-200 hover:bg-white/10' : 'text-slate-700 hover:bg-slate-100'}`}
+                                >
+                                    {menuPinned ? <PinOff className="w-4 h-4" /> : <Pin className="w-4 h-4" />}
+                                    {menuPinned ? 'Desfijar chat' : 'Fijar chat'}
+                                </button>
+                            </div>
+                        </div>
+                    );
+                })(),
+                document.body
+            )}
 
         </div>
     );
