@@ -50,10 +50,10 @@ Al intentarlo aparecieron dos bloqueos que no eran obvios:
   Devuelve `{updated, imported, skipped, importErrors}`.
 - **Variables con nombre**: `buildTemplateBodyParameters()` emite `parameter_name`
   cuando el cuerpo usa `{{nombre}}`, y posicional cuando usa `{{1}}`. Lo usan los
-  cuatro caminos de envío (`send-template`, `sendTemplateMessage`,
-  `sendTemplateWithDocument` y grupos nativos), no solo uno.
+  tres caminos de envío (`send-template`, `sendTemplateMessage` y
+  `sendTemplateWithDocument`), no solo uno.
 - **`getTemplateBody()` cacheado** (`templateBodyCache`): `sendTemplateMessage` se
-  llama una vez POR DESTINATARIO en campañas y fanout; sin caché serían 1.000
+  llama una vez POR DESTINATARIO en campañas; sin caché serían 1.000
   consultas contra el límite de 5/s de Airtable. Se invalida al crear, borrar e importar.
 - **Captura del pedido movida a `POST /api/send-template`**. Identifica qué variable
   es referencia/pieza/matrícula por la CLAVE (`{{referencia}}`) o, en las numeradas,
@@ -251,175 +251,28 @@ Nuevo campo `TallerConfig.reservedIncidentHoursPerDay` (horas/día reservadas pa
 
 ---
 
-## Sesión 2026-08-01 — Grupos REALES de WhatsApp (Groups API nativa)
+## Sesión 2026-09-17 — Eliminada la función de Grupos
 
-### Qué cambió
-⚠️ **Meta SÍ tiene Groups API desde 2026** (docs act. 16-jun-2026). La nota de la sesión anterior
-("la API oficial no soporta grupos") ya NO es cierta. Ahora conviven **dos modos**:
+Tras el feedback de los clientes se quitó por completo la sección **Grupos** de Mensajería
+(varios clientes + varios trabajadores en un mismo hilo, modos `fanout` y `native`). Esto
+sustituye a las notas de las sesiones del 2026-07-22 y 2026-08-01, que ya no aplican.
 
-| | `fanout` (anterior) | `native` (nuevo) |
-|---|---|---|
-| Envío | N llamadas, una por cliente | 1 llamada a `recipient_type:'group'` |
-| Prefijo | `*[Grupo] Quien:*` | `*Quien:*` (el grupo ya es el contexto) |
-| Entrar | Automático | **Enlace de invitación, lo acepta el cliente** |
-| Máx. | Sin límite | **8 participantes** |
-| Reenvío entre clientes | Lo hacemos nosotros | Lo hace WhatsApp |
-| Laura | Responde | **NO responde** (ver limitación abajo) |
+### Qué se quitó
+- **Frontend:** `GroupChatWindow.tsx` y `GroupCreateModal.tsx` (borrados); la pestaña GRUPOS y su
+  contador de no leídos en `Sidebar.tsx`; la vista `group_chat` en `App.tsx`; la prop `groupId` de
+  `ChatTemplateSelector.tsx`.
+- **Backend (`server/src/index.ts`):** caché de `ChatGroups`, reparto fanout, Groups API nativa,
+  endpoints `/api/groups/*`, sockets `request_group_history` y `group_message`, ramas de grupo del
+  webhook, el parámetro `group` del pipeline de Laura y el filtro `selectMessagesExcludingGroupThread`.
+- El código normal que los grupos habían tocado (guardado en `Messages`, historial de Laura,
+  `request_conversation`, respuestas de Laura, avisos de entrega fallida) quedó como estaba antes.
+- `GRAPH_TEMPLATES_VERSION` / `graphTemplatesUrl` vivían dentro del bloque de grupos pero son de
+  plantillas: **se conservan**.
 
-**Requisito bloqueante: Official Business Account (OBA).** Sin OBA la Groups API devuelve 403.
-Comprobarlo con `curl "$API/$WHATSAPP_PHONE_ID?fields=is_official_business_account" -H "Authorization: Bearer $WHATSAPP_TOKEN"`.
-
-### Principio de diseño: ADITIVO
-`Mode` vacío = `fanout`. Los grupos anteriores no tienen el campo → **comportamiento idéntico**.
-Todo el código nativo cuelga de `mode === 'native'`, así que está **dormido** hasta que se cree
-un grupo nativo a propósito. Las ramas son `if (native) {...} else { código de antes intacto }`.
-
-### Backend (`server/src/index.ts`)
-- `GroupMode`, campos nuevos en `ChatGroup`: `mode`, `waGroupId`, `inviteLink`, `joinedPhones`.
-- `GROUP_BY_WA_ID` (waGroupId → groupId) + `getGroupByWaId()`. **`GROUP_BY_PHONE` ahora solo
-  indexa grupos fanout**: en nativo el chat 1-a-1 del cliente debe seguir siendo un chat normal.
-- Sección "GROUPS API NATIVA": `createNativeWhatsAppGroup`, `fetchNativeGroupInviteLink`,
-  `fetchNativeGroupParticipants`, `removeNativeGroupParticipants`, `deleteNativeWhatsAppGroup`,
-  `describeGroupsApiError` (traduce el 403 de "no eres OBA"). Usan `GRAPH_GROUPS_VERSION = 'v25.0'`
-  (el resto del proyecto usa v21.0).
-- `sendNativeGroupMessage` + `nativeDeliveryResult`. Salida temprana en `fanOutGroupMessage`,
-  `fanOutGroupMedia` y en el bucle de `/api/groups/:id/send-template`.
-- Endpoints nuevos: `GET /api/groups/:id/invite-link`, `POST /api/groups/:id/invite`,
-  `GET /api/groups/:id/participants`.
-- POST `/api/groups` crea primero el grupo en Meta y hace **rollback** (borra el grupo en WhatsApp)
-  si falla Airtable. PUT expulsa de verdad a los clientes que se quiten. DELETE borra el grupo real.
-- Webhook: rama nativa **antes** de `handleContactUpdate` con su propio `return` — no toca el
-  contacto, no reenvía (lo hace WhatsApp) y no entra en flujos de citas/opt-out.
-- `validateGroupPayload` cambió de `(body, excludeGroupId)` a `(body, existing?: ChatGroup)`.
-  **El modo es inmutable tras crear.**
-
-### Frontend
-- `GroupCreateModal`: selector de modo (solo al crear), contador 8/8, aviso RGPD distinto en nativo
-  (se ven entre sí obligatoriamente, no hay toggle).
-- `GroupChatWindow`: badge "Grupo WhatsApp", panel de participantes con quién aceptó, banner de
-  invitaciones pendientes con botón "Enviar invitación", enlace copiable.
-- `Sidebar`: badge "WA" + "N sin aceptar".
-
-### Airtable — CREAR A MANO en `ChatGroups`
-`Mode`, `WaGroupId`, `InviteLink`, `JoinedPhones` (los 4, texto). Sin ellos solo funciona fanout.
-
-### Aislamiento hilo ↔ chat 1-a-1 (CRÍTICO, no tocar sin entenderlo)
-`NOT_GROUP_THREAD_ONLY` = `NOT(AND({group_msg_id}!='', {recipient}=''))`, aplicado vía
-`selectMessagesExcludingGroupThread()` en las 3 consultas del chat privado:
-`request_conversation`, el historial que recibe Gemini y `getClientWindowState`.
-
-**Por qué:** en nativo el mensaje entrante se guarda con el TELÉFONO como `sender` (para que el hilo
-lo pinte como del cliente). Esas 3 consultas filtran por `OR(sender=X, recipient=X)` → sin el filtro,
-lo dicho en un grupo se colaba en la conversación privada, en el contexto de Laura (respondería en
-privado a algo del grupo) y reabría falsamente la ventana de 24h.
-
-**El matiz que lo hace seguro para fanout:** ahí el entrante del cliente es a la vez del hilo y del
-chat 1-a-1, pero lleva `recipient` relleno (el phoneId), así que NO se excluye. Si alguna vez cambias
-cómo se guarda el `recipient`, revisa esto primero.
-
-### Limitaciones asumidas (no son bugs, son decisiones)
-- **Sin push en grupos nativos.** FCM/WebPush viven dentro de `saveAndEmitMessage`, que el camino
-  nativo evita a propósito (para no tocar el contacto). Con la app cerrada no llega aviso; el badge
-  del Sidebar sí funciona con la app abierta.
-- **`joinedPhones` puede ir momentáneamente desfasado** si dos participantes escriben a la vez. Se
-  autocorrige en `GET /participants` y en el webhook de ciclo de vida, que sobrescriben con la
-  verdad de Meta.
-- **`PUT` expulsa de WhatsApp antes de guardar en Airtable**: si el guardado falla, el cliente ya
-  está fuera y hay que reinvitarlo.
-- **`/invite` no tiene fallback a plantilla**: a un cliente fuera de la ventana de 24h no se le puede
-  invitar por WhatsApp (la UI lo avisa antes de pulsar).
-
-### 🔇 Laura NO interviene en NINGÚN grupo (decisión del usuario, 2026-08-01)
-Ni en nativos ni en fanout. Antes sí respondía en los fanout; se desactivó a petición del usuario:
-una respuesta automática dentro de un grupo la leen varias personas a la vez y no hay forma de saber
-a cuál contesta.
-
-Doble bloqueo, a propósito:
-1. **Webhook** (rama `else if (inboundGroup)`): no se encola para la IA, solo se registra en el hilo.
-2. **`deliverLauraMessage`**: si recibe un `group`, avisa por log y no envía.
-
-El parámetro `group` sigue recorriendo el pipeline de IA (`enqueueForAI` → `processAI` →
-`processJsonResponse`) aunque ya nunca se rellene: es el segundo bloqueo. Si algún día se quisiera
-reactivar en fanout, basta con restaurar el `enqueueForAI` del webhook y quitar el guard de
-`deliverLauraMessage` — pero ojo, en NATIVO además faltaría el historial (se construye por
-`sender`/`recipient` = teléfono, y en un grupo nativo no existe ese chat 1-a-1, así que Laura no
-vería sus propias respuestas y se repetiría).
-
-### ⛔ ESTADO REAL: la cuenta NO es OBA — los grupos nativos NO se pueden usar
-Comprobado el 2026-08-01 contra la API de Meta: `is_official_business_account: false` para el número
-+34 607 67 54 16 ("SYA motor"). **La Groups API rechazará cualquier intento de crear un grupo real.**
-El código nativo queda dormido (ningún grupo tiene `Mode=native`) y los grupos fanout siguen
-funcionando con normalidad. Para activarlo habría que conseguir el OBA de Meta (exige notoriedad de
-marca; no es un trámite garantizado).
-
-### Verificado
-Backend `tsc` y frontend `npm run build` limpios. **Sin probar contra la API real de Meta** (requiere
-OBA + despliegue).
-
----
-
-## Sesión 2026-07-22 — Grupos en el chat con clientes
-
-### Qué cambió
-Nuevo tipo de conversación: **grupos** con varios clientes y varios trabajadores en un mismo hilo.
-
-⚠️ **DESFASADO** (ver sesión 2026-08-01): en esta fecha la API oficial de WhatsApp Cloud no
-soportaba grupos, pero Meta publicó la Groups API en junio de 2026. Lo de abajo describe el modo
-`fanout`, que sigue existiendo y funcionando, no la única opción posible.
-
-Lo implementado entonces fue un **grupo propio de Chatgorithm**: el equipo ve un hilo único y el
-servidor reparte (fan-out) cada mensaje al chat 1-a-1 de cada cliente, con el prefijo
-`*[Nombre del grupo] Quien:*`. Para el cliente es un chat normal — no ve la lista de miembros ni
-puede salirse. Se descartaron las librerías no oficiales (Baileys / whatsapp-web.js) por riesgo de
-baneo del número.
-
-### Modelo de datos
-- **Registro CANÓNICO del hilo**: `group_msg_id` relleno + `recipient` vacío → no aparece en ningún
-  chat 1-a-1 (`request_conversation` filtra por sender/recipient = teléfono). El equipo lo ve SIN prefijo.
-- **Copias por cliente**: `group_id` relleno, `group_msg_id` VACÍO. Son mensajes 1-a-1 reales, con el
-  prefijo, para que el historial del cliente en la app coincida con lo que tiene en su móvil.
-- El hilo se lee con `AND({group_id}='X', {group_msg_id}!='')`.
-
-### Backend (`server/src/index.ts`)
-- `TABLE_CHAT_GROUPS = 'ChatGroups'`, interfaz `ChatGroup`, caché `CHAT_GROUPS` + `GROUP_BY_PHONE`,
-  `loadChatGroups()` (recarga tras cada mutación), `getActiveGroupForPhone()`.
-- `GROUP_BY_PHONE` indexa el número completo **y sus últimos 9 dígitos**: un contacto dado de alta a
-  mano puede estar sin el prefijo "34" mientras WhatsApp siempre lo entrega con él. El fan-out excluye
-  al autor con `phoneMatch`, no con `===`, por el mismo motivo.
-- Helpers: `getContactNames()` (N nombres en UNA query), `getClientWindowState()` (ventana 24h),
-  `saveGroupThreadRecord()`, `fanOutGroupMessage()`.
-- REST: `GET/POST/PUT/DELETE /api/groups` + `GET /api/groups/:id/status` (ventana 24h por cliente).
-  DELETE archiva (`Active=false`), no borra. Valida: **un cliente = un grupo activo**.
-- Sockets: `request_group_history` (público) y `group_message` (en `DESTRUCTIVE_SOCKET_EVENTS`).
-- `saveAndEmitMessage` acepta `group_id`/`group_msg_id`: **solo los manda a Airtable si hay grupo**, y
-  reintenta sin ellos si las columnas no existen — la app sigue funcionando aunque falte el setup.
-- Webhook: si el teléfono está en un grupo activo → estampa `group_id`, emite al hilo y (si
-  `ClientsSeeEachOther`) reenvía al resto sin `await` (el 200 a Meta no debe esperar N envíos).
-- **Laura NO responde dentro de un grupo** (rama nueva antes de `contactAiMuted`).
-
-### Frontend (`client/src`)
-- `GroupChatWindow.tsx` (nuevo), `GroupCreateModal.tsx` (nuevo — pide contactos y agentes por socket).
-- `Sidebar.tsx`: bloque "Grupos" + botón `+` + contador de no leídos (solo mensajes de clientes).
-- `App.tsx`: vista `group_chat`, estado `groups`/`selectedGroupId`, recarga con el evento `groups_updated`.
-
-### Airtable — HAY QUE CREARLO A MANO
-- Tabla **`ChatGroups`**: `Name` (texto), `ClientPhones` (texto largo, JSON), `AgentNames` (texto largo,
-  JSON), `LineId` (texto), `ClientsSeeEachOther` (checkbox), `CreatedBy` (texto), `CreatedAt` (texto),
-  `Active` (checkbox).
-- Tabla **`Messages`**: 2 campos nuevos `group_id` (texto) y `group_msg_id` (texto).
-
-### Límites conocidos (asumidos, no son bugs)
-- **Ventana 24h**: a un cliente que lleve >24h sin escribir no se le puede mandar texto libre. La UI lo
-  avisa antes de escribir y marca "No entregado" después (código Meta 131047).
-- **Coste**: cada cliente del grupo es una conversación facturable aparte en Meta.
-- **Una línea por grupo**: si escribieran desde dos líneas, al cliente se le abrirían dos chats.
-- **RGPD**: con `ClientsSeeEachOther` activo un cliente ve el nombre y los mensajes de otro (nunca su
-  teléfono). Por defecto está desactivado.
-- Fase 1 = solo texto. Adjuntos, audio y push en grupos quedan para la fase 2.
-
-### Verificado
-Backend `npx tsc --noEmit` y frontend `npm run build` (`tsc && vite build`) sin errores. **Falta la
-prueba end-to-end con números reales** (requiere crear antes las tablas en Airtable).
+### Airtable
+- No se borró nada. La tabla `ChatGroups` y los campos `group_id` / `group_msg_id` de `Messages`
+  quedan sin uso; se pueden eliminar a mano.
+- El único grupo que existía ("PRUEBA", fanout) se puso a `Active = false`.
 
 ---
 

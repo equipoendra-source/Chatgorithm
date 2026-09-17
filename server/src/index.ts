@@ -464,7 +464,6 @@ const TABLE_CAMPAIGN_SENDS = 'CampaignSends';
 const TABLE_VEHICLES = 'Vehicles'; // Vehículos/items registrados por cliente (multi-coche)
 const TABLE_APPOINTMENT_EVENTS = 'AppointmentEvents'; // Historial de reservas y cancelaciones (auditoría)
 const TABLE_AUDIT_LOG = 'AuditLog'; // Audit log: quién hizo qué cambio en cuándo (admin/agente)
-const TABLE_CHAT_GROUPS = 'ChatGroups'; // Grupos de conversación (varios clientes + varios trabajadores)
 const TABLE_PART_ORDERS = 'PartOrders'; // Pedidos de piezas a proveedores (panel Recambios)
 
 // --- CONFIGURACIÓN MULTI-CUENTA ---
@@ -522,280 +521,6 @@ if (airtableApiKey && airtableBaseId) {
     } catch (e) { console.error("Error crítico configurando Airtable:", e); }
 }
 
-// ==========================================
-//  GRUPOS DE CONVERSACIÓN (tabla ChatGroups)
-// ==========================================
-// Hay DOS modos de grupo, y conviven:
-//
-//  'fanout' (el original) — Se creó cuando la API oficial de WhatsApp todavía NO
-//    tenía grupos. No existe grupo real: el equipo ve un hilo único y por debajo
-//    cada mensaje se reparte al chat 1-a-1 de cada cliente, con el prefijo
-//    "[Nombre del grupo] Quien:". El cliente ve su chat de siempre.
-//
-//  'native' (nuevo) — Grupo REAL de WhatsApp vía la Groups API de Meta (2026).
-//    Un solo envío al `waGroupId`; WhatsApp se encarga de repartir y de que los
-//    participantes se vean entre sí. Requiere Official Business Account (OBA),
-//    máximo 8 participantes, y el cliente entra por enlace de invitación.
-//
-// Regla de oro: un grupo SIN campo Mode es 'fanout'. Así los grupos que ya
-// existían siguen comportándose exactamente igual que antes.
-type GroupMode = 'fanout' | 'native';
-
-interface ChatGroup {
-    id: string;
-    name: string;
-    clientPhones: string[];      // teléfonos limpios (cleanNumber)
-    agentNames: string[];        // nombres de la tabla Agents
-    lineId: string;              // PhoneId de WhatsAppAccounts desde el que habla el grupo
-    clientsSeeEachOther: boolean;
-    createdBy: string;
-    createdAt: string;
-    active: boolean;
-    // --- Solo modo nativo (vacíos en fanout) ---
-    mode: GroupMode;
-    waGroupId: string;           // id del grupo en Meta
-    inviteLink: string;          // enlace de invitación que se manda a los clientes
-    joinedPhones: string[];      // clientes que YA aceptaron la invitación y están dentro
-}
-
-const CHAT_GROUPS = new Map<string, ChatGroup>();   // groupId → grupo
-// phone → groupId. SOLO grupos activos en modo FANOUT: en nativo el mensaje
-// entrante ya trae el group_id de Meta, y además el chat 1-a-1 de ese cliente
-// debe seguir comportándose como un chat normal (si lo indexáramos aquí,
-// cualquier mensaje suyo se colaría en el hilo del grupo).
-// Se indexa el número completo Y sus últimos 9 dígitos: un contacto creado a
-// mano puede estar guardado sin el prefijo "34" mientras WhatsApp siempre lo
-// entrega con él (mismo criterio de tolerancia que usa `phoneMatch`).
-const GROUP_BY_PHONE = new Map<string, string>();
-// waGroupId → groupId. El índice equivalente para el modo nativo: el webhook
-// recibe el id de grupo de Meta y necesita resolver nuestro registro.
-const GROUP_BY_WA_ID = new Map<string, string>();
-
-// Normaliza un id de grupo de Meta antes de indexarlo o buscarlo. El id puede
-// llegar con el sufijo "@g.us" o con distinta caja según el endpoint que lo
-// devuelva; si guardásemos una forma y buscásemos otra, el webhook no
-// encontraría el grupo y sus mensajes se tratarían como conversación privada.
-// Mismo espíritu que el alias de 9 dígitos de GROUP_BY_PHONE.
-function normalizeWaGroupId(raw: unknown): string {
-    return String(raw || '').trim().toLowerCase().replace(/@g\.us$/, '');
-}
-// Si la tabla aún no existe en Airtable no tiene sentido reintentar en bucle ni
-// llenar los logs: avisamos una vez y seguimos funcionando sin grupos.
-let chatGroupsTableMissing = false;
-
-// Acepta tanto un JSON array (formato que escribimos) como una lista separada
-// por comas (por si alguien edita la celda a mano en Airtable).
-function parseListField(raw: unknown): string[] {
-    const s = String(raw || '').trim();
-    if (!s) return [];
-    if (s.startsWith('[')) {
-        try {
-            const arr = JSON.parse(s);
-            if (Array.isArray(arr)) return arr.map(v => String(v).trim()).filter(Boolean);
-        } catch { /* cae al split por comas */ }
-    }
-    return s.split(',').map(v => v.trim()).filter(Boolean);
-}
-
-// Carga (o recarga) los grupos desde Airtable y reconstruye los índices en
-// memoria. El webhook consulta GROUP_BY_PHONE en cada mensaje entrante, por eso
-// interesa tenerlo cacheado y no ir a Airtable cada vez.
-async function loadChatGroups(): Promise<void> {
-    if (!base || chatGroupsTableMissing) return;
-    try {
-        const records = await base(TABLE_CHAT_GROUPS).select().all();
-        CHAT_GROUPS.clear();
-        GROUP_BY_PHONE.clear();
-        GROUP_BY_WA_ID.clear();
-        for (const r of records) {
-            // Normalización defensiva: cualquier valor que no sea exactamente
-            // "native" se trata como fanout. Un campo vacío (grupos anteriores a
-            // esta función) o un typo en Airtable NUNCA activan el modo nativo.
-            const rawMode = String(r.get('Mode') || '').trim().toLowerCase();
-            const mode: GroupMode = rawMode === 'native' ? 'native' : 'fanout';
-            const group: ChatGroup = {
-                id: r.id,
-                name: String(r.get('Name') || '').trim() || 'Grupo sin nombre',
-                clientPhones: parseListField(r.get('ClientPhones')).map(p => cleanNumber(p)).filter(Boolean),
-                agentNames: parseListField(r.get('AgentNames')),
-                lineId: String(r.get('LineId') || '').trim(),
-                clientsSeeEachOther: r.get('ClientsSeeEachOther') === true,
-                createdBy: String(r.get('CreatedBy') || ''),
-                createdAt: String(r.get('CreatedAt') || ''),
-                // Un grupo recién creado a mano sin marcar la casilla se considera
-                // activo: solo desactiva quien pone Active explícitamente a false.
-                active: r.get('Active') !== false,
-                mode,
-                waGroupId: String(r.get('WaGroupId') || '').trim(),
-                inviteLink: String(r.get('InviteLink') || '').trim(),
-                joinedPhones: parseListField(r.get('JoinedPhones')).map(p => cleanNumber(p)).filter(Boolean)
-            };
-            CHAT_GROUPS.set(group.id, group);
-            if (!group.active) continue;
-
-            if (group.mode === 'native') {
-                // Indexado por el id de Meta. NO se toca GROUP_BY_PHONE: el chat
-                // 1-a-1 de estos clientes sigue siendo un chat normal y corriente.
-                if (group.waGroupId) GROUP_BY_WA_ID.set(normalizeWaGroupId(group.waGroupId), group.id);
-                continue;
-            }
-
-            for (const phone of group.clientPhones) {
-                // Un teléfono pertenece a un solo grupo FANOUT activo. Si por
-                // edición manual en Airtable hubiera duplicados, gana el primero
-                // y avisamos.
-                if (GROUP_BY_PHONE.has(phone)) {
-                    console.warn(`⚠️ [Grupos] El teléfono ${phone} está en varios grupos fanout activos. Se usará "${CHAT_GROUPS.get(GROUP_BY_PHONE.get(phone)!)?.name}".`);
-                    continue;
-                }
-                GROUP_BY_PHONE.set(phone, group.id);
-                if (phone.length > 9) {
-                    const suffix = phone.slice(-9);
-                    if (!GROUP_BY_PHONE.has(suffix)) GROUP_BY_PHONE.set(suffix, group.id);
-                }
-            }
-        }
-        const activeGroups = Array.from(CHAT_GROUPS.values()).filter(g => g.active);
-        const nativeCount = activeGroups.filter(g => g.mode === 'native').length;
-        const clientsInGroups = activeGroups.reduce((n, g) => n + g.clientPhones.length, 0);
-        console.log(`👥 [Grupos] ${CHAT_GROUPS.size} grupo(s) cargado(s) — ${activeGroups.length} activo(s), de los cuales ${nativeCount} nativo(s); ${clientsInGroups} cliente(s) en total.`);
-    } catch (e: any) {
-        const msg = e?.message || '';
-        if (e?.statusCode === 404 || /NOT_FOUND|could not be found|Table.*not found/i.test(msg)) {
-            chatGroupsTableMissing = true;
-            console.warn(`⚠️ [Grupos] La tabla "${TABLE_CHAT_GROUPS}" no existe en Airtable. La función de grupos queda desactivada hasta que la crees (campos: Name, ClientPhones, AgentNames, LineId, ClientsSeeEachOther, CreatedBy, CreatedAt, Active + para grupos nativos: Mode, WaGroupId, InviteLink, JoinedPhones).`);
-        } else {
-            console.error('[Grupos] Error cargando grupos:', msg);
-        }
-    }
-}
-// Cargar al arranque, después de que `base` esté listo.
-setTimeout(() => { loadChatGroups().catch(() => {}); }, 1500);
-
-// Devuelve el grupo FANOUT activo al que pertenece un teléfono de cliente, o
-// null. Los grupos nativos nunca salen por aquí (no están en GROUP_BY_PHONE):
-// se resuelven por el id de grupo de Meta con `getGroupByWaId`.
-function getActiveGroupForPhone(phone: string): ChatGroup | null {
-    const clean = cleanNumber(phone);
-    if (!clean) return null;
-    let groupId = GROUP_BY_PHONE.get(clean);
-    // Reintento por los últimos 9 dígitos (ver comentario de GROUP_BY_PHONE).
-    if (!groupId && clean.length > 9) groupId = GROUP_BY_PHONE.get(clean.slice(-9));
-    if (!groupId) return null;
-    const group = CHAT_GROUPS.get(groupId);
-    return group && group.active ? group : null;
-}
-
-// Resuelve un grupo NATIVO a partir del id de grupo que manda Meta en el webhook.
-function getGroupByWaId(waGroupId: string): ChatGroup | null {
-    const id = normalizeWaGroupId(waGroupId);
-    if (!id) return null;
-    const groupId = GROUP_BY_WA_ID.get(id);
-    if (!groupId) return null;
-    const group = CHAT_GROUPS.get(groupId);
-    return group && group.active && group.mode === 'native' ? group : null;
-}
-
-// Nombres de varios contactos en UNA sola consulta (los grupos siempre necesitan
-// los nombres de todos sus clientes a la vez; hacer una query por teléfono
-// gastaría cuota de Airtable sin motivo). Si un teléfono no está en Contacts,
-// se devuelve el propio número.
-async function getContactNames(phones: string[]): Promise<Map<string, string>> {
-    const out = new Map<string, string>();
-    const clean = phones.map(p => cleanNumber(p)).filter(Boolean);
-    for (const p of clean) out.set(p, p);
-    if (!base || clean.length === 0) return out;
-    try {
-        const formula = `OR(${clean.map(p => `{phone}='${escAt(p)}'`).join(',')})`;
-        const records = await base('Contacts').select({ filterByFormula: formula }).all();
-        for (const r of records) {
-            const phone = cleanNumber(r.get('phone'));
-            const name = String(r.get('name') || '').trim();
-            if (phone && name) out.set(phone, name);
-        }
-    } catch (e: any) {
-        console.warn('[Grupos] No se pudieron leer los nombres de los contactos:', e.message);
-    }
-    return out;
-}
-
-// ── Aislamiento entre el hilo de un grupo y los chats 1-a-1 ──────────────────
-// Un registro que tiene `group_msg_id` relleno Y `recipient` vacío pertenece
-// EXCLUSIVAMENTE al hilo de un grupo, y no debe aparecer nunca en la
-// conversación privada de nadie.
-//
-// Por qué hace falta: en un grupo NATIVO el mensaje entrante se guarda con el
-// teléfono del cliente como `sender` (para que el hilo lo pinte como suyo). Las
-// consultas del chat 1-a-1 filtran por `OR(sender=X, recipient=X)`, así que sin
-// esta exclusión esos mensajes se colarían en su conversación privada, en el
-// contexto que recibe Laura (respondería en privado a algo dicho en el grupo) y
-// en el cálculo de la ventana de 24h.
-//
-// Ojo con el modo fanout: ahí el mensaje entrante del cliente es a la vez del
-// hilo Y del chat 1-a-1, pero lleva `recipient` relleno (el phoneId de la
-// línea), así que esta condición NO lo excluye. Ese es justo el matiz que
-// distingue ambos casos.
-const NOT_GROUP_THREAD_ONLY = `NOT(AND({group_msg_id}!='', {recipient}=''))`;
-
-// Select sobre Messages aplicando la exclusión de arriba. Si la tabla todavía no
-// tiene las columnas de grupo (instalación que nunca los ha usado), Airtable
-// rechaza la fórmula; en ese caso se reintenta sin ella en vez de romper el chat.
-async function selectMessagesExcludingGroupThread(params: {
-    filter: string; sort?: any[]; maxRecords?: number; firstPageOnly?: boolean;
-}): Promise<readonly any[]> {
-    if (!base) return [];
-    const run = async (formula: string): Promise<readonly any[]> => {
-        const query = base!('Messages').select({
-            filterByFormula: formula,
-            ...(params.sort ? { sort: params.sort } : {}),
-            ...(params.maxRecords ? { maxRecords: params.maxRecords } : {})
-        });
-        return params.firstPageOnly ? await query.firstPage() : await query.all();
-    };
-    try {
-        return await run(`AND(${params.filter}, ${NOT_GROUP_THREAD_ONLY})`);
-    } catch (e: any) {
-        if (/group_msg_id|recipient|INVALID_FILTER_BY_FORMULA|unknown field|UNKNOWN_FIELD_NAME/i.test(e?.message || '')) {
-            console.warn('[Mensajes] La tabla Messages no admite el filtro de hilos de grupo (¿faltan las columnas group_id/group_msg_id?). Se consulta sin él.');
-            return await run(params.filter);
-        }
-        throw e;
-    }
-}
-
-// ¿Podemos enviar texto libre a este cliente? WhatsApp solo lo permite dentro de
-// las 24h siguientes al último mensaje ENTRANTE del cliente; fuera de esa ventana
-// Meta rechaza el envío con el error 131047 y solo valen plantillas aprobadas.
-// Devuelve también el timestamp para que el frontend pueda mostrar cuánto queda.
-async function getClientWindowState(phone: string): Promise<{ inWindow: boolean; lastInbound: string | null }> {
-    if (!base) return { inWindow: false, lastInbound: null };
-    const clean = cleanNumber(phone);
-    try {
-        const last = await selectMessagesExcludingGroupThread({
-            filter: `{sender}='${escAt(clean)}'`,
-            sort: [{ field: 'timestamp', direction: 'desc' }],
-            maxRecords: 1,
-            firstPageOnly: true
-        });
-        if (last.length === 0) return { inWindow: false, lastInbound: null };
-        const ts = last[0].get('timestamp') as string;
-        const tsMs = ts ? new Date(ts).getTime() : 0;
-        if (!tsMs || Number.isNaN(tsMs)) return { inWindow: false, lastInbound: null };
-        return { inWindow: (Date.now() - tsMs) < (24 * 60 * 60 * 1000), lastInbound: ts };
-    } catch (e: any) {
-        console.warn(`[Grupos] No se pudo comprobar la ventana 24h de ${clean}:`, e.message);
-        return { inWindow: false, lastInbound: null };
-    }
-}
-
-// ==========================================
-//  GROUPS API NATIVA DE META (solo modo 'native')
-// ==========================================
-// Ciclo de vida de un grupo REAL de WhatsApp. Todo lo de aquí abajo solo se
-// ejecuta para grupos con Mode='native'; los grupos fanout no pasan por aquí.
-//
-// La Groups API vive en una versión de Graph más nueva que el resto de llamadas
-// del proyecto (que usan v21.0), por eso su propia constante.
 // Plantillas: estaban en v18.0, que Meta retiró el 26-ene-2026. Una versión
 // caducada no falla — Graph la reenruta sola a la siguiente viva — pero eso
 // significa correr contra una versión que cambia sin avisar. Fijamos la misma
@@ -803,121 +528,6 @@ async function getClientWindowState(phone: string): Promise<{ inWindow: boolean;
 const GRAPH_TEMPLATES_VERSION = 'v21.0';
 const graphTemplatesUrl = (businessId: string) =>
     `https://graph.facebook.com/${GRAPH_TEMPLATES_VERSION}/${businessId}/message_templates`;
-
-const GRAPH_GROUPS_VERSION = 'v25.0';
-const graphGroupsUrl = (path: string) => `https://graph.facebook.com/${GRAPH_GROUPS_VERSION}/${path}`;
-
-// Máximo de participantes de un grupo NATIVO impuesto por Meta (clientes +
-// trabajadores cuentan juntos).
-const NATIVE_GROUP_MAX_PARTICIPANTS = 8;
-
-// Convierte un fallo de Meta en un mensaje entendible. El más importante es el
-// de "no eres Official Business Account", que es el requisito de la Groups API
-// y el motivo nº1 por el que esto puede no funcionar.
-function describeGroupsApiError(e: any): string {
-    const metaErr = e?.response?.data?.error;
-    const code = metaErr?.code;
-    const sub = metaErr?.error_subcode;
-    const msg = metaErr?.message || e?.message || 'error desconocido';
-    const status = e?.response?.status;
-    if (status === 403 || code === 200 || /permission|not authorized|official business/i.test(msg)) {
-        return `Meta ha rechazado la operación (${code || status}): ${msg}. La causa habitual es que el número NO es Official Business Account (OBA), que es requisito para la Groups API.`;
-    }
-    if (status === 400 && /unsupported|unknown path|does not exist/i.test(msg)) {
-        return `Meta no reconoce el endpoint de grupos (${msg}). Puede que la Groups API no esté habilitada para esta cuenta o que la versión ${GRAPH_GROUPS_VERSION} no la soporte.`;
-    }
-    return `Meta ${code || status || ''}${sub ? `/${sub}` : ''}: ${msg}`.trim();
-}
-
-// Crea el grupo en WhatsApp. Devuelve el id de Meta y, si viene en la respuesta,
-// el enlace de invitación.
-// Ojo: según la documentación el id también puede llegar por el webhook
-// `group_lifecycle_update`; leemos ambas formas por si acaso.
-async function createNativeWhatsAppGroup(opts: { lineId: string; subject: string; description?: string }): Promise<{ waGroupId: string; inviteLink: string }> {
-    const token = getToken(opts.lineId);
-    if (!token) throw new Error(`La línea ${opts.lineId} no tiene token configurado.`);
-    const res = await axios.post(
-        graphGroupsUrl(`${opts.lineId}/groups`),
-        {
-            messaging_product: 'whatsapp',
-            // Meta limita el asunto; recortamos para que no falle por longitud.
-            subject: String(opts.subject || '').slice(0, 100),
-            ...(opts.description ? { description: String(opts.description).slice(0, 500) } : {})
-        },
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
-    );
-    const d = res.data || {};
-    const waGroupId = String(d.id || d.group_id || d.groups?.[0]?.id || '').trim();
-    if (!waGroupId) {
-        // Meta respondió OK pero no reconocemos el campo del id. El grupo EXISTE
-        // ya en los móviles de los clientes y no podemos borrarlo sin su id, así
-        // que hay que avisar para limpiarlo a mano en vez de fallar en silencio
-        // (si no, cada reintento crearía otro grupo huérfano).
-        const dump = JSON.stringify(d).slice(0, 300);
-        console.error(`🔴 [Grupos] Meta creó el grupo "${opts.subject}" pero no reconocemos el id en su respuesta: ${dump}`);
-        notifyTeam('send_failed', 'critical',
-            `Se ha creado un grupo de WhatsApp ("${opts.subject}") que la app no puede gestionar porque Meta devolvió un formato de respuesta inesperado. Bórralo a mano desde WhatsApp y avisa a soporte.`,
-            { subject: opts.subject, response: dump });
-        throw new Error(`Meta no devolvió el id del grupo. ⚠️ El grupo SÍ se ha creado en WhatsApp: bórralo a mano. Respuesta: ${dump}`);
-    }
-    const inviteLink = String(d.invite_link || d.groups?.[0]?.invite_link || '').trim();
-    return { waGroupId, inviteLink };
-}
-
-// Pide (o recupera) el enlace de invitación de un grupo ya creado.
-async function fetchNativeGroupInviteLink(lineId: string, waGroupId: string): Promise<string> {
-    const token = getToken(lineId);
-    if (!token) throw new Error(`La línea ${lineId} no tiene token configurado.`);
-    const res = await axios.get(
-        graphGroupsUrl(`${waGroupId}/invite_link`),
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
-    );
-    return String(res.data?.invite_link || '').trim();
-}
-
-// Participantes que están DENTRO del grupo ahora mismo, según Meta. Es la fuente
-// de verdad de quién aceptó la invitación.
-async function fetchNativeGroupParticipants(lineId: string, waGroupId: string): Promise<string[]> {
-    const token = getToken(lineId);
-    if (!token) return [];
-    const res = await axios.get(
-        graphGroupsUrl(`${waGroupId}?fields=participants`),
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
-    );
-    const raw = res.data?.participants?.data ?? res.data?.participants ?? [];
-    if (!Array.isArray(raw)) return [];
-    return raw
-        .map((p: any) => cleanNumber(typeof p === 'string' ? p : (p?.wa_id || p?.user || p?.phone_number)))
-        .filter(Boolean);
-}
-
-// Expulsa participantes del grupo (máx. 8 por llamada, según Meta).
-async function removeNativeGroupParticipants(lineId: string, waGroupId: string, phones: string[]): Promise<void> {
-    const token = getToken(lineId);
-    if (!token || phones.length === 0) return;
-    await axios.delete(
-        graphGroupsUrl(`${waGroupId}/participants`),
-        {
-            headers: { Authorization: `Bearer ${token}` },
-            timeout: 15000,
-            data: {
-                messaging_product: 'whatsapp',
-                participants: phones.slice(0, NATIVE_GROUP_MAX_PARTICIPANTS).map(p => ({ user: cleanNumber(p) }))
-            }
-        }
-    );
-}
-
-// Borra el grupo en WhatsApp. Se usa al archivar un grupo nativo: si no, el
-// grupo seguiría vivo en los móviles de los clientes sin que nadie lo atienda.
-async function deleteNativeWhatsAppGroup(lineId: string, waGroupId: string): Promise<void> {
-    const token = getToken(lineId);
-    if (!token) return;
-    await axios.delete(
-        graphGroupsUrl(waGroupId),
-        { headers: { Authorization: `Bearer ${token}` }, timeout: 15000 }
-    );
-}
 
 // --- CONEXIÓN GEMINI ---
 let genAI: GoogleGenerativeAI | null = null;
@@ -952,7 +562,6 @@ const PUBLIC_SOCKET_EVENTS = new Set<string>([
     'request_contacts',        // lectura
     'request_conversation',    // lectura
     'request_team_history',    // lectura
-    'request_group_history',   // lectura del hilo de un grupo
     'request_ai_status',       // lectura del estado de IA de un chat
     'mark_read',               // marcar leído (no destructivo)
     // viewer tracking: registran en Maps en memoria por socket.id. NO son
@@ -1004,7 +613,6 @@ const DESTRUCTIVE_SOCKET_EVENTS = new Set<string>([
     'update_quick_reply',
     'update_contact_info',
     'send_team_message',
-    'group_message',         // envía a TODOS los clientes del grupo por WhatsApp
     'update_my_preferences', // El usuario actualiza SUS propias preferencias (tour state, theme, etc.)
 ]);
 
@@ -2996,7 +2604,7 @@ function buildTemplateBodyParameters(templateBody: string, variables: string[]):
 // la conocemos (entonces se asume el formato posicional).
 //
 // CACHEADO igual que templateLangCache y por el mismo motivo: sendTemplateMessage
-// se llama UNA VEZ POR DESTINATARIO en las campañas y en el fanout de grupos. Sin
+// se llama UNA VEZ POR DESTINATARIO en las campañas. Sin
 // caché, una campaña de 1.000 añadiría 1.000 consultas a Airtable, cuyo límite es
 // de 5/s — y un 429 aquí devolvería '' en silencio, mandando parámetros
 // posicionales para una plantilla con nombre a mitad de campaña.
@@ -4131,11 +3739,6 @@ async function getMinutesSinceLastWorkerReply(clientPhone: string, originPhoneId
         const clauses = [
             `{recipient}='${clean}'`,
             `{sender}!='Bot IA'`,
-            // Cinturón de seguridad: las respuestas de Laura en grupos se
-            // guardan como 'Bot IA' (savedSender), pero excluimos también
-            // 'Laura' por si algún reparto futuro olvidara el savedSender —
-            // así Laura nunca se auto-cuenta como "trabajador atendiendo".
-            `{sender}!='Laura'`,
             `{sender}!='${clean}'`,
             `{sender}!=''`,
             // Excluir senders que parezcan números de teléfono (>=8 dígitos
@@ -4278,36 +3881,17 @@ async function saveAndEmitMessage(msg: any) {
     // 4. Persistencia en Airtable
     if (base) {
         try {
-            const fields: Record<string, any> = {
-                "text": payload.text || "",
-                "sender": payload.sender,
-                "recipient": payload.recipient || "",
-                "timestamp": payload.timestamp,
-                "type": payload.type || "text",
-                "media_id": payload.mediaId || "",
-                "origin_phone_id": payload.origin_phone_id || ""
-            };
-            // Campos de GRUPO: solo se añaden si el mensaje pertenece a un grupo.
-            // Nunca se mandan en mensajes normales para que la app siga
-            // funcionando igual si esas columnas no existen todavía.
-            if (payload.group_id) {
-                fields["group_id"] = payload.group_id;
-                fields["group_msg_id"] = payload.group_msg_id || "";
-            }
-            try {
-                await base('Messages').create([{ fields }], { typecast: true });
-            } catch (createErr: any) {
-                // Si faltan las columnas de grupo, guardamos el mensaje SIN ellas
-                // antes que perderlo (mismo patrón tolerante que usamos en Config).
-                if (payload.group_id && /group_id|group_msg_id|unknown field|UNKNOWN_FIELD_NAME/i.test(createErr?.message || '')) {
-                    console.warn('⚠️ [Grupos] La tabla Messages no tiene los campos "group_id" y "group_msg_id" (texto). Créalos para que el hilo del grupo se conserve. El mensaje se ha guardado sin ellos.');
-                    delete fields["group_id"];
-                    delete fields["group_msg_id"];
-                    await base('Messages').create([{ fields }], { typecast: true });
-                } else {
-                    throw createErr;
+            await base('Messages').create([{
+                fields: {
+                    "text": payload.text || "",
+                    "sender": payload.sender,
+                    "recipient": payload.recipient || "",
+                    "timestamp": payload.timestamp,
+                    "type": payload.type || "text",
+                    "media_id": payload.mediaId || "",
+                    "origin_phone_id": payload.origin_phone_id || ""
                 }
-            }
+            }], { typecast: true });
 
             // Solo incrementamos unread si es mensaje entrante del usuario (no bot)
             // y si NO hay ningún agente con ese chat abierto en este momento.
@@ -4330,286 +3914,6 @@ async function saveAndEmitMessage(msg: any) {
 
         } catch (e) { console.error("Error guardando en Airtable (socket ya enviado):", e); }
     }
-}
-
-// ==========================================
-//  FAN-OUT DE MENSAJES DE GRUPO
-// ==========================================
-// Prefijo que ve el CLIENTE en su WhatsApp.
-//  - fanout: hace falta el nombre del GRUPO, porque el cliente lo recibe en su
-//    chat 1-a-1 de siempre y si no, no entendería de qué va ni por qué le
-//    escriben varias personas desde el mismo número.
-//  - native: el grupo ya es el contexto (está dentro de él), así que el nombre
-//    del grupo sobra. Pero el del trabajador NO: todos los mensajes salen del
-//    número de la empresa, así que sin prefijo el cliente no podría distinguir
-//    si le habla Pedro o Paco.
-function buildGroupBody(group: ChatGroup, senderLabel: string, text: string): string {
-    return group.mode === 'native'
-        ? `*${senderLabel}:*\n${text}`
-        : `*[${group.name}] ${senderLabel}:*\n${text}`;
-}
-
-// Caption del mismo estilo para los envíos de media.
-function buildGroupCaption(group: ChatGroup, senderLabel: string): string {
-    return group.mode === 'native'
-        ? `*${senderLabel}:*`
-        : `*[${group.name}] ${senderLabel}:*`;
-}
-
-// --- Envío al grupo REAL de WhatsApp (modo nativo) ---
-// Un único POST con `recipient_type: 'group'`: Meta se encarga de repartirlo a
-// todos los participantes. Nada de bucles ni de copias 1-a-1.
-async function sendNativeGroupMessage(group: ChatGroup, payload: Record<string, any>): Promise<SendResult> {
-    const token = getToken(group.lineId);
-    if (!token) return { ok: false, metaError: 'La línea del grupo no tiene token configurado' };
-    if (!group.waGroupId) return { ok: false, metaError: 'El grupo no tiene id de WhatsApp (WaGroupId vacío)' };
-    try {
-        await axios.post(
-            graphGroupsUrl(`${group.lineId}/messages`),
-            {
-                messaging_product: 'whatsapp',
-                recipient_type: 'group',
-                to: group.waGroupId,
-                ...payload
-            },
-            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
-        );
-        return { ok: true };
-    } catch (e: any) {
-        const metaErr = e.response?.data?.error;
-        const detail = metaErr?.message || e.message;
-        console.error(`❌ [Grupos] Fallo enviando al grupo nativo "${group.name}" (${group.waGroupId}):`, detail);
-        return { ok: false, code: metaErr?.code, metaError: detail, httpStatus: e.response?.status };
-    }
-}
-
-// Resultado "de grupo" para la UI. En nativo no hay un resultado por cliente
-// (es un solo envío), así que devolvemos una única entrada etiquetada con el
-// nombre del grupo para que el componente de chat siga funcionando igual.
-function nativeDeliveryResult(group: ChatGroup, send: SendResult): GroupDeliveryResult[] {
-    return [{
-        phone: group.waGroupId,
-        name: group.name,
-        ok: send.ok,
-        code: send.code,
-        error: send.metaError
-    }];
-}
-
-// Registro CANÓNICO del hilo del grupo: uno por mensaje, con `group_msg_id`
-// relleno y `recipient` vacío (así no aparece en ningún chat 1-a-1 — el filtro
-// de `request_conversation` busca por sender/recipient = teléfono).
-// Las copias que sí van a cada cliente llevan `group_msg_id` vacío.
-async function saveGroupThreadRecord(fields: {
-    groupId: string; text: string; sender: string; timestamp: string;
-    groupMsgId: string; lineId: string; type?: string; mediaId?: string;
-}): Promise<void> {
-    if (!base) return;
-    try {
-        await base('Messages').create([{
-            fields: {
-                "text": fields.text,
-                "sender": fields.sender,
-                "recipient": "",
-                "timestamp": fields.timestamp,
-                "type": fields.type || "text",
-                "media_id": fields.mediaId || "",
-                "origin_phone_id": fields.lineId,
-                "group_id": fields.groupId,
-                "group_msg_id": fields.groupMsgId
-            }
-        }], { typecast: true });
-    } catch (e: any) {
-        if (/group_id|group_msg_id|unknown field|UNKNOWN_FIELD_NAME/i.test(e?.message || '')) {
-            console.warn('⚠️ [Grupos] Faltan los campos "group_id" y "group_msg_id" (texto) en la tabla Messages. Créalos: sin ellos el historial del grupo no se guarda.');
-        } else {
-            console.error('[Grupos] Error guardando el mensaje del hilo:', e?.message);
-        }
-    }
-}
-
-interface GroupDeliveryResult { phone: string; name?: string; ok: boolean; code?: number; error?: string; }
-
-// Reparte un mensaje a los clientes del grupo por su chat 1-a-1 de WhatsApp.
-// Se guarda una copia en cada conversación individual para que el historial del
-// cliente en la app coincida exactamente con lo que tiene en su móvil.
-// Devuelve el resultado por cliente: la UI avisa de a quién NO le ha llegado
-// (caso típico: ventana de 24h cerrada, código 131047).
-async function fanOutGroupMessage(opts: {
-    group: ChatGroup;
-    senderLabel: string;
-    text: string;
-    timestamp: string;
-    excludePhone?: string;
-    // Remitente con el que se GUARDA la copia 1-a-1 (por defecto = senderLabel).
-    // Para Laura se guarda como "Bot IA" aunque el prefijo visible sea "Laura",
-    // para que getMinutesSinceLastWorkerReply NO la cuente como un trabajador
-    // (si no, Laura se auto-bloquearía tras responder una vez).
-    savedSender?: string;
-    // relayOnly: solo ENVIAR por WhatsApp, sin guardar copia 1-a-1 ni tocar el
-    // contacto. Se usa al reenviar el mensaje ENTRANTE de un cliente a los demás
-    // (clientsSeeEachOther): guardar esa copia en el chat de otro cliente
-    // contaminaría su historial de IA y su detector de "trabajador atendiendo".
-    relayOnly?: boolean;
-    // savePhone: si se define, la copia 1-a-1 SOLO se guarda para ese cliente
-    // (a los demás solo se les envía). Se usa para la respuesta de Laura: se
-    // guarda en el chat del cliente que preguntó, pero no en el de los demás,
-    // para no mezclar contexto entre clientes distintos del grupo.
-    savePhone?: string;
-}): Promise<GroupDeliveryResult[]> {
-    const { group, senderLabel, text, timestamp } = opts;
-
-    // ── MODO NATIVO ────────────────────────────────────────────────────────
-    // Un solo envío al grupo real; WhatsApp lo reparte. No hay chats 1-a-1 que
-    // alimentar, así que savedSender / savePhone / handleContactUpdate no aplican.
-    if (group.mode === 'native') {
-        // relayOnly = "reenvía a los demás clientes lo que ha escrito uno".
-        // En un grupo real eso lo hace WhatsApp solo: reenviarlo nosotros
-        // duplicaría el mensaje para todo el mundo.
-        if (opts.relayOnly) return [];
-        const send = await sendNativeGroupMessage(group, {
-            type: 'text',
-            text: { body: buildGroupBody(group, senderLabel, text) }
-        });
-        return nativeDeliveryResult(group, send);
-    }
-
-    // ── MODO FANOUT (comportamiento original, sin cambios) ─────────────────
-    const token = getToken(group.lineId);
-    const body = buildGroupBody(group, senderLabel, text);
-    // phoneMatch (no ===) para que el autor quede excluido aunque su contacto
-    // esté guardado sin el prefijo "34" y WhatsApp lo entregue con él: si no,
-    // se le reenviaría su propio mensaje.
-    const targets = group.clientPhones.filter(p => p && !(opts.excludePhone && phoneMatch(p, opts.excludePhone)));
-    const results: GroupDeliveryResult[] = [];
-    // ¿Se persiste la copia 1-a-1 de este cliente?
-    const shouldSave = (phone: string) => opts.relayOnly ? false : (opts.savePhone ? phoneMatch(phone, opts.savePhone) : true);
-
-    // Secuencial a propósito: los grupos son pequeños y así no disparamos el
-    // rate limit de Meta con ráfagas simultáneas.
-    for (const phone of targets) {
-        if (!token) {
-            results.push({ phone, ok: false, error: 'La línea del grupo no tiene token configurado' });
-            continue;
-        }
-        const send = await sendWhatsAppRawWithRetries(phone, body, group.lineId, token);
-        // Se guarda la copia haya ido bien o mal, igual que hace `chatMessage`:
-        // el agente debe ver el intento en el chat del cliente, con su icono de error.
-        if (shouldSave(phone)) {
-            await saveAndEmitMessage({
-                text: body,
-                sender: opts.savedSender || senderLabel,
-                recipient: phone,
-                type: 'text',
-                origin_phone_id: group.lineId,
-                timestamp,
-                group_id: group.id,
-                group_msg_id: ''   // copia, no registro canónico del hilo
-            });
-            await handleContactUpdate(phone, `Tú: ${text}`, undefined, group.lineId);
-            if (!send.ok) {
-                io.emit('message_status', {
-                    recipient: phone, sender: senderLabel, timestamp,
-                    status: 'failed', code: send.code || 0, metaError: send.metaError || ''
-                });
-            }
-        }
-        results.push({ phone, ok: send.ok, code: send.code, error: send.metaError });
-    }
-    return results;
-}
-
-// Envía un mensaje de MEDIA ya subida (por media_id) a un cliente. Devuelve el
-// resultado para el reporte de reparto. No reintenta: los fallos de media suelen
-// ser permanentes (ventana 24h cerrada, tipo no soportado). El caption solo se
-// admite en image/video/document — el audio (nota de voz) no lo lleva.
-async function sendWhatsAppMediaById(opts: {
-    to: string; originPhoneId: string; token: string;
-    mediaId: string; msgType: string; filename?: string; caption?: string;
-}): Promise<SendResult> {
-    const { to, originPhoneId, token, mediaId, msgType, filename, caption } = opts;
-    const cleanTo = cleanNumber(to);
-    if (!cleanTo) return { ok: false, metaError: 'INVALID_RECIPIENT' };
-    const mediaObj: any = { id: mediaId };
-    if (msgType === 'document' && filename) mediaObj.filename = filename;
-    if (caption && (msgType === 'image' || msgType === 'video' || msgType === 'document')) mediaObj.caption = caption;
-    try {
-        await axios.post(
-            `https://graph.facebook.com/v21.0/${originPhoneId}/messages`,
-            { messaging_product: 'whatsapp', to: cleanTo, type: msgType, [msgType]: mediaObj },
-            { headers: { Authorization: `Bearer ${token}` }, timeout: 20000 }
-        );
-        return { ok: true };
-    } catch (e: any) {
-        const metaErr = e.response?.data?.error;
-        return { ok: false, code: metaErr?.code, metaError: metaErr?.message || e.message, httpStatus: e.response?.status };
-    }
-}
-
-// Reparte un mensaje de MEDIA (ya subida, con media_id) a los clientes del grupo
-// por su chat 1-a-1. Igual que fanOutGroupMessage pero para media: guarda una
-// copia en cada conversación individual (con type + media_id) y devuelve el
-// resultado por cliente. El media_id se reutiliza para todos porque el grupo
-// comparte una única línea (mismo phone number id).
-async function fanOutGroupMedia(opts: {
-    group: ChatGroup; senderLabel: string; mediaId: string; msgType: string;
-    textLog: string; filename?: string; timestamp: string; excludePhone?: string;
-    // Igual que en fanOutGroupMessage: solo enviar, sin guardar copia 1-a-1.
-    // Se usa al reenviar media ENTRANTE de un cliente a los demás.
-    relayOnly?: boolean;
-}): Promise<GroupDeliveryResult[]> {
-    const { group, senderLabel, mediaId, msgType, textLog, filename, timestamp } = opts;
-
-    // ── MODO NATIVO ────────────────────────────────────────────────────────
-    // Igual que en texto: un único envío y WhatsApp reparte.
-    if (group.mode === 'native') {
-        if (opts.relayOnly) return [];   // WhatsApp ya se lo ha mostrado a todos
-        const mediaObj: any = { id: mediaId };
-        if (msgType === 'document' && filename) mediaObj.filename = filename;
-        // El caption solo se admite en image/video/document (el audio no lleva).
-        if (msgType === 'image' || msgType === 'video' || msgType === 'document') {
-            mediaObj.caption = buildGroupCaption(group, senderLabel);
-        }
-        const send = await sendNativeGroupMessage(group, { type: msgType, [msgType]: mediaObj });
-        return nativeDeliveryResult(group, send);
-    }
-
-    // ── MODO FANOUT (comportamiento original, sin cambios) ─────────────────
-    const token = getToken(group.lineId);
-    // El prefijo del grupo va como caption (donde WhatsApp lo admite) para que el
-    // cliente vea de qué grupo viene, igual que en los mensajes de texto.
-    const caption = buildGroupCaption(group, senderLabel);
-    const targets = group.clientPhones.filter(p => p && !(opts.excludePhone && phoneMatch(p, opts.excludePhone)));
-    const results: GroupDeliveryResult[] = [];
-    for (const phone of targets) {
-        if (!token) {
-            results.push({ phone, ok: false, error: 'La línea del grupo no tiene token configurado' });
-            continue;
-        }
-        const send = await sendWhatsAppMediaById({ to: phone, originPhoneId: group.lineId, token, mediaId, msgType, filename, caption });
-        if (!opts.relayOnly) {
-            await saveAndEmitMessage({
-                text: textLog,
-                sender: senderLabel,
-                recipient: phone,
-                type: msgType,
-                mediaId,
-                origin_phone_id: group.lineId,
-                timestamp,
-                group_id: group.id,
-                group_msg_id: ''   // copia, no registro canónico del hilo
-            });
-            await handleContactUpdate(phone, `Tú: 📎 ${textLog}`, undefined, group.lineId);
-            if (!send.ok) {
-                io.emit('message_status', {
-                    recipient: phone, sender: senderLabel, timestamp,
-                    status: 'failed', code: send.code || 0, metaError: send.metaError || ''
-                });
-            }
-        }
-        results.push({ phone, ok: send.ok, code: send.code, error: send.metaError });
-    }
-    return results;
 }
 
 // Cola por-phone para serializar handleContactUpdate y evitar race condition:
@@ -6400,15 +5704,12 @@ async function getChatHistory(phone: string, currentText?: string, limit = 25, o
         // El parámetro originPhoneId queda en la firma por compatibilidad
         // pero ya no filtra.
         void originPhoneId;
-        // Se excluyen los mensajes que pertenecen SOLO al hilo de un grupo: lo que
-        // se diga en un grupo no debe entrar como contexto de la conversación
-        // privada (si no, Laura contestaría en privado a algo dicho en el grupo).
         const filterFormula = `OR({sender} = '${clean}', {recipient} = '${clean}')`;
-        const records = await selectMessagesExcludingGroupThread({
-            filter: filterFormula,
+        const records = await base('Messages').select({
+            filterByFormula: filterFormula,
             sort: [{ field: "timestamp", direction: "desc" }],
             maxRecords: limit
-        });
+        }).all();
         const history = [...records].reverse().map((r: any) => {
             const sender = r.get('sender') as string;
             // El cliente (lado "user") es quien tiene como `sender` su propio número.
@@ -6476,26 +5777,8 @@ function isDegenerateText(s: string): boolean {
     return DEGENERATE_MODEL_TEXTS.has((s || '').toLowerCase().trim());
 }
 
-// Entrega un mensaje de LAURA (IA) al cliente, siempre en su chat 1-a-1.
-//
-// Laura NO interviene en ningún grupo (decisión del usuario, 2026-08-01): una
-// respuesta automática dentro de un grupo la leen varias personas a la vez y no
-// hay forma de saber a cuál de ellas contesta. El webhook ya corta antes de
-// encolar el mensaje; el parámetro `group` se mantiene como segundo bloqueo,
-// para que ningún camino futuro acabe publicando en un grupo sin querer.
-async function deliverLauraMessage(clean: string, msg: string, originPhoneId: string, group?: ChatGroup): Promise<void> {
-    if (group) {
-        console.warn(`🔇 [Bot] Se ha intentado que Laura responda en el grupo "${group.name}". Bloqueado: Laura no interviene en grupos.`);
-        return;
-    }
-    await sendWhatsAppText(clean, msg, originPhoneId);
-}
-
-async function processJsonResponse(jsonText: string, phone: string, originId: string, group?: ChatGroup) {
+async function processJsonResponse(jsonText: string, phone: string, originId: string) {
     const FALLBACK_MSG = "En este momento no puedo procesar tu solicitud. Por favor, inténtalo de nuevo.";
-    // En grupo, cada respuesta de Laura se reparte a todos los clientes y se
-    // registra en el hilo; en 1-a-1 va solo al cliente que escribió.
-    const say = (m: string) => deliverLauraMessage(phone, m, originId, group);
 
     // Intento 1: JSON.parse directo
     try {
@@ -6505,7 +5788,7 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
                 console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${data.customer_message}"`);
                 return;
             }
-            await say(data.customer_message);
+            await sendWhatsAppText(phone, data.customer_message, originId);
             return;
         }
     } catch (_) { /* continuar */ }
@@ -6521,7 +5804,7 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
                     console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${data.customer_message}"`);
                     return;
                 }
-                await say(data.customer_message);
+                await sendWhatsAppText(phone, data.customer_message, originId);
                 return;
             }
         }
@@ -6538,7 +5821,7 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
                 console.warn(`[Laura] customer_message degenerado NO enviado al cliente: "${msg}"`);
                 return;
             }
-            await say(msg);
+            await sendWhatsAppText(phone, msg, originId);
             return;
         }
     } catch (e) {
@@ -6563,14 +5846,14 @@ async function processJsonResponse(jsonText: string, phone: string, originId: st
         const hasInternalId = /\brec[A-Za-z0-9]{8,}\b/.test(plain);
         if (plain && !looksJson && !hasInternalId && plain.length <= 1500) {
             console.warn('[Laura] Respuesta no-JSON tolerada: enviando texto plano al cliente.');
-            await say(plain);
+            await sendWhatsAppText(phone, plain, originId);
             return;
         }
     } catch (_) { /* continuar al fallback */ }
 
     // Todos los intentos fallaron: NUNCA enviar el texto crudo
     console.error('[Laura] Error parseando respuesta JSON: todos los intentos fallaron. Texto recibido:', jsonText);
-    await say(FALLBACK_MSG);
+    await sendWhatsAppText(phone, FALLBACK_MSG, originId);
 }
 
 // inboundMedia: opcional. Cuando el cliente manda audio/imagen/vídeo, descargamos los bytes
@@ -6581,8 +5864,7 @@ async function processAI(
     contactPhone: string,
     contactName: string,
     originPhoneId: string,
-    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' },
-    group?: ChatGroup
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
 ) {
     if (!genAI) { console.error("❌ No API Key"); return; }
     const clean = cleanNumber(contactPhone);
@@ -6590,7 +5872,7 @@ async function processAI(
     // Serializar TODA la lógica por número de cliente. Si llegan 5 mensajes
     // en ráfaga del mismo número, se procesan uno detrás de otro y cada turno
     // ve el historial actualizado del anterior — no respuestas contradictorias.
-    return withPhoneLock(clean, () => processAIInner(text, clean, contactName, originPhoneId, inboundMedia, group));
+    return withPhoneLock(clean, () => processAIInner(text, clean, contactName, originPhoneId, inboundMedia));
 }
 
 async function processAIInner(
@@ -6598,8 +5880,7 @@ async function processAIInner(
     clean: string,
     contactName: string,
     originPhoneId: string,
-    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' },
-    group?: ChatGroup
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
 ) {
     if (!genAI) { console.error("❌ No API Key"); return; }
 
@@ -7152,7 +6433,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
                 if (assignmentMsgSent) {
                     console.log('🤐 [IA] Texto final de Gemini ignorado: ya se envió mensaje de derivación al cliente.');
                 } else {
-                    await processJsonResponse(finalTxt, clean, originPhoneId, group);
+                    await processJsonResponse(finalTxt, clean, originPhoneId);
                 }
             } else if (!bookingConfirmedDirectly && !assignmentMsgSent && !stopRequested) {
                 // Gemini se quedó mudo y no fue una reserva NI una derivación NI un
@@ -7242,7 +6523,7 @@ Cada cita ocupa UN único hueco (el cliente solo deja el coche); el tipo solo si
 //   - withPhoneLock dentro de processAI serializa los turnos de un mismo número.
 const AI_DEBOUNCE_MS = 6000;        // espera tras el último mensaje del cliente
 const AI_DEBOUNCE_MAX_MS = 15000;   // tope total desde el primer mensaje del lote
-interface AIBufferEntry { texts: string[]; name: string; originPhoneId: string; timer: ReturnType<typeof setTimeout>; firstAt: number; group?: ChatGroup; }
+interface AIBufferEntry { texts: string[]; name: string; originPhoneId: string; timer: ReturnType<typeof setTimeout>; firstAt: number; }
 const aiInboundBuffer = new Map<string, AIBufferEntry>();
 
 function flushAIBuffer(phone: string): void {
@@ -7254,7 +6535,7 @@ function flushAIBuffer(phone: string): void {
     if (!combined) return;
     // No await (esto corre dentro de un setTimeout): capturamos el rechazo para
     // que un fallo de processAIInner no se convierta en unhandledRejection.
-    processAI(combined, phone, entry.name, entry.originPhoneId, undefined, entry.group)
+    processAI(combined, phone, entry.name, entry.originPhoneId)
         .catch(err => console.error('[Laura] Error procesando lote agrupado:', err));
 }
 
@@ -7263,14 +6544,13 @@ function enqueueForAI(
     text: string,
     name: string,
     originPhoneId: string,
-    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' },
-    group?: ChatGroup
+    inboundMedia?: { mediaId: string, type: 'audio' | 'image' | 'video' | 'document' }
 ): void {
     // Media: no se agrupa. Vaciamos el texto pendiente (si lo hay) y procesamos
     // el media de inmediato en su propio turno.
     if (inboundMedia) {
         flushAIBuffer(phone);
-        processAI(text, phone, name, originPhoneId, inboundMedia, group)
+        processAI(text, phone, name, originPhoneId, inboundMedia)
             .catch(err => console.error('[Laura] Error procesando media:', err));
         return;
     }
@@ -7280,7 +6560,6 @@ function enqueueForAI(
         existing.texts.push(text);
         existing.name = name;
         existing.originPhoneId = originPhoneId;
-        existing.group = group;
         clearTimeout(existing.timer);
         // Reiniciamos el contador, pero sin pasarnos del tope total del lote.
         const elapsed = now - existing.firstAt;
@@ -7288,7 +6567,7 @@ function enqueueForAI(
         existing.timer = setTimeout(() => flushAIBuffer(phone), wait);
     } else {
         const entry: AIBufferEntry = {
-            texts: [text], name, originPhoneId, firstAt: now, group,
+            texts: [text], name, originPhoneId, firstAt: now,
             timer: setTimeout(() => flushAIBuffer(phone), AI_DEBOUNCE_MS)
         };
         aiInboundBuffer.set(phone, entry);
@@ -7579,449 +6858,6 @@ app.get('/api/accounts', (req, res) => res.json(
 ));
 
 // ==========================================
-//  API GRUPOS DE CONVERSACIÓN
-// ==========================================
-// Cualquier trabajador puede crear y gestionar grupos (decisión de producto).
-const serializeGroup = (g: ChatGroup) => ({
-    id: g.id,
-    name: g.name,
-    clientPhones: g.clientPhones,
-    agentNames: g.agentNames,
-    lineId: g.lineId,
-    lineName: ACCOUNT_META[g.lineId]?.name || `Línea ${g.lineId.slice(-4)}`,
-    clientsSeeEachOther: g.clientsSeeEachOther,
-    createdBy: g.createdBy,
-    createdAt: g.createdAt,
-    active: g.active,
-    mode: g.mode,
-    waGroupId: g.waGroupId,
-    inviteLink: g.inviteLink,
-    joinedPhones: g.joinedPhones,
-    // Clientes invitados que todavía NO han aceptado. Solo tiene sentido en
-    // nativo; en fanout no hay invitación que aceptar, así que va vacío.
-    pendingPhones: g.mode === 'native'
-        ? g.clientPhones.filter(p => !g.joinedPhones.some(j => phoneMatch(j, p)))
-        : []
-});
-
-// Valida el cuerpo de creación/edición. Devuelve `{error}` o los campos limpios.
-// `existing` se pasa al EDITAR: sus teléfonos no cuentan como "ya ocupados" y su
-// modo manda (el modo es inmutable — ver abajo).
-function validateGroupPayload(
-    body: any,
-    existing?: ChatGroup
-): { error: string } | { ok: true; name: string; clientPhones: string[]; agentNames: string[]; lineId: string; clientsSeeEachOther: boolean; mode: GroupMode } {
-    const name = String(body?.name || '').trim();
-    if (!name) return { error: 'El grupo necesita un nombre.' };
-
-    // El modo NO se puede cambiar después de crear: un grupo nativo tiene un
-    // grupo real en WhatsApp con gente dentro, y uno fanout no. Convertir uno en
-    // otro dejaría el estado inconsistente (participantes huérfanos, historial
-    // partido). Al editar se conserva siempre el modo original.
-    const mode: GroupMode = existing
-        ? existing.mode
-        : (String(body?.mode || '').trim().toLowerCase() === 'native' ? 'native' : 'fanout');
-
-    const clientPhones = (Array.isArray(body?.clientPhones) ? body.clientPhones : [])
-        .map((p: any) => cleanNumber(p))
-        .filter(Boolean);
-    const uniquePhones = Array.from(new Set<string>(clientPhones));
-    if (uniquePhones.length === 0) return { error: 'Añade al menos un cliente al grupo.' };
-
-    const agentNames = Array.from(new Set<string>(
-        (Array.isArray(body?.agentNames) ? body.agentNames : []).map((a: any) => String(a).trim()).filter(Boolean)
-    ));
-    if (agentNames.length === 0) return { error: 'Añade al menos un trabajador al grupo.' };
-
-    // La línea debe existir de verdad: si no, los mensajes saldrían por un número
-    // equivocado (o fallarían) y el cliente vería un chat distinto al esperado.
-    const rawLineId = String(body?.lineId || '').trim();
-    const lineId = BUSINESS_ACCOUNTS[rawLineId] ? rawLineId : (waPhoneId || '');
-    if (!lineId) return { error: 'No hay ninguna línea de WhatsApp válida configurada.' };
-
-    if (mode === 'native') {
-        // Límite duro de Meta. OJO: los trabajadores NO ocupan plaza — todos
-        // hablan a través del único número de empresa, que sí cuenta como un
-        // participante más. Por eso el cálculo es clientes + 1, no
-        // clientes + trabajadores.
-        const total = uniquePhones.length + 1;
-        if (total > NATIVE_GROUP_MAX_PARTICIPANTS) {
-            return { error: `Un grupo real de WhatsApp admite como máximo ${NATIVE_GROUP_MAX_PARTICIPANTS} participantes (los ${uniquePhones.length} clientes más el número de la empresa suman ${total}). Quita algún cliente o crea el grupo en modo clásico.` };
-        }
-    } else {
-        // Solo en fanout: un cliente no puede estar en dos grupos a la vez, porque
-        // su mensaje entrante 1-a-1 sería ambiguo (¿a qué hilo pertenece?).
-        // En nativo no aplica: el mensaje ya viene etiquetado con el id del grupo.
-        for (const phone of uniquePhones) {
-            const other = getActiveGroupForPhone(phone);
-            if (other && other.id !== existing?.id) {
-                return { error: `El cliente ${phone} ya está en el grupo "${other.name}". Quítalo de ese grupo antes de añadirlo aquí.` };
-            }
-        }
-    }
-
-    return {
-        ok: true,
-        name,
-        clientPhones: uniquePhones,
-        agentNames,
-        lineId,
-        clientsSeeEachOther: body?.clientsSeeEachOther === true,
-        mode
-    };
-}
-
-// Traduce un fallo de Airtable por tabla/campos inexistentes en un mensaje que
-// le diga al usuario exactamente qué crear (mismo patrón que el resto del código).
-function groupsSetupError(e: any): string | null {
-    const msg = e?.message || '';
-    if (e?.statusCode === 404 || /NOT_FOUND|could not be found/i.test(msg)) {
-        return `Falta la tabla "${TABLE_CHAT_GROUPS}" en Airtable. Créala con los campos: Name (texto), ClientPhones (texto largo), AgentNames (texto largo), LineId (texto), ClientsSeeEachOther (checkbox), CreatedBy (texto), CreatedAt (texto), Active (checkbox).`;
-    }
-    if (/unknown field|UNKNOWN_FIELD_NAME/i.test(msg)) {
-        return `A la tabla "${TABLE_CHAT_GROUPS}" le falta algún campo. Necesita: Name, ClientPhones, AgentNames, LineId, ClientsSeeEachOther, CreatedBy, CreatedAt, Active. Y para los grupos REALES de WhatsApp: Mode, WaGroupId, InviteLink, JoinedPhones (todos texto). (${msg})`;
-    }
-    return null;
-}
-
-app.get('/api/groups', (req, res) => {
-    const includeArchived = req.query.includeArchived === '1';
-    const groups = Array.from(CHAT_GROUPS.values())
-        .filter(g => includeArchived || g.active)
-        .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
-        .map(serializeGroup);
-    res.json({ groups, tableMissing: chatGroupsTableMissing });
-});
-
-// Estado de la ventana de 24h de cada cliente del grupo. El frontend lo pide al
-// abrir el grupo para avisar ANTES de escribir a quién no le va a llegar.
-app.get('/api/groups/:id/status', async (req, res) => {
-    const group = CHAT_GROUPS.get(req.params.id);
-    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
-    try {
-        const names = await getContactNames(group.clientPhones);
-        const clients = await Promise.all(group.clientPhones.map(async phone => {
-            const state = await getClientWindowState(phone);
-            return { phone, name: names.get(phone) || phone, ...state };
-        }));
-        res.json({ clients });
-    } catch (e: any) {
-        console.error('[API] Error GET /groups/:id/status:', e.message);
-        res.status(500).json({ error: 'Error comprobando el estado de los clientes' });
-    }
-});
-
-app.post('/api/groups', async (req, res) => {
-    if (!base) return res.status(500).json({ error: 'DB no disponible' });
-    const v = validateGroupPayload(req.body);
-    if ('error' in v) return res.status(400).json({ error: v.error });
-
-    // MODO NATIVO: primero se crea el grupo REAL en WhatsApp. Si Meta lo rechaza
-    // (típicamente por no ser Official Business Account) abortamos ANTES de tocar
-    // Airtable — así no queda un grupo huérfano en la app que no existe en
-    // WhatsApp y que no podría enviar nada.
-    let waGroupId = '';
-    let inviteLink = '';
-    if (v.mode === 'native') {
-        try {
-            const createdWa = await createNativeWhatsAppGroup({
-                lineId: v.lineId,
-                subject: v.name,
-                description: String(req.body?.description || '').trim() || undefined
-            });
-            waGroupId = createdWa.waGroupId;
-            inviteLink = createdWa.inviteLink;
-            // El enlace puede no venir en la respuesta de creación; se pide aparte.
-            if (!inviteLink) {
-                try {
-                    inviteLink = await fetchNativeGroupInviteLink(v.lineId, waGroupId);
-                } catch (linkErr: any) {
-                    // No es fatal: el grupo existe y el enlace se puede pedir luego
-                    // desde el endpoint /invite-link.
-                    console.warn('[Grupos] Grupo nativo creado pero sin enlace de invitación todavía:', describeGroupsApiError(linkErr));
-                }
-            }
-            console.log(`👥 [Grupos] Grupo NATIVO creado en WhatsApp: ${waGroupId} ("${v.name}")`);
-        } catch (e: any) {
-            const detail = describeGroupsApiError(e);
-            console.error('[API] Error creando grupo nativo en Meta:', detail);
-            // Un timeout NO significa que Meta no lo haya creado: puede haberlo
-            // hecho y habernos dejado sin respuesta. Se avisa para poder limpiarlo
-            // en lugar de dar por hecho que no existe.
-            const timedOut = e?.code === 'ECONNABORTED' || /timeout/i.test(e?.message || '');
-            if (timedOut) {
-                notifyTeam('send_failed', 'warning',
-                    `Se agotó el tiempo de espera creando el grupo de WhatsApp "${v.name}". Puede que Meta SÍ lo haya creado: compruébalo en el móvil y bórralo a mano si aparece, antes de reintentar.`,
-                    { subject: v.name });
-            }
-            return res.status(400).json({
-                error: timedOut
-                    ? `Se agotó el tiempo de espera creando el grupo. Puede que WhatsApp lo haya creado igualmente: compruébalo antes de reintentar para no acabar con grupos duplicados.`
-                    : `No se pudo crear el grupo real de WhatsApp. ${detail}`
-            });
-        }
-    }
-
-    const fields: Record<string, any> = {
-        Name: v.name,
-        ClientPhones: JSON.stringify(v.clientPhones),
-        AgentNames: JSON.stringify(v.agentNames),
-        LineId: v.lineId,
-        ClientsSeeEachOther: v.clientsSeeEachOther,
-        CreatedBy: String(req.body?.createdBy || '').trim(),
-        CreatedAt: new Date().toISOString(),
-        Active: true
-    };
-    // Los campos de modo solo se escriben en grupos nativos: así un Airtable
-    // que aún no tenga esas columnas sigue pudiendo crear grupos fanout.
-    if (v.mode === 'native') {
-        fields.Mode = 'native';
-        fields.WaGroupId = waGroupId;
-        fields.InviteLink = inviteLink;
-        fields.JoinedPhones = JSON.stringify([]);
-    }
-
-    // El try del rollback abarca SOLO el create. Si envolviera también lo que
-    // viene después (recarga, serialización...), un fallo ahí borraría el grupo
-    // real de WhatsApp dejando vivo el registro de Airtable — justo al revés de
-    // lo que queremos.
-    let createdId = '';
-    try {
-        const created = await base(TABLE_CHAT_GROUPS).create([{ fields }], { typecast: true });
-        createdId = created[0].id;
-        chatGroupsTableMissing = false; // si la creación funciona, la tabla existe
-    } catch (e: any) {
-        // Airtable falló DESPUÉS de crear el grupo en WhatsApp: hay que deshacerlo
-        // o quedaría un grupo real que la app desconoce por completo.
-        if (waGroupId) {
-            try {
-                await deleteNativeWhatsAppGroup(v.lineId, waGroupId);
-                console.warn(`[Grupos] Rollback: grupo nativo ${waGroupId} borrado en WhatsApp porque falló el guardado en Airtable.`);
-            } catch (rollbackErr: any) {
-                console.error(`[Grupos] ⚠️ No se pudo deshacer el grupo nativo ${waGroupId} en WhatsApp. Bórralo a mano:`, describeGroupsApiError(rollbackErr));
-            }
-        }
-        const setupErr = groupsSetupError(e);
-        console.error('[API] Error POST /groups:', e.message);
-        return res.status(setupErr ? 400 : 500).json({ error: setupErr || 'No se pudo crear el grupo' });
-    }
-
-    try {
-        await loadChatGroups();
-        const group = CHAT_GROUPS.get(createdId);
-        io.emit('groups_updated');
-        res.json({ success: true, group: group ? serializeGroup(group) : null });
-    } catch (e: any) {
-        // El grupo está creado en ambos sitios; solo ha fallado el refresco de la
-        // caché. No se deshace nada: se devuelve OK y se recargará solo.
-        console.error('[API] Grupo creado pero falló la recarga de la caché:', e.message);
-        res.json({ success: true, group: null });
-    }
-});
-
-app.put('/api/groups/:id', async (req, res) => {
-    if (!base) return res.status(500).json({ error: 'DB no disponible' });
-    const group = CHAT_GROUPS.get(req.params.id);
-    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
-    const v = validateGroupPayload(req.body, group);
-    if ('error' in v) return res.status(400).json({ error: v.error });
-
-    // En un grupo NATIVO, quitar a alguien de la lista no basta: hay que echarlo
-    // del grupo real de WhatsApp. Si no, seguiría dentro leyendo la conversación.
-    // (Añadir es al revés: no se puede meter a nadie, hay que invitarle.)
-    if (group.mode === 'native' && group.waGroupId) {
-        const removed = group.clientPhones.filter(p => !v.clientPhones.some(np => phoneMatch(np, p)));
-        const removedAndInside = removed.filter(p => group.joinedPhones.some(j => phoneMatch(j, p)));
-        if (removedAndInside.length > 0) {
-            try {
-                await removeNativeGroupParticipants(group.lineId, group.waGroupId, removedAndInside);
-                console.log(`👥 [Grupos] Expulsados del grupo nativo "${group.name}": ${removedAndInside.join(', ')}`);
-            } catch (e: any) {
-                console.error('[API] Error expulsando participantes del grupo nativo:', describeGroupsApiError(e));
-                return res.status(400).json({ error: `No se pudo expulsar a ${removedAndInside.join(', ')} del grupo de WhatsApp. ${describeGroupsApiError(e)}` });
-            }
-        }
-    }
-
-    try {
-        const fields: Record<string, any> = {
-            Name: v.name,
-            ClientPhones: JSON.stringify(v.clientPhones),
-            AgentNames: JSON.stringify(v.agentNames),
-            LineId: v.lineId,
-            ClientsSeeEachOther: v.clientsSeeEachOther
-        };
-        // Al quitar clientes hay que limpiarlos también de la lista de "ya dentro",
-        // o seguirían contando como participantes activos en la UI.
-        if (group.mode === 'native') {
-            fields.JoinedPhones = JSON.stringify(
-                group.joinedPhones.filter(j => v.clientPhones.some(p => phoneMatch(p, j)))
-            );
-        }
-        await base(TABLE_CHAT_GROUPS).update([{ id: group.id, fields }], { typecast: true });
-        await loadChatGroups();
-        io.emit('groups_updated');
-        const updated = CHAT_GROUPS.get(group.id);
-        res.json({ success: true, group: updated ? serializeGroup(updated) : null });
-    } catch (e: any) {
-        const setupErr = groupsSetupError(e);
-        console.error('[API] Error PUT /groups/:id:', e.message);
-        res.status(setupErr ? 400 : 500).json({ error: setupErr || 'No se pudo actualizar el grupo' });
-    }
-});
-
-// Archivar, no borrar: el historial de mensajes del grupo sigue siendo válido y
-// los chats 1-a-1 de cada cliente quedan intactos.
-// En NATIVO se borra además el grupo real de WhatsApp — si no, seguiría vivo en
-// los móviles de los clientes con nadie atendiéndolo desde la app.
-app.delete('/api/groups/:id', async (req, res) => {
-    if (!base) return res.status(500).json({ error: 'DB no disponible' });
-    const group = CHAT_GROUPS.get(req.params.id);
-    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
-    let waWarning: string | null = null;
-    if (group.mode === 'native' && group.waGroupId) {
-        try {
-            await deleteNativeWhatsAppGroup(group.lineId, group.waGroupId);
-            console.log(`👥 [Grupos] Grupo nativo ${group.waGroupId} borrado en WhatsApp.`);
-        } catch (e: any) {
-            // No bloqueamos el archivado: es peor dejar el grupo colgando en la app.
-            // Avisamos para que se pueda borrar a mano desde WhatsApp.
-            waWarning = `El grupo se ha archivado en la app, pero no se pudo borrar en WhatsApp: ${describeGroupsApiError(e)}`;
-            console.error('[API] Error borrando grupo nativo en Meta:', waWarning);
-        }
-    }
-    try {
-        await base(TABLE_CHAT_GROUPS).update([{ id: group.id, fields: { Active: false } }], { typecast: true });
-        await loadChatGroups();
-        io.emit('groups_updated');
-        res.json({ success: true, ...(waWarning ? { warning: waWarning } : {}) });
-    } catch (e: any) {
-        console.error('[API] Error DELETE /groups/:id:', e.message);
-        res.status(500).json({ error: 'No se pudo archivar el grupo' });
-    }
-});
-
-// --- Endpoints exclusivos del modo NATIVO ---
-
-// Enlace de invitación del grupo. Lo refresca desde Meta si aún no lo teníamos
-// (puede pasar si la creación devolvió el id pero no el enlace).
-app.get('/api/groups/:id/invite-link', async (req, res) => {
-    const group = CHAT_GROUPS.get(req.params.id);
-    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
-    if (group.mode !== 'native' || !group.waGroupId) {
-        return res.status(400).json({ error: 'Este grupo no es un grupo real de WhatsApp, no tiene enlace de invitación.' });
-    }
-    try {
-        let link = group.inviteLink;
-        if (!link || req.query.refresh === '1') {
-            link = await fetchNativeGroupInviteLink(group.lineId, group.waGroupId);
-            if (link && base) {
-                await base(TABLE_CHAT_GROUPS).update([{ id: group.id, fields: { InviteLink: link } }], { typecast: true });
-                await loadChatGroups();
-            }
-        }
-        res.json({ inviteLink: link });
-    } catch (e: any) {
-        const detail = describeGroupsApiError(e);
-        console.error('[API] Error GET /groups/:id/invite-link:', detail);
-        res.status(500).json({ error: detail });
-    }
-});
-
-// Envía el enlace de invitación por WhatsApp a los clientes que aún no han
-// entrado. Devuelve el resultado por cliente (a quién le llegó y a quién no).
-// Ojo: es un mensaje 1-a-1 normal, así que le afecta la ventana de 24h.
-app.post('/api/groups/:id/invite', async (req, res) => {
-    const group = CHAT_GROUPS.get(req.params.id);
-    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
-    if (group.mode !== 'native' || !group.waGroupId) {
-        return res.status(400).json({ error: 'Solo los grupos reales de WhatsApp usan invitaciones.' });
-    }
-    try {
-        let link = group.inviteLink;
-        if (!link) {
-            link = await fetchNativeGroupInviteLink(group.lineId, group.waGroupId);
-            if (link && base) {
-                await base(TABLE_CHAT_GROUPS).update([{ id: group.id, fields: { InviteLink: link } }], { typecast: true });
-                await loadChatGroups();
-            }
-        }
-        if (!link) return res.status(500).json({ error: 'Meta no ha devuelto ningún enlace de invitación para este grupo.' });
-
-        // Por defecto solo a los que faltan; con `all: true` se reenvía a todos.
-        const onlyPhones: string[] = Array.isArray(req.body?.phones) ? req.body.phones.map((p: any) => cleanNumber(p)).filter(Boolean) : [];
-        const targets = onlyPhones.length > 0
-            ? group.clientPhones.filter(p => onlyPhones.some(o => phoneMatch(o, p)))
-            : (req.body?.all === true
-                ? group.clientPhones
-                : group.clientPhones.filter(p => !group.joinedPhones.some(j => phoneMatch(j, p))));
-
-        const invitedBy = String(req.body?.invitedBy || '').trim();
-        const body = `${invitedBy ? `${invitedBy} te invita` : 'Te invitamos'} al grupo *${group.name}*.\n\nÚnete aquí para hablar con nosotros:\n${link}`;
-
-        const results = [];
-        for (const phone of targets) {
-            const sent = await sendWhatsAppText(phone, body, group.lineId);
-            // `dedup` = el mismo texto se mandó a ese número hace <10s y se
-            // descartó. Reportarlo como éxito haría creer que la invitación salió
-            // cuando en realidad no se envió nada (típico al pulsar dos veces).
-            results.push({
-                phone,
-                ok: !!sent.ok && !sent.dedup,
-                code: sent.code,
-                error: sent.dedup
-                    ? 'Ya se le acaba de enviar esta invitación hace unos segundos.'
-                    : sent.metaError
-            });
-        }
-        const names = await getContactNames(group.clientPhones);
-        res.json({
-            success: true,
-            inviteLink: link,
-            results: results.map(r => ({ ...r, name: names.get(r.phone) || r.phone }))
-        });
-    } catch (e: any) {
-        const detail = describeGroupsApiError(e);
-        console.error('[API] Error POST /groups/:id/invite:', detail);
-        res.status(500).json({ error: detail });
-    }
-});
-
-// Sincroniza desde Meta quién está realmente dentro del grupo. El frontend lo
-// llama al abrir un grupo nativo para pintar quién ha aceptado y quién no.
-app.get('/api/groups/:id/participants', async (req, res) => {
-    const group = CHAT_GROUPS.get(req.params.id);
-    if (!group) return res.status(404).json({ error: 'Grupo no encontrado' });
-    if (group.mode !== 'native' || !group.waGroupId) {
-        return res.status(400).json({ error: 'Este grupo no es un grupo real de WhatsApp.' });
-    }
-    try {
-        const participants = await fetchNativeGroupParticipants(group.lineId, group.waGroupId);
-        // Solo nos quedamos con los que son clientes del grupo (la lista de Meta
-        // incluye también el propio número de empresa).
-        const joined = group.clientPhones.filter(p => participants.some(x => phoneMatch(x, p)));
-        if (base && JSON.stringify(joined) !== JSON.stringify(group.joinedPhones)) {
-            await base(TABLE_CHAT_GROUPS).update([{ id: group.id, fields: { JoinedPhones: JSON.stringify(joined) } }], { typecast: true });
-            await loadChatGroups();
-            io.emit('groups_updated');
-        }
-        const names = await getContactNames(group.clientPhones);
-        res.json({
-            participants: group.clientPhones.map(p => ({
-                phone: p,
-                name: names.get(p) || p,
-                joined: joined.some(j => phoneMatch(j, p))
-            })),
-            totalInWhatsApp: participants.length
-        });
-    } catch (e: any) {
-        const detail = describeGroupsApiError(e);
-        console.error('[API] Error GET /groups/:id/participants:', detail);
-        res.status(500).json({ error: detail });
-    }
-});
-
-// ==========================================
 //  PEDIDOS DE PIEZAS A PROVEEDORES (Recambios)
 // ==========================================
 // Tabla PartOrders en Airtable (campos: matricula, pieza, referencia,
@@ -8033,7 +6869,7 @@ app.get('/api/groups/:id/participants', async (req, res) => {
 let partOrdersTableMissing = false;
 
 // Traduce errores de setup de Airtable (tabla o columna inexistente) en un
-// mensaje accionable para el frontend, igual que groupsSetupError.
+// mensaje accionable para el frontend.
 function partOrdersSetupError(e: any): string | null {
     const msg = e?.message || '';
     if (e?.statusCode === 404 || /NOT_FOUND|could not be found/i.test(msg)) {
@@ -11101,160 +9937,6 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
 });
 
 // ==========================================
-//  ENDPOINT SUBIDA ARCHIVOS A UN GRUPO
-// ==========================================
-// Sube un archivo (foto, vídeo, audio, documento) a un GRUPO: se sube UNA vez a
-// la WhatsApp Media API de la línea del grupo y ese mismo media_id se reparte a
-// todos los clientes. Guarda el registro canónico del hilo (con type + media_id)
-// y una copia 1-a-1 en cada cliente, igual que hace fanOutGroupMessage con texto.
-app.post('/api/groups/:id/upload', upload.single('file'), async (req: any, res: any) => {
-    try {
-        const group = CHAT_GROUPS.get(String(req.params.id || ''));
-        if (!group || !group.active) return res.status(404).json({ error: 'El grupo no existe o está archivado.' });
-        const file = req.file;
-        const senderName = String(req.body?.senderName || 'Equipo');
-        const token = getToken(group.lineId);
-        if (!file || !token) {
-            return res.status(400).json({ error: 'Faltan datos (archivo o token de la línea del grupo).' });
-        }
-
-        // Mismo pre-procesado que /api/upload: audio → OGG Opus (nota de voz),
-        // imagen → auto-rotar por EXIF.
-        let fileBuffer = file.buffer;
-        let fileMimeType = file.mimetype;
-        let fileName = file.originalname;
-
-        const isAudio = file.mimetype.startsWith('audio');
-        if (isAudio) {
-            try {
-                const converted = await convertAudioToOggOpus(file.buffer, file.mimetype);
-                fileBuffer = converted.buffer; fileMimeType = converted.mimeType; fileName = converted.filename;
-            } catch (convErr: any) {
-                console.error('⚠️ [Grupo Upload] Conversión de audio falló, usando original:', convErr.message);
-            }
-        }
-        const isImage = file.mimetype.startsWith('image');
-        if (isImage) {
-            try { fileBuffer = await sharp(file.buffer).rotate().toBuffer(); }
-            catch (sharpErr: any) { console.error('⚠️ [Grupo Upload] Corrección EXIF falló, usando original:', sharpErr.message); }
-        }
-
-        // Subir UNA vez a la Media API de la línea del grupo.
-        const formData = new FormData();
-        formData.append('file', fileBuffer, { filename: fileName, contentType: fileMimeType });
-        formData.append('messaging_product', 'whatsapp');
-        const uploadRes = await axios.post(`https://graph.facebook.com/v21.0/${group.lineId}/media`, formData, { headers: { 'Authorization': `Bearer ${token}`, ...formData.getHeaders() } });
-        const mediaId = uploadRes.data.id;
-        console.log(`✅ [Grupo Upload] Media subida a la línea ${group.lineId}, ID: ${mediaId}`);
-
-        // Mismo criterio de tipo que /api/upload (vídeo cae en 'document', igual
-        // que el chat normal, para no divergir de su comportamiento).
-        let msgType = 'document';
-        if (isImage) msgType = 'image';
-        else if (isAudio) msgType = 'audio';
-
-        let textLog = fileName;
-        if (msgType === 'image') textLog = '📷 [Imagen]';
-        else if (msgType === 'audio') textLog = '🎤 [Audio]';
-
-        const timestamp = new Date().toISOString();
-        const groupMsgId = crypto.randomUUID();
-
-        // 1. Registro canónico del hilo (con type + media_id) — el equipo lo ve sin prefijo.
-        await saveGroupThreadRecord({ groupId: group.id, text: textLog, sender: senderName, timestamp, groupMsgId, lineId: group.lineId, type: msgType, mediaId });
-        // 2. Eco inmediato al equipo con la media (el reparto puede tardar).
-        io.emit('group_message', { groupId: group.id, id: groupMsgId, text: textLog, sender: senderName, fromClient: false, timestamp, type: msgType, mediaId });
-        // 3. Reparto a los clientes (mismo media_id, con el prefijo del grupo como caption).
-        const results = await fanOutGroupMedia({ group, senderLabel: senderName, mediaId, msgType, textLog, filename: msgType === 'document' ? fileName : undefined, timestamp });
-        const names = await getContactNames(group.clientPhones);
-        io.emit('group_send_report', {
-            groupId: group.id,
-            groupMsgId,
-            // `r.name` ya viene puesto en el modo nativo (es el nombre del grupo,
-            // porque ahí `phone` es el id de Meta y no un teléfono). Respetarlo
-            // evita que la UI muestre "No entregado a 120363012345678".
-            results: results.map(r => ({ ...r, name: r.name || names.get(cleanNumber(r.phone)) || r.phone }))
-        });
-
-        res.json({ success: true });
-    } catch (e: any) {
-        console.error('❌ [Grupo Upload] Error:', e.response?.data || e.message || e);
-        res.status(500).json({ error: 'Error subiendo archivo al grupo', details: e.response?.data || e.message });
-    }
-});
-
-// ==========================================
-//  ENVÍO DE PLANTILLA APROBADA A UN GRUPO
-// ==========================================
-// Reparte una plantilla de WhatsApp aprobada a todos los clientes del grupo.
-// Es la vía para escribir a clientes fuera de la ventana de 24h. Reutiliza
-// sendTemplateMessage por cliente (envío + resolución de idioma + copia 1-a-1)
-// y guarda el registro canónico del hilo con el texto real (previewText) para
-// que el equipo lo vea en el grupo.
-app.post('/api/groups/:id/send-template', async (req, res) => {
-    try {
-        const group = CHAT_GROUPS.get(String(req.params.id || ''));
-        if (!group || !group.active) return res.status(404).json({ error: 'El grupo no existe o está archivado.' });
-        const { templateName, language, variables, previewText, senderName } = req.body || {};
-        if (!templateName) return res.status(400).json({ error: 'Falta templateName.' });
-        const token = getToken(group.lineId);
-        if (!token) return res.status(500).json({ error: 'La línea del grupo no tiene token configurado.' });
-
-        const sender = String(senderName || 'Equipo');
-        const vars: string[] = Array.isArray(variables) ? variables.map((v: any) => String(v)) : [];
-        const threadText = String(previewText || `[Plantilla] ${templateName}`);
-        const timestamp = new Date().toISOString();
-        const groupMsgId = crypto.randomUUID();
-
-        // 1. Registro canónico del hilo + eco al equipo (con el texto real de la plantilla).
-        await saveGroupThreadRecord({ groupId: group.id, text: threadText, sender, timestamp, groupMsgId, lineId: group.lineId, type: 'template' });
-        io.emit('group_message', { groupId: group.id, id: groupMsgId, text: threadText, sender, fromClient: false, timestamp, type: 'template' });
-
-        // 2. Reparto.
-        let reportResults: GroupDeliveryResult[];
-        if (group.mode === 'native') {
-            // NATIVO: una sola plantilla al grupo. Se resuelve el idioma igual que
-            // en 1-a-1 para no chocar con el error #132001 ("la plantilla no existe
-            // en es_ES"), reutilizando la caché que ya mantiene el proyecto.
-            const parameters = buildTemplateBodyParameters(await getTemplateBody(templateName, language), vars);
-            const components = parameters.length > 0 ? [{ type: 'body', parameters }] : [];
-            const langCode = language
-                || templateLangCache.get(templateName)
-                || await resolveTemplateLanguage(templateName, group.lineId)
-                || 'es';
-            const send = await sendNativeGroupMessage(group, {
-                type: 'template',
-                template: {
-                    name: templateName,
-                    language: { code: langCode },
-                    ...(components.length > 0 ? { components } : {})
-                }
-            });
-            if (send.ok) templateLangCache.set(templateName, langCode);
-            reportResults = nativeDeliveryResult(group, send);
-        } else {
-            // FANOUT: la plantilla a cada cliente. sendTemplateMessage resuelve el
-            // idioma real de la plantilla y guarda una copia en el chat 1-a-1.
-            const results: GroupDeliveryResult[] = [];
-            for (const phone of group.clientPhones.filter(Boolean)) {
-                const r = await sendTemplateMessage(phone, templateName, vars, group.lineId, language || undefined);
-                const ok = r === true;
-                results.push({ phone, ok, error: ok ? undefined : String(r) });
-            }
-            const names = await getContactNames(group.clientPhones);
-            reportResults = results.map(x => ({ ...x, name: names.get(cleanNumber(x.phone)) || x.phone }));
-        }
-
-        io.emit('group_send_report', { groupId: group.id, groupMsgId, results: reportResults });
-
-        res.json({ success: true });
-    } catch (e: any) {
-        console.error('❌ [Grupo send-template] Error:', e.response?.data || e.message || e);
-        res.status(500).json({ error: 'Error enviando la plantilla al grupo', details: e.response?.data || e.message });
-    }
-});
-
-// ==========================================
 //  ENDPOINT SUBIDA ARCHIVOS CHAT DE EQUIPO
 // ==========================================
 app.post('/api/team/upload', teamUpload.single('file'), async (req: any, res: any) => {
@@ -11595,172 +10277,20 @@ app.post('/webhook', async (req, res) => {
 
             console.log(`📩 [WEBHOOK] Mensaje de ${from}: "${text}" (tipo: ${msg.type}, mediaId: ${inboundMediaId || 'ninguno'}, phoneId: ${originPhoneId})`);
 
-            // ══════════════════════════════════════════════════════════════
-            //  MENSAJE DE UN GRUPO REAL DE WHATSAPP (modo nativo)
-            // ══════════════════════════════════════════════════════════════
-            // Meta etiqueta estos mensajes con el id del grupo; `from` es el
-            // participante que ha escrito. Es un camino COMPLETAMENTE aparte del
-            // chat 1-a-1 y termina con su propio return:
-            //   · No se toca el contacto (esto no es su conversación privada:
-            //     marcarlo movería su chat en la bandeja y sumaría no-leídos).
-            //   · No se reenvía nada — WhatsApp ya se lo ha mostrado a todos.
-            //   · No entran los flujos de citas/opt-out/plantillas, que están
-            //     pensados para una conversación privada de uno a uno.
-            // Solo se mira el id a nivel RAÍZ. Deliberadamente NO se usa
-            // `msg.context`: ese objeto es el de "mensaje citado / reenviado" de una
-            // conversación privada. Si un cliente cita en su chat 1-a-1 un mensaje
-            // del grupo, `context` podría traer el id del grupo y este mensaje
-            // PRIVADO se colaría por la rama nativa, que termina en un return: el
-            // equipo nunca lo vería en el chat del cliente. Un mensaje escrito de
-            // verdad DENTRO del grupo siempre trae el id en la raíz.
-            const nativeWaGroupId = String(msg.group_id || change.group_id || '').trim();
-            const nativeGroup = nativeWaGroupId ? getGroupByWaId(nativeWaGroupId) : null;
-
-            // Red de seguridad: el mensaje VIENE de un grupo pero no sabemos de
-            // cuál (grupo archivado cuyo borrado en Meta falló, id con formato
-            // inesperado, o los primeros segundos tras un reinicio antes de que
-            // se carguen los grupos). Sin esto seguiría por el camino 1-a-1:
-            // crearía ficha de contacto y Laura contestaría en privado a alguien
-            // que solo escribió en un grupo. Preferimos descartarlo y dejar rastro.
-            if (nativeWaGroupId && !nativeGroup) {
-                console.warn(`⚠️ [Grupos] Mensaje del grupo ${nativeWaGroupId} (de ${from}) descartado: no corresponde a ningún grupo nativo activo. Si el grupo debería existir, revisa WaGroupId en ChatGroups.`);
-                return res.sendStatus(200);
-            }
-
-            if (nativeGroup) {
-                const groupTimestamp = new Date().toISOString();
-                const groupMsgId = crypto.randomUUID();
-                // Nombre del que escribe: se CONSULTA, no se crea ni se actualiza
-                // el contacto (un miembro del grupo no tiene por qué acabar en el CRM).
-                const nameMap = await getContactNames([from]);
-                const senderName = nameMap.get(cleanNumber(from)) || from;
-
-                // El hilo se guarda con el TELÉFONO como sender: así
-                // `request_group_history` lo reconoce como mensaje de cliente
-                // (fromClient) igual que en el modo fanout.
-                await saveGroupThreadRecord({
-                    groupId: nativeGroup.id,
-                    text,
-                    sender: from,
-                    timestamp: groupTimestamp,
-                    groupMsgId,
-                    lineId: nativeGroup.lineId,
-                    type: inboundType,
-                    mediaId: inboundMediaId
-                });
-                io.emit('group_message', {
-                    groupId: nativeGroup.id,
-                    id: groupMsgId,
-                    text,
-                    sender: senderName,
-                    fromClient: true,
-                    timestamp: groupTimestamp,
-                    type: inboundType,
-                    mediaId: inboundMediaId || ''
-                });
-
-                // Si escribe alguien que aún no constaba como "dentro del grupo",
-                // aprovechamos para apuntarlo: es la señal más fiable de que
-                // aceptó la invitación.
-                const isKnownClient = nativeGroup.clientPhones.some(p => phoneMatch(p, from));
-                const alreadyJoined = nativeGroup.joinedPhones.some(j => phoneMatch(j, from));
-                if (base && isKnownClient && !alreadyJoined) {
-                    // Se muta la caché en memoria ANTES de persistir. Si no, dos
-                    // participantes que escriben casi a la vez leerían los dos la
-                    // misma lista vieja y el segundo pisaría al primero.
-                    // Tampoco se recarga toda la tabla (`loadChatGroups`): este es
-                    // un camino caliente —cada mensaje entrante— y esa recarga
-                    // consume la cuota de Airtable que comparte el chat normal.
-                    // La verdad de Meta se resincroniza en GET /participants y en
-                    // el webhook de ciclo de vida.
-                    nativeGroup.joinedPhones = [...nativeGroup.joinedPhones, cleanNumber(from)];
-                    base(TABLE_CHAT_GROUPS)
-                        .update([{ id: nativeGroup.id, fields: { JoinedPhones: JSON.stringify(nativeGroup.joinedPhones) } }], { typecast: true })
-                        .then(() => io.emit('groups_updated'))
-                        .catch((e: any) => console.warn('[Grupos] No se pudo marcar al participante como dentro:', e?.message));
-                }
-
-                // Laura NO responde todavía en grupos nativos — ver nota al final
-                // del archivo (LIMITACIÓN CONOCIDA): su historial se construye a
-                // partir del chat 1-a-1, y en un grupo nativo no existe tal chat,
-                // así que no vería sus propias respuestas y se repetiría.
-                console.log(`👥 [Grupos] Mensaje de ${senderName} en el grupo nativo "${nativeGroup.name}".`);
-                return res.sendStatus(200);
-            }
-
             const metaProfileName = change.contacts?.[0]?.profile?.name || undefined;
             const contactRecord = await handleContactUpdate(from, text, metaProfileName, originPhoneId);
-
-            // ¿Este cliente pertenece a un grupo activo? Si es así, su mensaje es
-            // también un mensaje del hilo del grupo: se marca con group_id +
-            // group_msg_id para que el equipo lo vea en el grupo, sin dejar de
-            // guardarse con normalidad en su chat 1-a-1.
-            const inboundGroup = getActiveGroupForPhone(from);
-            const inboundGroupMsgId = inboundGroup ? crypto.randomUUID() : '';
-            const inboundTimestamp = new Date().toISOString();
 
             // CORRECCIÓN CRÍTICA: Añadir recipient como originPhoneId y pasar el tipo y mediaId correcto
             await saveAndEmitMessage({
                 text,
                 sender: from,
-                timestamp: inboundTimestamp,
+                timestamp: new Date().toISOString(),
                 type: inboundType,
                 mediaId: inboundMediaId,
                 origin_phone_id: originPhoneId,
-                recipient: originPhoneId,
-                ...(inboundGroup ? { group_id: inboundGroup.id, group_msg_id: inboundGroupMsgId } : {})
+                recipient: originPhoneId
             });
             console.log(`✅ [WEBHOOK] Mensaje emitido al socket y guardado en Airtable`);
-
-            if (inboundGroup) {
-                const senderName = (contactRecord?.get('name') as string) || from;
-                // 1. El equipo lo ve al instante en el hilo del grupo.
-                io.emit('group_message', {
-                    groupId: inboundGroup.id,
-                    id: inboundGroupMsgId,
-                    text,
-                    sender: senderName,
-                    fromClient: true,
-                    timestamp: inboundTimestamp,
-                    type: inboundType,
-                    mediaId: inboundMediaId || ''
-                });
-                // 2. Si el grupo permite que los clientes se vean entre sí, se
-                //    reenvía al resto (nunca al que lo escribió). Sin await: la
-                //    respuesta 200 al webhook de Meta no debe esperar N envíos.
-                if (inboundGroup.clientsSeeEachOther && inboundGroup.clientPhones.length > 1) {
-                    // relayOnly: solo se ENVÍA por WhatsApp al resto de clientes; NO
-                    // se guarda copia 1-a-1 en sus chats. El mensaje del cliente ya
-                    // quedó registrado en el hilo del grupo (registro canónico). Guardar
-                    // la copia en el chat de otro cliente contaminaría su historial de
-                    // IA (Laura vería mensajes de otro cliente) y su detector de
-                    // "trabajador atendiendo" (bloquearía a Laura por error).
-                    if (inboundType === 'text') {
-                        fanOutGroupMessage({
-                            group: inboundGroup,
-                            senderLabel: senderName,
-                            text,
-                            timestamp: inboundTimestamp,
-                            excludePhone: from,
-                            relayOnly: true
-                        }).catch(e => console.error('[Grupos] Error reenviando mensaje entrante:', e?.message));
-                    } else if (inboundMediaId) {
-                        // La media que envía un cliente también se reparte al resto
-                        // (su media_id de entrada es válido para reenviar en la misma línea).
-                        fanOutGroupMedia({
-                            group: inboundGroup,
-                            senderLabel: senderName,
-                            mediaId: inboundMediaId,
-                            msgType: inboundType,
-                            textLog: text || '📎 Archivo',
-                            timestamp: inboundTimestamp,
-                            excludePhone: from,
-                            relayOnly: true
-                        }).catch(e => console.error('[Grupos] Error reenviando media entrante:', e?.message));
-                    }
-                }
-                console.log(`👥 [Grupos] Mensaje de ${from} espejado en el grupo "${inboundGroup.name}".`);
-            }
 
             const upperText = (msg.type === 'text' && text) ? text.trim().toUpperCase() : '';
 
@@ -11916,14 +10446,6 @@ app.post('/webhook', async (req, res) => {
                 // vuelva a escribir dentro del horario, Laura contestará con todo el
                 // contexto acumulado (los mensajes están en el historial reciente).
                 console.log(`🔇 [Bot] Ahora (${getMadridHHMM()} Madrid) está fuera del horario de respuesta (${botActiveHours?.start}-${botActiveHours?.end}). Mensaje de ${from} guardado pero Laura no responde.`);
-            } else if (inboundGroup) {
-                // 👥 GRUPO: Laura NO interviene en ningún grupo, sea del tipo que
-                // sea (decisión del usuario, 2026-08-01). Una respuesta automática
-                // dentro de un grupo la leen varias personas a la vez y no hay
-                // forma de saber a cuál de ellas contesta.
-                // El mensaje queda guardado en el hilo y el equipo recibe su aviso;
-                // simplemente no se encola para la IA.
-                console.log(`🔇 [Bot][Grupo] Mensaje de ${from} en "${inboundGroup.name}": Laura no interviene en grupos.`);
             } else if (assignedTo) {
                 const idleMin = await getMinutesSinceLastWorkerReply(from, originPhoneId);
                 if (idleMin !== null && idleMin < HUMAN_IDLE_MINUTES) {
@@ -11953,17 +10475,12 @@ app.post('/webhook', async (req, res) => {
             // separado. Antes se ignoraba todo → fallos de entrega invisibles.
             const statuses = body.entry[0].changes[0].value.statuses || [];
             for (const st of statuses) {
-                // El destinatario puede ser un grupo nativo: en ese caso Meta manda
-                // el id del grupo, no un teléfono. Sin esto, la alerta al equipo
-                // diría "no llegó al destinatario 1203632...@g.us", que no dice nada.
-                const stGroup = getGroupByWaId(String(st.recipient_id || ''));
-                const targetLabel = stGroup ? `el grupo "${stGroup.name}"` : `el destinatario ${st.recipient_id}`;
                 if (st.status === 'failed') {
                     const err = (st.errors && st.errors[0]) || {};
                     const detail = `Meta ${err.code || ''}: ${err.title || err.message || 'motivo desconocido'} ${err.error_data?.details || ''}`.trim();
-                    console.warn(`❌ [WEBHOOK] Entrega FALLIDA a ${targetLabel} (msg ${st.id}): ${detail}`);
+                    console.warn(`❌ [WEBHOOK] Entrega FALLIDA a ${st.recipient_id} (msg ${st.id}): ${detail}`);
                     notifyTeam('send_failed', 'error',
-                        `WhatsApp no llegó a ${targetLabel}: ${detail}`,
+                        `WhatsApp no llegó al destinatario ${st.recipient_id}: ${detail}`,
                         { phone: st.recipient_id, messageId: st.id, errorCode: err.code || 0 });
                     // Si el wamid corresponde a un mensaje que guardamos al enviarlo
                     // (plantilla manual, recordatorio, factura...), marcamos esa
@@ -11977,32 +10494,7 @@ app.post('/webhook', async (req, res) => {
                         pendingDeliveryByMsgId.delete(st.id);
                     }
                 } else {
-                    console.log(`📊 [WEBHOOK] Status "${st.status}" para ${targetLabel} (msg ${st.id})`);
-                }
-            }
-        } else if (body.object && /^group/i.test(String(body.entry?.[0]?.changes?.[0]?.field || ''))) {
-            // Webhooks de ciclo de vida del grupo (altas y bajas de participantes,
-            // cambios de ajustes...). El formato exacto no está documentado del
-            // todo, así que en vez de intentar interpretarlo campo a campo — que
-            // sería adivinar — localizamos el grupo y le pedimos a Meta la lista
-            // real de participantes, que es la fuente de verdad.
-            const change = body.entry[0].changes[0];
-            const val = change.value || {};
-            const waGid = String(val.group_id || val.id || val.group?.id || '').trim();
-            const lifecycleGroup = waGid ? getGroupByWaId(waGid) : null;
-            console.log(`👥 [WEBHOOK] Evento de grupo "${change.field}" para ${waGid || '(sin id)'}${lifecycleGroup ? ` → "${lifecycleGroup.name}"` : ' (grupo desconocido)'}`);
-            if (lifecycleGroup && base) {
-                try {
-                    const participants = await fetchNativeGroupParticipants(lifecycleGroup.lineId, lifecycleGroup.waGroupId);
-                    const joined = lifecycleGroup.clientPhones.filter(p => participants.some(x => phoneMatch(x, p)));
-                    if (JSON.stringify(joined) !== JSON.stringify(lifecycleGroup.joinedPhones)) {
-                        await base(TABLE_CHAT_GROUPS).update([{ id: lifecycleGroup.id, fields: { JoinedPhones: JSON.stringify(joined) } }], { typecast: true });
-                        await loadChatGroups();
-                        io.emit('groups_updated');
-                        console.log(`👥 [Grupos] Participantes de "${lifecycleGroup.name}" actualizados: ${joined.length}/${lifecycleGroup.clientPhones.length} dentro.`);
-                    }
-                } catch (e: any) {
-                    console.warn('[Grupos] No se pudo sincronizar participantes tras el evento de grupo:', describeGroupsApiError(e));
+                    console.log(`📊 [WEBHOOK] Status "${st.status}" para ${st.recipient_id} (msg ${st.id})`);
                 }
             }
         } else if (body.object && body.entry?.[0]?.changes?.[0]?.field === 'message_template_status_update') {
@@ -12257,14 +10749,11 @@ io.on('connection', (socket) => {
     socket.on('request_conversation', async (p) => {
         if (base) {
             const c = cleanNumber(p);
-            // Buscamos solo por el número limpio, asumiendo que el guardado también
-            // es limpio. Se excluyen los registros que son SOLO del hilo de un grupo
-            // (ver NOT_GROUP_THREAD_ONLY): lo hablado en un grupo nativo no debe
-            // aparecer mezclado dentro del chat privado del cliente.
-            const r = await selectMessagesExcludingGroupThread({
-                filter: `OR({sender}='${c}',{recipient}='${c}')`,
+            // Buscamos solo por el número limpio, asumiendo que el guardado también es limpio
+            const r = await base('Messages').select({
+                filterByFormula: `OR({sender}='${c}',{recipient}='${c}')`,
                 sort: [{ field: "timestamp", direction: "asc" }]
-            });
+            }).all();
             socket.emit('conversation_history', r.map(x => ({ text: x.get('text'), sender: x.get('sender'), timestamp: x.get('timestamp'), type: x.get('type'), mediaId: x.get('media_id') })));
         }
     });
@@ -12556,95 +11045,6 @@ io.on('connection', (socket) => {
         }
     });
     socket.on('typing', (d) => { socket.broadcast.emit('remote_typing', d); });
-
-    // --- SOCKETS GRUPOS DE CONVERSACIÓN ---
-    // El hilo del grupo se reconstruye leyendo SOLO los registros canónicos
-    // ({group_msg_id} != ''), nunca las copias que se enviaron a cada cliente.
-    socket.on('request_group_history', async (groupId) => {
-        if (!base) return;
-        const group = CHAT_GROUPS.get(String(groupId || ''));
-        if (!group) return;
-        try {
-            // Orden DESC + reverse: queremos los 200 mensajes MÁS RECIENTES. Con
-            // `asc` + maxRecords, Airtable devuelve los 200 más ANTIGUOS y el hilo
-            // se quedaba congelado al superar ese número (los mensajes nuevos solo
-            // se veían en vivo y desaparecían al recargar).
-            const records = await base('Messages').select({
-                filterByFormula: `AND({group_id}='${escAt(group.id)}', {group_msg_id}!='')`,
-                sort: [{ field: 'timestamp', direction: 'desc' }],
-                maxRecords: 200
-            }).all();
-
-            // Los mensajes entrantes se guardan con el teléfono como `sender`;
-            // el equipo quiere ver el nombre del cliente.
-            const names = await getContactNames(group.clientPhones);
-            const history = [...records].reverse().map(r => {
-                const sender = String(r.get('sender') || '');
-                const clean = cleanNumber(sender);
-                // Un `sender` totalmente numérico es un mensaje de cliente. En los
-                // grupos nativos el enlace de invitación es reenviable, así que
-                // puede escribir alguien que no esté en `clientPhones`: se le trata
-                // igualmente como cliente (antes salía como si fuera del equipo).
-                const memberPhone = clean ? group.clientPhones.find(p => phoneMatch(p, clean)) : undefined;
-                const fromClient = !!memberPhone || (!!clean && clean === sender.replace(/\D/g, '') && /^\d{6,}$/.test(clean));
-                return {
-                    id: String(r.get('group_msg_id') || r.id),
-                    text: r.get('text') || '',
-                    sender: fromClient ? (names.get(memberPhone || clean) || clean) : sender,
-                    fromClient,
-                    timestamp: r.get('timestamp') || null,
-                    type: r.get('type') || 'text',
-                    mediaId: r.get('media_id') || ''
-                };
-            });
-            socket.emit('group_history', { groupId: group.id, history });
-        } catch (e: any) {
-            if (/group_id|group_msg_id|unknown field|UNKNOWN_FIELD_NAME|INVALID_FILTER_BY_FORMULA/i.test(e?.message || '')) {
-                console.warn('⚠️ [Grupos] No se puede leer el historial: faltan los campos "group_id" y "group_msg_id" (texto) en la tabla Messages.');
-                socket.emit('group_history', { groupId: group.id, history: [], setupError: 'Faltan los campos "group_id" y "group_msg_id" en la tabla Messages de Airtable.' });
-            } else {
-                console.error('[Grupos] Error leyendo historial:', e?.message);
-                socket.emit('group_history', { groupId: group.id, history: [] });
-            }
-        }
-    });
-
-    // Un trabajador escribe en el grupo → se guarda el hilo y se reparte a los
-    // clientes por sus chats 1-a-1.
-    socket.on('group_message', async (payload) => {
-        const group = CHAT_GROUPS.get(String(payload?.groupId || ''));
-        if (!group || !group.active) {
-            socket.emit('action_error', 'El grupo no existe o está archivado.');
-            return;
-        }
-        const text = String(payload?.text || '').trim();
-        if (!text) return;
-        if (Array.from(text).length > 4096) {
-            socket.emit('action_error', 'El mensaje supera el límite de 4096 caracteres de WhatsApp.');
-            return;
-        }
-        const sender = String(payload?.sender || '').trim() || 'Equipo';
-        const timestamp = new Date().toISOString();
-        const groupMsgId = crypto.randomUUID();
-
-        // 1. Eco inmediato al equipo (el fan-out puede tardar varios segundos).
-        io.emit('group_message', { groupId: group.id, id: groupMsgId, text, sender, fromClient: false, timestamp });
-
-        // 2. Registro canónico del hilo — el equipo lo ve SIN el prefijo.
-        await saveGroupThreadRecord({ groupId: group.id, text, sender, timestamp, groupMsgId, lineId: group.lineId });
-
-        // 3. Reparto a los clientes (con el prefijo del grupo).
-        const results = await fanOutGroupMessage({ group, senderLabel: sender, text, timestamp });
-        const names = await getContactNames(group.clientPhones);
-        io.emit('group_send_report', {
-            groupId: group.id,
-            groupMsgId,
-            // `r.name` ya viene puesto en el modo nativo (es el nombre del grupo,
-            // porque ahí `phone` es el id de Meta y no un teléfono). Respetarlo
-            // evita que la UI muestre "No entregado a 120363012345678".
-            results: results.map(r => ({ ...r, name: r.name || names.get(cleanNumber(r.phone)) || r.phone }))
-        });
-    });
 
     // --- SOCKETS TEAM CHAT ---
     socket.on('request_team_history', async (channelName) => {
