@@ -1012,8 +1012,10 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                 <span className="hidden lg:inline">{aiMuted ? 'IA off' : 'IA on'}</span>
                             </button>
                             <div className="relative">
-                                <button id="chat-tags-btn" onClick={(e) => { e.stopPropagation(); setShowTagMenu(!showTagMenu); }} className="flex items-center gap-2 bg-orange-50 px-2 py-1.5 rounded-md border border-orange-200 text-xs font-bold text-orange-700 hover:bg-orange-100 transition-colors" title="Gestionar Etiquetas"><Tag className="w-3.5 h-3.5" /> {contactTags.length > 0 ? `${contactTags.length} Tags` : 'Tags'}</button>
-                                {showTagMenu && (<div className="absolute top-full left-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 z-50 p-2 animate-in fade-in zoom-in-95" onClick={(e) => e.stopPropagation()}><p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2 px-2">Seleccionar Etiquetas</p>{config?.tags?.map(tag => { const isActive = contactTags.includes(tag); return (<button key={tag} onClick={() => toggleTag(tag)} className={`w-full text-left px-2 py-1.5 text-xs rounded-lg mb-1 flex items-center justify-between transition-colors ${isActive ? 'bg-orange-50 text-orange-700 font-bold' : 'text-slate-600 hover:bg-slate-50'}`}>{tag} {isActive && <CheckCircle className="w-3 h-3" />}</button>) })}{(!config?.tags || config.tags.length === 0) && <p className="text-xs text-slate-400 italic px-2">No hay etiquetas.</p>}</div>)}
+                                {/* Botón "Tags" retirado (Diego, 17/09/2026): el equipo detectó que
+                                    no lo usaban, ensuciaba la cabecera. Las etiquetas siguen
+                                    gestionables desde el panel lateral de detalles del contacto
+                                    (Etiquetas), así que no perdemos funcionalidad, solo el atajo. */}
                             </div>
                         </div>
                     )}
