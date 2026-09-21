@@ -793,6 +793,20 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
             return rest.slice(nlIdx).replace(/^(?:\r?\n)+/, '');
         })();
 
+        // Caption de fotos y vídeos. WhatsApp permite mandar una imagen CON texto;
+        // el backend guarda ese caption en `text` (webhook, msg.image.caption) y,
+        // cuando no hay caption, mete un placeholder tipo "📷 (Imagen)". Hasta ahora
+        // la burbuja pintaba SOLO el <img> y el texto se perdía en pantalla (sí
+        // estaba en Airtable y salía en el PDF). Mostramos el caption debajo del
+        // media, como WhatsApp, y ocultamos los placeholders — la propia miniatura
+        // ya dice que es una foto.
+        const MEDIA_PLACEHOLDERS = ['📷 (Imagen)', '📷 [Imagen]', '🎥 (Video)', '🎥 [Video]', '🎬 (Vídeo)', '(Media)'];
+        const mediaCaption: string = (() => {
+            if (m.type !== 'image' && m.type !== 'video') return '';
+            const raw = String(m.text || '').trim();
+            return MEDIA_PLACEHOLDERS.includes(raw) ? '' : raw;
+        })();
+
         let messageContent: React.ReactNode = displayText;
 
         if (chatSearchQuery && displayText) {
@@ -825,8 +839,8 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                         {isTemplate && <div className={`flex items-center gap-1.5 mb-1.5 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-green-400' : 'text-green-700'}`}><LayoutTemplate className="w-3 h-3" /> Plantilla WhatsApp</div>}
                         {isBot && <div className={`flex items-center gap-1.5 mb-1.5 text-[10px] font-bold uppercase tracking-wider ${isDark ? 'text-purple-400' : 'text-purple-600'}`}><Bot className="w-3 h-3" /> Respuesta Automática</div>}
 
-                        {m.type === 'image' && m.mediaId ? <div className="mb-1 group relative overflow-hidden rounded-lg"><img src={`${API_URL}/media/${m.mediaId}`} alt="Imagen" className="max-w-full md:max-w-[280px] h-auto object-contain cursor-pointer transition-transform hover:scale-105" onClick={(e) => { e.stopPropagation(); setSelectedImage(`${API_URL}/media/${m.mediaId}`); }} /></div>
-                            : m.type === 'video' && m.mediaId ? <div className="mb-1 group relative overflow-hidden rounded-lg"><video src={`${API_URL}/media/${m.mediaId}`} controls className="max-w-full md:max-w-[280px] h-auto rounded-lg" /></div>
+                        {m.type === 'image' && m.mediaId ? <><div className="mb-1 group relative overflow-hidden rounded-lg"><img src={`${API_URL}/media/${m.mediaId}`} alt="Imagen" className="max-w-full md:max-w-[280px] h-auto object-contain cursor-pointer transition-transform hover:scale-105" onClick={(e) => { e.stopPropagation(); setSelectedImage(`${API_URL}/media/${m.mediaId}`); }} /></div>{mediaCaption && <p className="whitespace-pre-wrap break-words leading-relaxed md:max-w-[280px]">{mediaCaption}</p>}</>
+                            : m.type === 'video' && m.mediaId ? <><div className="mb-1 group relative overflow-hidden rounded-lg"><video src={`${API_URL}/media/${m.mediaId}`} controls className="max-w-full md:max-w-[280px] h-auto rounded-lg" /></div>{mediaCaption && <p className="whitespace-pre-wrap break-words leading-relaxed md:max-w-[280px]">{mediaCaption}</p>}</>
                             : m.type === 'audio' && m.mediaId ? <CustomAudioPlayer src={`${API_URL}/media/${m.mediaId}`} isMe={isMe} />
                                 : m.type === 'document' && m.mediaId ? <div className={`flex items-center gap-3 p-3 rounded-xl border min-w-[200px] transition-colors ${isDark ? 'bg-slate-900/50 border-white/10 hover:bg-slate-800/50' : 'bg-slate-50 border-slate-200'}`}><div className={`p-2.5 rounded-full ${isDark ? 'bg-red-500/20 text-red-400' : 'bg-red-100 text-red-500'}`}><FileText className="w-5 h-5" /></div><div className="flex-1 min-w-0"><p className={`font-semibold truncate text-xs ${isDark ? 'text-slate-200' : 'text-slate-700'}`}>{m.text}</p><p className={`text-[10px] ${isDark ? 'text-slate-400' : 'text-slate-400'}`}>Documento</p></div><a href={`${API_URL}/media/${m.mediaId}`} target="_blank" rel="noopener noreferrer" className={`p-2 rounded-full transition ${isDark ? 'text-slate-400 hover:text-white hover:bg-white/10' : 'text-slate-400 hover:text-blue-500 hover:bg-slate-100'}`}><Download className="w-4 h-4" /></a></div>
                                     : <p className="whitespace-pre-wrap break-words leading-relaxed">{messageContent}</p>}
