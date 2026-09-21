@@ -6931,6 +6931,12 @@ function partOrdersSetupError(e: any): string | null {
 }
 
 function serializePartOrder(r: any) {
+    // Plazo prometido por el proveedor (días). Opcional: null = sin plazo, y el
+    // panel cae al respaldo de DELAY_DAYS. Airtable devuelve number o undefined.
+    const etaRaw = r.get('etaDays');
+    const etaDays = (etaRaw === undefined || etaRaw === null || etaRaw === '')
+        ? null
+        : Number(etaRaw);
     return {
         id: r.id,
         matricula: (r.get('matricula') as string) || '',
@@ -6940,8 +6946,17 @@ function serializePartOrder(r: any) {
         orderedAt: (r.get('orderedAt') as string) || '',
         arrived: !!r.get('arrived'),
         arrivedAt: (r.get('arrivedAt') as string) || '',
-        orderedBy: (r.get('orderedBy') as string) || ''
+        orderedBy: (r.get('orderedBy') as string) || '',
+        etaDays: (etaDays !== null && Number.isFinite(etaDays)) ? etaDays : null
     };
+}
+
+// Normaliza el plazo prometido que llega del frontend a un entero >= 0 o null.
+// '' / null / undefined / negativo / no numérico → null (sin plazo).
+function normalizeEtaDays(raw: any): number | null {
+    if (raw === undefined || raw === null || String(raw).trim() === '') return null;
+    const n = Math.floor(Number(raw));
+    return Number.isFinite(n) && n >= 0 ? n : null;
 }
 
 // Crea el registro del pedido. Fire-and-forget: nunca lanza ni bloquea el envío
@@ -7063,19 +7078,20 @@ app.post('/api/part-orders', async (req, res) => {
     if (!String(pieza || '').trim() && !String(referencia || '').trim()) {
         return res.status(400).json({ error: 'Indica al menos la pieza o la referencia.' });
     }
+    const etaDays = normalizeEtaDays(req.body?.etaDays);
     try {
-        const created = await base(TABLE_PART_ORDERS).create([{
-            fields: {
-                matricula: String(matricula || '').trim(),
-                pieza: String(pieza || '').trim(),
-                referencia: String(referencia || '').trim(),
-                proveedor: String(proveedor || '').trim(),
-                orderedAt: new Date().toISOString(),
-                arrived: false,
-                arrivedAt: '',
-                orderedBy: String(orderedBy || '').trim()
-            }
-        }], { typecast: true });
+        const fields: any = {
+            matricula: String(matricula || '').trim(),
+            pieza: String(pieza || '').trim(),
+            referencia: String(referencia || '').trim(),
+            proveedor: String(proveedor || '').trim(),
+            orderedAt: new Date().toISOString(),
+            arrived: false,
+            arrivedAt: '',
+            orderedBy: String(orderedBy || '').trim()
+        };
+        if (etaDays !== null) fields.etaDays = etaDays;
+        const created = await base(TABLE_PART_ORDERS).create([{ fields }], { typecast: true });
         res.json({ success: true, order: serializePartOrder(created[0]) });
     } catch (e: any) {
         const setup = partOrdersSetupError(e);
@@ -7091,6 +7107,11 @@ app.put('/api/part-orders/:id', async (req, res) => {
         const fields: any = {};
         for (const k of ['matricula', 'pieza', 'referencia', 'proveedor'] as const) {
             if (body[k] !== undefined) fields[k] = String(body[k] || '').trim();
+        }
+        // Plazo prometido: si viene en el body se actualiza (null = borrar el
+        // plazo). Es el camino de la edición en línea desde la tabla.
+        if (body.etaDays !== undefined) {
+            fields.etaDays = normalizeEtaDays(body.etaDays);
         }
         // Marcar / desmarcar llegada estampa o limpia arrivedAt automáticamente.
         if (body.arrived !== undefined) {
@@ -7126,20 +7147,42 @@ app.get('/api/part-orders/export', async (_req, res) => {
     try {
         const records = await base(TABLE_PART_ORDERS).select().all();
         const fmt = (iso: string) => iso ? new Date(iso).toLocaleString('es-ES', { timeZone: 'Europe/Madrid', day: '2-digit', month: '2-digit', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '';
+        // Fecha de vencimiento (solo día) = fecha de pedido + plazo prometido.
+        const fmtDay = (d: Date) => d.toLocaleDateString('es-ES', { timeZone: 'Europe/Madrid', day: '2-digit', month: '2-digit', year: 'numeric' });
+        const daysSinceExport = (iso: string) => iso ? Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)) : 0;
         const rows = records.map(serializePartOrder)
             .sort((a, b) => (b.orderedAt || '').localeCompare(a.orderedAt || ''))
-            .map(o => ({
-                'Matrícula': o.matricula,
-                'Pieza': o.pieza,
-                'Referencia': o.referencia,
-                'Proveedor': o.proveedor,
-                'Fecha pedido': fmt(o.orderedAt),
-                'Estado': o.arrived ? 'Llegada' : 'Pendiente',
-                'Fecha llegada': fmt(o.arrivedAt),
-                'Pedido por': o.orderedBy
-            }));
+            .map(o => {
+                const hasEta = o.etaDays !== null && Number.isFinite(o.etaDays as number);
+                const vence = (hasEta && o.orderedAt)
+                    ? fmtDay(new Date(new Date(o.orderedAt).getTime() + (o.etaDays as number) * 86400000))
+                    : '';
+                // Estado: los pendientes vencidos (según el plazo prometido, o el
+                // respaldo de 3 días si no hay plazo) salen como VENCIDO para la
+                // reclamación al proveedor.
+                let estado: string;
+                if (o.arrived) estado = 'Llegada';
+                else {
+                    const overdue = hasEta
+                        ? daysSinceExport(o.orderedAt) > (o.etaDays as number)
+                        : daysSinceExport(o.orderedAt) >= 3;
+                    estado = overdue ? 'VENCIDO' : 'Pendiente';
+                }
+                return {
+                    'Matrícula': o.matricula,
+                    'Pieza': o.pieza,
+                    'Referencia': o.referencia,
+                    'Proveedor': o.proveedor,
+                    'Fecha pedido': fmt(o.orderedAt),
+                    'Plazo prometido (días)': hasEta ? o.etaDays : '',
+                    'Vence el': vence,
+                    'Estado': estado,
+                    'Fecha llegada': fmt(o.arrivedAt),
+                    'Pedido por': o.orderedBy
+                };
+            });
         const ws = XLSX.utils.json_to_sheet(rows);
-        ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 16 }, { wch: 16 }, { wch: 17 }, { wch: 10 }, { wch: 17 }, { wch: 14 }];
+        ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 16 }, { wch: 16 }, { wch: 17 }, { wch: 14 }, { wch: 14 }, { wch: 11 }, { wch: 17 }, { wch: 14 }];
         const wb = XLSX.utils.book_new();
         XLSX.utils.book_append_sheet(wb, ws, 'Pedidos');
         const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
