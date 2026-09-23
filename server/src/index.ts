@@ -10431,8 +10431,8 @@ app.post('/webhook', async (req, res) => {
             if (msg.type === 'button' && ['Voy hoy', 'Voy mañana', 'Llamadme'].includes(text)) {
                 const clientName = (contactRecord?.get('name') as string) || 'El cliente';
                 const ackMap: Record<string, string> = {
-                    'Voy hoy':    '¡Perfecto! Te esperamos hoy. Recuerda nuestro horario: lunes a viernes de 8:00 a 19:00h. 🙌',
-                    'Voy mañana': '¡Perfecto! Te esperamos mañana. Recuerda nuestro horario: lunes a viernes de 8:00 a 19:00h. 👍',
+                    'Voy hoy':    '¡Perfecto! Te esperamos hoy. Recuerda nuestro horario: lunes a viernes de 7:30 a 17:00h. 🙌',
+                    'Voy mañana': '¡Perfecto! Te esperamos mañana. Recuerda nuestro horario: lunes a viernes de 7:30 a 17:00h. 👍',
                     'Llamadme':   'Recibido, en breve nos ponemos en contacto contigo. ¡Hasta pronto!',
                 };
                 const labelMap: Record<string, string> = {
