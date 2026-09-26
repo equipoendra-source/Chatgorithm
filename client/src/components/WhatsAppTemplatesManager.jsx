@@ -92,6 +92,10 @@ const WhatsAppTemplatesManager = () => {
         const partes = [];
         if (data.imported > 0) partes.push(`📥 ${data.imported} plantilla(s) nueva(s) importada(s) de Meta`);
         if (data.updated > 0) partes.push(`🔄 ${data.updated} estado(s) actualizado(s)`);
+        // Texto editado en Meta después de importar la plantilla: la app lo
+        // refresca para que muestre (y guarde en el historial) lo que Meta envía.
+        if (data.refreshed > 0) partes.push(`✏️ Texto actualizado desde Meta: ${(data.refreshedNames || []).join(', ')}`);
+        if (data.refreshErrors?.length > 0) partes.push(`⚠️ ${data.refreshErrors.length} texto(s) no se pudieron actualizar (revisa los logs)`);
         if (data.skipped?.length > 0) {
           // Recortamos: una WABA con muchas plantillas de cabecera multimedia
           // generaría un alert ilegible.
@@ -102,7 +106,7 @@ const WhatsAppTemplatesManager = () => {
         if (data.importErrors?.length > 0) partes.push(`⚠️ ${data.importErrors.length} no se pudieron importar (revisa los logs)`);
         alert(partes.length > 0
           ? `✅ ${partes.join('\n')}`
-          : 'Todo al día: no hay plantillas nuevas y los estados ya coincidían con Meta.');
+          : 'Todo al día: no hay plantillas nuevas y los estados y textos ya coincidían con Meta.');
       } else {
         alert(`❌ ${data.error || 'No se pudo sincronizar.'}`);
       }

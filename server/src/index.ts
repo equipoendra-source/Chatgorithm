@@ -9000,6 +9000,62 @@ function buildVariableMapping(body: string, components: any[]): Record<string, s
     return map;
 }
 
+// Para comparar textos de plantilla. Airtable guarda los multilínea sin saltos
+// finales y Meta puede devolver \r\n: sin normalizar, TODAS las plantillas
+// saldrían como "cambiadas" en cada sincronización.
+const normTemplateText = (s: any): string => String(s ?? '').replace(/\r\n/g, '\n').trim();
+
+// Una plantilla YA registrada puede haberse editado en Meta después de
+// importarla (Meta permite editar el texto de una aprobada). La sincronización
+// solo actualizaba el Status, así que la app seguía mostrando —y guardando en el
+// historial del chat— el texto antiguo mientras el cliente/proveedor recibía el
+// nuevo. Esta función decide, para UN registro, qué campos hay que refrescar con
+// lo que dice Meta. Devuelve:
+//   null            → nada que hacer (idéntica, o Meta no trae cuerpo)
+//   { skip }        → cambió pero ya no es enviable desde la app; se deja como está
+//   { fields }      → campos de Airtable a escribir (solo Body/Footer/VariableMapping)
+// Meta es la fuente de la verdad: es lo que realmente se envía.
+function planTemplateRefresh(
+    current: { body: string; footer: string; variableMapping: string },
+    tpl: MetaTemplateSummary
+): { fields: Record<string, string> } | { skip: string } | null {
+    const metaBody = extractComponentText(tpl.components, 'BODY');
+    if (!metaBody) return null;
+    const metaFooter = extractComponentText(tpl.components, 'FOOTER');
+
+    const bodyChanged = normTemplateText(metaBody) !== normTemplateText(current.body);
+    const footerChanged = normTemplateText(metaFooter) !== normTemplateText(current.footer);
+    if (!bodyChanged && !footerChanged) return null;
+
+    // Si tras la edición lleva variables en el encabezado o botones, la app no
+    // sabría enviarla: mejor dejar el texto anterior y avisar.
+    const unsupported = templateHasVarsOutsideBody(tpl.components);
+    if (unsupported) {
+        return { skip: `${tpl.name}: cambió en Meta pero ahora lleva variables en ${unsupported} (no soportado); se deja el texto anterior` };
+    }
+
+    const fields: Record<string, string> = {};
+    if (bodyChanged) fields.Body = metaBody;
+    if (footerChanged) fields.Footer = metaFooter;
+
+    // VariableMapping SOLO se rehace si cambian los huecos del cuerpo (otro
+    // nombre, más o menos variables, otro orden). Si son los mismos se respeta
+    // el que ya hay: puede llevar etiquetas puestas a mano y su orden es el
+    // contrato con el selector de plantillas del chat.
+    if (bodyChanged) {
+        const newKeys = extractPlaceholderKeys(metaBody);
+        let curKeys: string[] | null = null;
+        try {
+            const m = JSON.parse(current.variableMapping || '{}');
+            if (m && typeof m === 'object' && !Array.isArray(m)) curKeys = Object.keys(m);
+        } catch { /* mapping corrupto: se rehace */ }
+        if (!curKeys || curKeys.join('|') !== newKeys.join('|')) {
+            fields.VariableMapping = JSON.stringify(buildVariableMapping(metaBody, tpl.components));
+        }
+    }
+    return { fields };
+}
+
 app.post('/api/templates/sync-status', async (_req, res) => {
     if (!base) return res.status(500).json({ error: 'DB no disponible' });
     try {
@@ -9023,6 +9079,9 @@ app.post('/api/templates/sync-status', async (_req, res) => {
         // crear una plantilla desde la consola de Meta en vez de desde la app.
         const metaStatus = new Map<string, string>();
         const metaTemplates = new Map<string, MetaTemplateSummary>();
+        // Por nombre a secas (primera que aparezca): una plantilla registrada con
+        // 'es' puede estar en Meta como 'es_ES'. Solo se usa como respaldo.
+        const metaByName = new Map<string, MetaTemplateSummary>();
         for (const t of wabaTargets) {
             try {
                 // PAGINADO: una WABA admite 250 plantillas (6.000 si el negocio
@@ -9057,6 +9116,7 @@ app.post('/api/templates/sync-status', async (_req, res) => {
                                 components: Array.isArray(tpl.components) ? tpl.components : [],
                                 mirrored: { [t.businessId]: { metaId: String(tpl.id || ''), status: String(tpl.status || 'PENDING') } }
                             });
+                            if (!metaByName.has(nm)) metaByName.set(nm, metaTemplates.get(key)!);
                         }
                     }
                     // La URL de paging ya lleva todos los parámetros embebidos.
@@ -9072,6 +9132,9 @@ app.post('/api/templates/sync-status', async (_req, res) => {
         const records = await base(TABLE_TEMPLATES).select().all();
         const updates: { id: string, fields: any }[] = [];
         const knownKeys = new Set<string>();
+        // Plantillas ya registradas cuyo texto cambió en Meta (ver planTemplateRefresh).
+        const refreshPlans: { id: string, name: string, fields: Record<string, string> }[] = [];
+        const refreshSkipped: string[] = [];
         for (const rec of records) {
             const nm = String(rec.get('Name') || '').toLowerCase();
             const lang = String(rec.get('Language') || '');
@@ -9080,6 +9143,17 @@ app.post('/api/templates/sync-status', async (_req, res) => {
             knownKeys.add(nm); // una plantilla ya registrada con otro idioma no se re-importa
             const real = metaStatus.get(`${nm}|${lang}`) || metaStatus.get(nm);
             if (real && real !== current) updates.push({ id: rec.id, fields: { Status: real } });
+
+            const metaTpl = metaTemplates.get(`${nm}|${lang}`) || metaByName.get(nm);
+            if (metaTpl) {
+                const plan = planTemplateRefresh({
+                    body: String(rec.get('Body') || ''),
+                    footer: String(rec.get('Footer') || ''),
+                    variableMapping: String(rec.get('VariableMapping') || '')
+                }, metaTpl);
+                if (plan && 'skip' in plan) refreshSkipped.push(plan.skip);
+                else if (plan) refreshPlans.push({ id: rec.id, name: String(rec.get('Name') || metaTpl.name), fields: plan.fields });
+            }
         }
         let updated = 0;
         for (let i = 0; i < updates.length; i += 10) {
@@ -9087,12 +9161,45 @@ app.post('/api/templates/sync-status', async (_req, res) => {
             updated += Math.min(10, updates.length - i);
         }
 
+        // 3b. REFRESCAR el texto de las plantillas editadas en Meta. Va aparte y
+        // registro a registro: un fallo aquí no debe tumbar la actualización de
+        // estados ni la importación, y así un registro malo no arrastra a los demás.
+        // Si una columna opcional no existe en la base, se reintenta sin ella
+        // (mismo criterio que la importación).
+        let refreshed = 0;
+        const refreshedNames: string[] = [];
+        const refreshErrors: string[] = [];
+        const REFRESH_OPTIONAL = ['Footer', 'VariableMapping'];
+        const refreshOne = async (p: { id: string, name: string, fields: Record<string, string> }, intento = 0): Promise<void> => {
+            try {
+                await base!(TABLE_TEMPLATES).update([{ id: p.id, fields: p.fields }], { typecast: true });
+                refreshed++;
+                refreshedNames.push(p.name);
+            } catch (e: any) {
+                const msg = String(e?.message || '');
+                const culprit = REFRESH_OPTIONAL.find(f => f in p.fields && new RegExp(f, 'i').test(msg));
+                if (culprit && intento < REFRESH_OPTIONAL.length) {
+                    const { [culprit]: _drop, ...rest } = p.fields;
+                    console.warn(`[TemplateSync] La columna "${culprit}" no existe en Airtable — reintentando sin ella.`);
+                    if (Object.keys(rest).length === 0) return; // no quedaba nada que escribir
+                    return refreshOne({ ...p, fields: rest }, intento + 1);
+                }
+                refreshErrors.push(`${p.name}: ${msg || 'error desconocido'}`);
+            }
+        };
+        for (const p of refreshPlans) await refreshOne(p);
+        if (refreshed > 0) {
+            templateBodyCache.clear(); // el cuerpo cambió en Airtable
+            console.log(`✏️ [TemplateSync] Texto refrescado desde Meta en ${refreshed} plantilla(s): ${refreshedNames.join(', ')}`);
+        }
+        if (refreshErrors.length > 0) console.warn('[TemplateSync] Fallos refrescando texto:', refreshErrors.join(' | '));
+
         // 4. IMPORTAR las que están en Meta pero no en Airtable.
         // Sin esto, una plantilla creada en la consola de Meta era invisible para
         // la app: /api/templates lee solo de Airtable, así que no aparecía ni en
         // el gestor ni en el selector de plantillas del chat.
         const toImport: { fields: any }[] = [];
-        const skipped: string[] = [];
+        const skipped: string[] = [...refreshSkipped];
         for (const [key, tpl] of metaTemplates) {
             const nmLower = tpl.name.toLowerCase();
             if (knownKeys.has(key) || knownKeys.has(nmLower)) continue;
@@ -9184,7 +9291,7 @@ app.post('/api/templates/sync-status', async (_req, res) => {
         if (skipped.length > 0) console.warn('[TemplateSync] Omitidas:', skipped.join(' | '));
         if (importErrors.length > 0) console.warn('[TemplateSync] Fallos importando:', importErrors.join(' | '));
 
-        res.json({ success: true, updated, imported, checked: records.length, importErrors, skipped });
+        res.json({ success: true, updated, imported, refreshed, refreshedNames, refreshErrors, checked: records.length, importErrors, skipped });
     } catch (e: any) {
         console.error('[TemplateSync] Error:', e.message);
         res.status(500).json({ error: e.message });
