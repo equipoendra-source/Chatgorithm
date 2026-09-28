@@ -12,8 +12,8 @@ import { useTheme } from '../context/ThemeContext';
 // UN SOLO listado que junta pedidos (tabla PartOrders) y abonos (PartAbonos).
 // Las pestañas filtran:
 //   Todos      → pedidos + abonos, cualquier estado
-//   Pendientes → solo pedidos pendientes (no llegados)
-//   Llegadas   → solo pedidos llegados
+//   Pendientes → solo pedidos pendientes (no recibidos)
+//   Recibidos  → solo pedidos recibidos
 //   Abonos     → solo abonos (cualquier estado)
 // Cada fila sabe si es 'order' o 'abono' (kind), y las acciones (marcar
 // hecho, plazo, borrar) van al endpoint correcto. Solo lo ven Recambios/Taller.
@@ -78,11 +78,11 @@ const hasEta = (o: PartOrder): boolean => o.etaDays !== null && Number.isFinite(
 
 // Textos que dependen del tipo (pedido vs abono).
 const kindNoun = (k: Kind) => (k === 'abono' ? 'abono' : 'pedido');
-const doneVerb = (k: Kind) => (k === 'abono' ? 'Marcar abonado' : 'Marcar llegada');
-const doneNoun = (k: Kind) => (k === 'abono' ? 'Abonado' : 'Llegada');
+const doneVerb = (k: Kind) => (k === 'abono' ? 'Marcar abonado' : 'Marcar recibido');
+const doneNoun = (k: Kind) => (k === 'abono' ? 'Abonado' : 'Recibido');
 const undoText = (k: Kind) => (k === 'abono'
     ? '¿Deshacer el abono de esta pieza? Volverá a contar como pendiente.'
-    : '¿Deshacer la llegada de esta pieza? Volverá a contar como pendiente.');
+    : '¿Deshacer la recepción de esta pieza? Volverá a contar como pendiente.');
 
 // Estado calculado de un registro. La cuenta atrás usa el plazo (etaDays); si
 // hay noEta nunca hay alarma; si no hay plazo NI noEta, cae al respaldo.
@@ -349,7 +349,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     };
 
     // Cabecera de la columna de acción (marcar hecho).
-    const doneColHeader = filter === 'abonos' ? 'Abono' : filter === 'all' ? 'Llegada / Abono' : 'Llegada';
+    const doneColHeader = filter === 'abonos' ? 'Abono' : filter === 'all' ? 'Recibido / Abono' : 'Recibido';
 
     const inputCls = `w-full px-4 py-2.5 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`;
 
@@ -417,7 +417,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         className={`w-full pl-9 pr-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 placeholder-slate-500' : 'bg-white border-slate-200 text-slate-800'}`}
                     />
                 </div>
-                {([['all', 'Todos'], ['pending', 'Pendientes'], ['arrived', 'Llegadas'], ['abonos', 'Abonos']] as const).map(([key, label]) => (
+                {([['all', 'Todos'], ['pending', 'Pendientes'], ['arrived', 'Recibidos'], ['abonos', 'Abonos']] as const).map(([key, label]) => (
                     <button key={key} onClick={() => setFilter(key)}
                         className={`px-3 py-1.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 ${filter === key
                             ? 'bg-emerald-600 text-white shadow-sm'
@@ -447,7 +447,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                         <th className="px-4 py-2.5 text-left">Pieza</th>
                                         <th className="px-4 py-2.5 text-left">Referencia</th>
                                         <th className="px-4 py-2.5 text-left">Proveedor</th>
-                                        <th className="px-4 py-2.5 text-left">Pedido</th>
+                                        <th className="px-4 py-2.5 text-left">Fecha</th>
                                         <th className="px-4 py-2.5 text-left">Plazo</th>
                                         <th className="px-4 py-2.5 text-left">Estado</th>
                                         <th className="px-4 py-2.5 text-left">{doneColHeader}</th>
