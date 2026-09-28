@@ -26,6 +26,116 @@
 
 ---
 
+## Sesión 2026-09-28 — Pedidos de varias piezas desde un PDF + pedidos agrupados
+
+### El problema
+Con la plantilla `pedido_proveedor` solo se pide **una pieza por envío**. En Recambios
+generan en el catálogo (Microcat EPC) un PDF con varias piezas (Vehículo / Descripción /
+Ctd. / Número) y se lo mandan al proveedor por el chat, pero ese PDF solo se reenviaba a
+WhatsApp: **nadie lo leía** (Laura solo analiza lo que ENTRA de clientes, y ni ahí abre
+documentos). Tampoco existía la cantidad: se apuntaba a mano en la referencia ("1735761 / 4ud").
+
+### Qué cambió
+- **`server/src/partOrdersPdf.ts` (nuevo, sin dependencias del servidor):** prompt y
+  `responseSchema` de Gemini, `validatePdfOrderLines` (cada referencia que devuelve la IA
+  tiene que aparecer en el texto real del PDF sacado con pdf-parse; si no, la línea se
+  descarta y la nota lo dice; la matrícula que no aparece solo se vacía),
+  `normalizeCantidad` ("1,0" → 1), `newPedidoGrupoId` y el texto de la nota.
+- **`POST /api/upload`:** si el archivo es PDF y lo manda un perfil de Recambios/Taller
+  (`isPartsProfile`, misma regla que el botón del Sidebar), tras enviarlo se lanza en
+  segundo plano `registerPartOrdersFromPdf`: Gemini 2.5 Flash lee el PDF (inlineData +
+  JSON, temperature 0); si es un pedido, crea una fila por línea en `PartOrders` con un
+  `pedidoGrupo` común y deja una **nota interna** en el chat (remitente "Pedidos de
+  Piezas") con lo registrado. Si no es un pedido (factura, presupuesto…), no hace nada.
+- **Ventana de 24 h cerrada** (`isServiceWindowOpen`: último mensaje ENTRANTE del contacto
+  por esa línea en `Messages`): la IA lee el PDF ANTES de enviar y, si es un pedido, lo
+  manda dentro de la plantilla **`pedido_proveedor_pdf`** (cabecera de documento con el
+  media id ya subido, sin variables). Si la plantilla no existe/no está aprobada, sale
+  como documento suelto y actúa la red de seguridad.
+- **Red de seguridad (sin pedidos fantasma):** el wamid del PDF se registra nada más
+  enviarlo (`trackPdfOrderMessage`, ANTES de cualquier await: el fallo puede llegar en 1-2 s).
+  Si el webhook de estados dice `failed`, `handlePartOrderPdfFailed` borra las piezas de
+  ese PDF y avisa con una nota. Si el fallo llega antes de que la IA termine, el registro
+  lo ve y no crea nada. Además, todas las subidas registran `registerPendingDelivery`, así
+  que una foto/PDF no entregado ya se marca como "No entregado" en el chat.
+- **Duplicados:** el mismo PDF (sha256) al mismo contacto **por la misma línea** en 24 h
+  no se registra dos veces (la clave lleva `cleanTo:originPhoneId:hash` — la línea entra
+  a propósito: si dos líneas mandan el mismo PDF al mismo proveedor, son dos envíos
+  independientes con resultado propio). La reserva se hace ANTES del primer await (dos
+  envíos seguidos, incluso genuinamente simultáneos) y solo la suelta el envío que la
+  creó: un reenvío fallido no puede anular la protección de otro pedido.
+- **Todo o nada:** `createPartRecords` deshace lo guardado si falla un lote intermedio
+  (pedidos de más de 10 líneas); si no puede, la nota dice qué `pedidoGrupo` borrar a mano.
+  Borrar las piezas de un PDF no entregado reintenta una vez y avisa si algo se queda.
+- Si la plantilla no existe, se recuerda 10 min (no se consulta a Meta en cada envío ni se
+  hace esperar a la IA antes de mandar).
+- **`cantidad`** en crear/editar/listar/Excel; la plantilla `pedido_proveedor` también la
+  guarda si algún día se le añade `{{cantidad}}`. Endpoints nuevos `POST .../bulk-update`
+  y `.../bulk-delete` (acciones de pedido entero, en lotes de 10 por el límite de Airtable).
+- **Panel (`PartOrdersDashboard.tsx`, el listado unificado pedidos+abonos con pestañas
+  Pendientes / Recibidos / Abonos):** columna **Ctd.** (editable con un clic, en pedidos y
+  abonos) y campo Cantidad al añadir. Las piezas de pedido con el mismo `pedidoGrupo` salen
+  como **un pedido desplegable** (replegado al entrar): cabecera con matrícula, nº de
+  piezas, proveedor, fecha, el estado de la pieza más urgente y "x/N" recibidas, más
+  **plazo para todas**, **marcar todo** (recibido) y **borrar pedido entero**. Un pedido
+  está en Pendientes hasta que llegan todas sus piezas y entonces pasa a Recibidos; los
+  abonos nunca se agrupan. Buscar una referencia despliega su pedido (al borrar la
+  búsqueda todo vuelve como estaba). Las tarjetas de arriba siguen contando PIEZAS.
+- **Recarga del panel:** ya no recarga (con spinner) al abrir/cerrar un modal; solo al
+  entrar y cada 15 s. `loadSeq` + `dataVersion`: una lectura que salió antes de una
+  edición y llega después no pisa el dato recién guardado.
+- **Cantidad no válida** (0, > 9999, texto) → 400 en el servidor en vez de borrar la que había.
+
+### Airtable
+Creados el 2026-09-28: `PartOrders.cantidad` (número, 2 decimales),
+`PartOrders.pedidoGrupo` (texto) y `PartAbonos.cantidad`. Si faltaran en otra base,
+`createPartRecords` reintenta sin ellas (no se pierde el pedido).
+
+### Meta (lo tiene que hacer el cliente)
+Crear en WhatsApp Manager, en la WABA de la línea de Recambios, la plantilla
+`pedido_proveedor_pdf`: categoría Utilidad, idioma español, encabezado **Documento**,
+cuerpo sin variables (p. ej. "Hola, os enviamos un pedido de recambios. Tenéis el detalle
+en el PDF adjunto. Gracias."). Mientras no esté aprobada, con la ventana cerrada el PDF no
+llega y sus piezas se quitan solas del panel.
+
+### Verificado
+`tsc` limpio en server y client, `vite build` OK. 33 pruebas de la lógica pura con el PDF
+real de ejemplo (4 líneas bien, referencias inventadas rechazadas, cantidades, id, nota).
+Panel probado en navegador con datos simulados (agrupar, desplegar, marcar todo, plazo
+para todas, borrar pedido, editar Ctd., filtros, búsqueda, claro/oscuro, móvil).
+
+Además de la revisión de código, se montó un **arnés de simulación** (`server/pdfFlowHarness.ts`,
+borrado antes de subir) que copia literalmente las funciones de orquestación de `index.ts`
+(reserva anti-duplicados, `createPartRecords`, `removePdfOrderPieces`, caché de plantilla
+por línea…) con Airtable/Meta/Gemini simulados, y ejecuta 16 escenarios (66 comprobaciones):
+camino feliz, PDF que no es pedido, fallo de Gemini, 0 líneas válidas, fallo total/parcial
+de Airtable con rollback, la IA leyendo mientras Meta avisa de un fallo (antes y durante el
+guardado), reenvío tras un fallo, no se puede borrar (avisa igualmente), plantilla que
+falta en una línea sin bloquear otra, cantidades inválidas, columnas opcionales que
+faltan, concurrencia real (`Promise.all`) y el mismo PDF desde dos líneas distintas.
+
+3 rondas de revisión adversarial (servidor y panel) sobre el código + la propia simulación:
+11 fallos reales corregidos, entre ellos:
+- Borrado de plazos al guardar vacío en un pedido "Varios".
+- Carreras del anti-duplicados (reenvío bloqueado por la reserva de un envío ya fallido).
+- Altas a medias sin deshacer y notas que decían "no ha llegado" antes de comprobarlo.
+- Recargas del panel que pisaban una edición recién guardada.
+- **La clave anti-duplicados no distinguía la LÍNEA de WhatsApp**: el mismo PDF al mismo
+  proveedor desde dos líneas distintas (p. ej. Recambios y Taller comparten un proveedor)
+  hacía que la 2ª se diera por "ya registrada" sin comprobar nada; si esa 2ª línea fallaba
+  de verdad al entregarse, no se avisaba de nada (se quedaba con un "ya se registró"
+  engañoso). Corregido añadiendo `originPhoneId` a la clave.
+
+**Sin probar aún:** la llamada real a Gemini (la clave solo está en Render) y un envío real.
+
+### Límite conocido
+No hay forma de saber si un contacto es proveedor o cliente: se confía en que la IA
+distinga un pedido de un presupuesto. Si Taller manda un presupuesto que la IA tome por
+pedido, se registraría (se borra con la papelera del pedido) y, con la ventana cerrada,
+saldría con la plantilla de pedido.
+
+---
+
 ## Sesión 2026-09-08 — Importar plantillas de Meta + pedidos de piezas por plantilla
 
 ### El problema real

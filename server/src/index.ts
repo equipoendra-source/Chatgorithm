@@ -48,6 +48,10 @@ import { v2 as cloudinary } from 'cloudinary';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
 import * as XLSX from 'xlsx'; // Parseo de Excel (.xls/.xlsx) en la importación de contactos
+import {
+    PDF_ORDER_PROMPT, PDF_ORDER_SCHEMA, normalizeCantidad, validatePdfOrderLines,
+    newPedidoGrupoId, buildPdfOrderNote, type PdfOrderValidation
+} from './partOrdersPdf'; // Pedidos de piezas leídos de un PDF enviado al proveedor
 
 const AccessToken = twilio.jwt.AccessToken;
 const VoiceGrant = AccessToken.VoiceGrant;
@@ -6910,10 +6914,14 @@ app.get('/api/accounts', (req, res) => res.json(
 //  PEDIDOS DE PIEZAS A PROVEEDORES (Recambios)
 // ==========================================
 // Tabla PartOrders en Airtable (campos: matricula, pieza, referencia,
-// proveedor, orderedAt, arrivedAt, orderedBy — texto — y arrived — checkbox).
+// proveedor, orderedAt, arrivedAt, orderedBy, pedidoGrupo — texto —, arrived
+// y noEta — checkbox — y etaDays y cantidad — número).
 // El panel del frontend (PartOrdersDashboard) solo lo ven los perfiles de
-// Recambios. Fase 1: alta manual + marcar llegada + export Excel. Fase 2
-// (pendiente): captura automática desde el mensaje en clave al proveedor.
+// Recambios/Taller. Los pedidos entran por tres vías:
+//   - alta manual en el panel,
+//   - la plantilla pedido_proveedor (una pieza por envío),
+//   - un PDF de pedido enviado al proveedor desde el chat (varias piezas a la
+//     vez; Gemini lo lee y todas comparten pedidoGrupo → una fila desplegable).
 
 // "Pedidos" y "Abonos" comparten estructura y lógica: son dos "libros" con la
 // misma forma pero distinta tabla, textos y fichero de Excel. Todo lo genérico
@@ -6927,12 +6935,12 @@ interface PartBook {
 }
 const PART_ORDERS_BOOK: PartBook = {
     table: TABLE_PART_ORDERS, excelFile: 'pedidos-piezas.xlsx', sheetName: 'Pedidos',
-    setupCols: 'matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy (texto), arrived y noEta (checkbox), etaDays (número)',
+    setupCols: 'matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy, pedidoGrupo (texto), arrived y noEta (checkbox), etaDays y cantidad (número)',
     tableMissing: false
 };
 const PART_ABONOS_BOOK: PartBook = {
     table: TABLE_PART_ABONOS, excelFile: 'abonos-proveedores.xlsx', sheetName: 'Abonos',
-    setupCols: 'matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy (texto), arrived y noEta (checkbox), etaDays (número)',
+    setupCols: 'matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy (texto), arrived y noEta (checkbox), etaDays y cantidad (número)',
     tableMissing: false
 };
 
@@ -6971,8 +6979,121 @@ function serializePartOrder(r: any) {
         arrivedAt: (r.get('arrivedAt') as string) || '',
         orderedBy: (r.get('orderedBy') as string) || '',
         etaDays: (etaDays !== null && Number.isFinite(etaDays)) ? etaDays : null,
-        noEta: !!r.get('noEta')
+        noEta: !!r.get('noEta'),
+        // Unidades pedidas (Ctd.). null en los pedidos antiguos y en los de
+        // plantilla sin {{cantidad}}: el panel muestra "—".
+        cantidad: normalizeCantidad(r.get('cantidad')),
+        // Piezas del mismo PDF comparten este valor → el panel las agrupa.
+        pedidoGrupo: (r.get('pedidoGrupo') as string) || ''
     };
+}
+
+// Columnas que se añadieron después de crear las tablas. Si en una base falta
+// alguna, Airtable rechaza el registro ENTERO (y typecast no crea campos), así
+// que al crear se reintenta sin ellas: mejor un pedido sin cantidad que perderlo.
+const PART_OPTIONAL_FIELDS = ['cantidad', 'pedidoGrupo'];
+
+async function createPartRecords(book: PartBook, rows: Record<string, any>[]): Promise<any[]> {
+    if (!base) throw new Error('DB no disponible');
+    const db = base;
+    const created: any[] = [];
+    try {
+        // Airtable acepta como mucho 10 registros por llamada.
+        for (let i = 0; i < rows.length; i += 10) {
+            const chunk = rows.slice(i, i + 10);
+            try {
+                created.push(...await db(book.table).create(chunk.map(fields => ({ fields })), { typecast: true }));
+            } catch (e: any) {
+                if (!/unknown field|UNKNOWN_FIELD_NAME/i.test(e?.message || '')) throw e;
+                console.warn(`[PartOrder] A "${book.table}" le falta alguna columna opcional (${PART_OPTIONAL_FIELDS.join(', ')}); se guarda sin ella. ${e?.message}`);
+                const stripped = chunk.map(f => {
+                    const copy = { ...f };
+                    PART_OPTIONAL_FIELDS.forEach(k => delete copy[k]);
+                    return copy;
+                });
+                created.push(...await db(book.table).create(stripped.map(fields => ({ fields })), { typecast: true }));
+            }
+        }
+    } catch (e: any) {
+        // Todo o nada: un pedido de 15 piezas guardado a medias (10 sí, 5 no)
+        // confunde más que un error claro. Se deshace lo que llegó a guardarse;
+        // lo que no se pueda borrar va en e.leftoverIds para avisar.
+        const leftoverIds: string[] = [];
+        for (let i = 0; i < created.length; i += 10) {
+            const ids = created.slice(i, i + 10).map(r => r.id);
+            try { await db(book.table).destroy(ids); }
+            catch (rollbackErr: any) {
+                leftoverIds.push(...ids);
+                console.error(`[PartOrder] No se pudo deshacer un alta a medias en ${book.table}:`, rollbackErr?.message);
+            }
+        }
+        if (e && typeof e === 'object') e.leftoverIds = leftoverIds;
+        throw e;
+    }
+    return created;
+}
+
+// Cantidad que llega del panel: vacía = sin cantidad; algo que no sea un número
+// mayor que 0 (hasta 9999) se RECHAZA en vez de borrar en silencio la que había.
+const CANTIDAD_INVALIDA = 'La cantidad tiene que ser un número mayor que 0 (hasta 9999).';
+function cantidadFromBody(raw: any): { ok: true; value: number | null } | { ok: false } {
+    if (raw === undefined || raw === null || String(raw).trim() === '') return { ok: true, value: null };
+    const value = normalizeCantidad(raw);
+    return value === null ? { ok: false } : { ok: true, value };
+}
+
+// Campos editables de un PUT (una fila) o de un bulk-update (varias). Devuelve
+// null si el cuerpo no trae nada que actualizar. Lanza un error con status 400
+// si trae una cantidad no válida.
+function partUpdateFieldsFromBody(body: any): Record<string, any> | null {
+    const fields: Record<string, any> = {};
+    for (const k of ['matricula', 'pieza', 'referencia', 'proveedor'] as const) {
+        if (body[k] !== undefined) fields[k] = String(body[k] || '').trim();
+    }
+    if (body.cantidad !== undefined) {
+        const c = cantidadFromBody(body.cantidad);
+        if (!c.ok) throw Object.assign(new Error(CANTIDAD_INVALIDA), { status: 400 });
+        fields.cantidad = c.value;
+    }
+    // Plazo prometido y flag "sin fecha" son excluyentes: al poner uno se
+    // borra el otro, para no dejar un registro con etaDays=5 y noEta=true
+    // a la vez (estado ambiguo).
+    if (body.etaDays !== undefined) {
+        const eta = normalizeEtaDays(body.etaDays);
+        fields.etaDays = eta;
+        if (eta !== null) fields.noEta = false;   // fijar plazo cancela "sin fecha"
+    }
+    if (body.noEta !== undefined) {
+        const flag = !!body.noEta;
+        fields.noEta = flag;
+        if (flag) fields.etaDays = null;          // marcar "sin fecha" borra el plazo
+    }
+    // Marcar / desmarcar llegada estampa o limpia arrivedAt automáticamente.
+    if (body.arrived !== undefined) {
+        fields.arrived = !!body.arrived;
+        fields.arrivedAt = body.arrived ? new Date().toISOString() : '';
+    }
+    return Object.keys(fields).length > 0 ? fields : null;
+}
+
+// Ids de registro que manda el frontend para las acciones de un pedido entero.
+// Solo con forma de id de Airtable, sin repetir y con un tope razonable.
+const PART_RECORD_ID_RE = /^rec[A-Za-z0-9]{14}$/;
+function sanitizePartRecordIds(raw: any): string[] {
+    if (!Array.isArray(raw)) return [];
+    return Array.from(new Set(raw.filter((id: any) => typeof id === 'string' && PART_RECORD_ID_RE.test(id)))).slice(0, 200) as string[];
+}
+
+// Nombre del proveedor = nombre del contacto al que se escribe (o su número).
+async function partOrderProveedorName(cleanPhone: string): Promise<string> {
+    let proveedor = '';
+    try {
+        const cs = await base!('Contacts').select({ filterByFormula: `{phone}='${cleanPhone}'`, maxRecords: 1 }).firstPage();
+        if (cs.length > 0) proveedor = (cs[0].get('name') as string) || '';
+    } catch (e: any) {
+        console.warn('[PartOrder] No se pudo leer el nombre del proveedor:', e?.message);
+    }
+    return proveedor || cleanPhone;
 }
 
 // Normaliza el plazo prometido que llega del frontend a un entero >= 0 o null.
@@ -6987,33 +7108,27 @@ function normalizeEtaDays(raw: any): number | null {
 // del mensaje al proveedor. `origen` solo sirve para el log.
 async function createPartOrderRecord(
     book: PartBook,
-    parsed: { referencia: string; pieza: string; matricula: string },
+    parsed: { referencia: string; pieza: string; matricula: string; cantidad: number | null },
     recipientPhone: string,
     agentName: string,
     origen: string
 ): Promise<void> {
     if (!base) return;
     try {
-        // Nombre del proveedor = nombre del contacto al que se escribe.
-        let proveedor = '';
-        const clean = cleanNumber(recipientPhone);
-        const cs = await base('Contacts').select({ filterByFormula: `{phone}='${clean}'`, maxRecords: 1 }).firstPage();
-        if (cs.length > 0) proveedor = (cs[0].get('name') as string) || '';
-        if (!proveedor) proveedor = clean;
-
-        await base(book.table).create([{
-            fields: {
-                matricula: parsed.matricula.toUpperCase(),
-                pieza: parsed.pieza,
-                referencia: parsed.referencia,
-                proveedor,
-                orderedAt: new Date().toISOString(),
-                arrived: false,
-                arrivedAt: '',
-                orderedBy: agentName || ''
-            }
-        }], { typecast: true });
-        console.log(`🔩 [PartOrder] Registro AUTO creado en ${book.table} desde ${origen}: ref="${parsed.referencia}" pieza="${parsed.pieza}" prov="${proveedor}" por "${agentName}"`);
+        const proveedor = await partOrderProveedorName(cleanNumber(recipientPhone));
+        const fields: Record<string, any> = {
+            matricula: parsed.matricula.toUpperCase(),
+            pieza: parsed.pieza,
+            referencia: parsed.referencia,
+            proveedor,
+            orderedAt: new Date().toISOString(),
+            arrived: false,
+            arrivedAt: '',
+            orderedBy: agentName || ''
+        };
+        if (parsed.cantidad !== null) fields.cantidad = parsed.cantidad;
+        await createPartRecords(book, [fields]);
+        console.log(`🔩 [PartOrder] Registro AUTO creado en ${book.table} desde ${origen}: ref="${parsed.referencia}" pieza="${parsed.pieza}" ctd=${parsed.cantidad ?? '-'} prov="${proveedor}" por "${agentName}"`);
     } catch (e: any) {
         // Si falta la tabla/campos, avisamos pero NUNCA rompemos el envío.
         console.warn('[PartOrder] No se pudo crear el registro automático:', partBookSetupError(book, e) || e?.message);
@@ -7032,8 +7147,9 @@ function partOrderFromTemplateVars(
     placeholderKeys: string[],
     variableMapping: Record<string, string>,
     variables: string[]
-): { referencia: string; pieza: string; matricula: string } | null {
+): { referencia: string; pieza: string; matricula: string; cantidad: number | null } | null {
     let referencia = '', pieza = '', matricula = '';
+    let cantidad: number | null = null;
     let sawPieza = false;
 
     // Troceamos el identificador en PALABRAS y comparamos completas. No sirve
@@ -7044,6 +7160,9 @@ function partOrderFromTemplateVars(
     // "nombre_pieza" — que es justo la forma que tendrán las plantillas reales.
     const MATRICULA = ['matricula', 'matriculas'];
     const REFERENCIA = ['ref', 'refs', 'referencia', 'referencias'];
+    // Opcional: la plantilla actual no la tiene, pero si algún día se le añade
+    // {{cantidad}} (o {{uds}}, {{ctd}}…) se guarda sola en la columna Ctd.
+    const CANTIDAD = ['cantidad', 'cantidades', 'ctd', 'cant', 'uds', 'unidades'];
     const PIEZA = ['pieza', 'piezas', 'recambio', 'recambios'];
 
     placeholderKeys.forEach((key, i) => {
@@ -7058,9 +7177,11 @@ function partOrderFromTemplateVars(
         const casa = (lista: string[]) => tokens.some(t => lista.includes(t));
 
         // Orden deliberado: "referencia_pieza" casa con las dos y debe ganar
-        // referencia. Se evalúa matrícula, luego referencia, luego pieza.
+        // referencia; "cantidad_piezas" es una cantidad, no la pieza. Se
+        // evalúa matrícula, referencia, cantidad y, por último, pieza.
         if (casa(MATRICULA)) { if (!matricula) matricula = value; }
         else if (casa(REFERENCIA)) { if (!referencia) referencia = value; }
+        else if (casa(CANTIDAD)) { if (cantidad === null) cantidad = normalizeCantidad(value); }
         else if (casa(PIEZA)) {
             sawPieza = true;
             if (!pieza) pieza = value;
@@ -7074,7 +7195,7 @@ function partOrderFromTemplateVars(
     // registrar pedidos vacíos.
     if (!sawPieza) return null;
     if (!pieza && !referencia && !matricula) return null;
-    return { referencia, pieza, matricula };
+    return { referencia, pieza, matricula, cantidad };
 }
 
 // Registra los 5 endpoints CRUD+export para un "libro" (Pedidos o Abonos).
@@ -7109,6 +7230,9 @@ function registerPartRoutes(basePath: string, book: PartBook) {
         // "sin fecha" es una elección explícita del usuario. Solo se acepta si NO
         // viene también un etaDays: los dos estados son excluyentes.
         const noEta = req.body?.noEta === true && etaDays === null;
+        const cantidadIn = cantidadFromBody(req.body?.cantidad);
+        if (!cantidadIn.ok) return res.status(400).json({ error: CANTIDAD_INVALIDA });
+        const cantidad = cantidadIn.value;
         try {
             const fields: any = {
                 matricula: String(matricula || '').trim(),
@@ -7122,7 +7246,8 @@ function registerPartRoutes(basePath: string, book: PartBook) {
                 noEta
             };
             if (etaDays !== null) fields.etaDays = etaDays;
-            const created = await base(book.table).create([{ fields }], { typecast: true });
+            if (cantidad !== null) fields.cantidad = cantidad;
+            const created = await createPartRecords(book, [fields]);
             res.json({ success: true, order: serializePartOrder(created[0]) });
         } catch (e: any) {
             const setup = partBookSetupError(book, e);
@@ -7133,37 +7258,56 @@ function registerPartRoutes(basePath: string, book: PartBook) {
 
     app.put(`${basePath}/:id`, async (req, res) => {
         if (!base) return res.status(500).json({ error: 'DB no disponible' });
-        const body = req.body || {};
         try {
-            const fields: any = {};
-            for (const k of ['matricula', 'pieza', 'referencia', 'proveedor'] as const) {
-                if (body[k] !== undefined) fields[k] = String(body[k] || '').trim();
-            }
-            // Plazo prometido y flag "sin fecha" son excluyentes: al poner uno se
-            // borra el otro, para no dejar un registro con etaDays=5 y noEta=true
-            // a la vez (estado ambiguo).
-            if (body.etaDays !== undefined) {
-                const eta = normalizeEtaDays(body.etaDays);
-                fields.etaDays = eta;
-                if (eta !== null) fields.noEta = false;   // fijar plazo cancela "sin fecha"
-            }
-            if (body.noEta !== undefined) {
-                const flag = !!body.noEta;
-                fields.noEta = flag;
-                if (flag) fields.etaDays = null;          // marcar "sin fecha" borra el plazo
-            }
-            // Marcar / desmarcar llegada estampa o limpia arrivedAt automáticamente.
-            if (body.arrived !== undefined) {
-                fields.arrived = !!body.arrived;
-                fields.arrivedAt = body.arrived ? new Date().toISOString() : '';
-            }
-            if (Object.keys(fields).length === 0) return res.status(400).json({ error: 'Nada que actualizar' });
+            const fields = partUpdateFieldsFromBody(req.body || {});
+            if (!fields) return res.status(400).json({ error: 'Nada que actualizar' });
             const updated = await base(book.table).update([{ id: req.params.id, fields }], { typecast: true });
             res.json({ success: true, order: serializePartOrder(updated[0]) });
         } catch (e: any) {
+            if (e?.status === 400) return res.status(400).json({ error: e.message });
             const setup = partBookSetupError(book, e);
             console.error(`[API] Error PUT ${basePath}/:id:`, e?.message);
             res.status(500).json({ error: setup || 'Error actualizando el registro' });
+        }
+    });
+
+    // Acciones sobre un PEDIDO entero (todas las piezas de un mismo PDF): plazo
+    // para todas y marcar todo llegado. Una sola llamada en vez de un PUT por
+    // pieza — Airtable limita a 5 peticiones/s y un pedido puede traer 20 piezas.
+    // Mismos campos y reglas que el PUT de una fila.
+    app.post(`${basePath}/bulk-update`, async (req, res) => {
+        if (!base) return res.status(500).json({ error: 'DB no disponible' });
+        const ids = sanitizePartRecordIds(req.body?.ids);
+        if (ids.length === 0) return res.status(400).json({ error: 'Faltan los registros a actualizar' });
+        try {
+            const fields = partUpdateFieldsFromBody(req.body || {});
+            if (!fields) return res.status(400).json({ error: 'Nada que actualizar' });
+            const updated: any[] = [];
+            for (let i = 0; i < ids.length; i += 10) {
+                updated.push(...await base(book.table).update(ids.slice(i, i + 10).map(id => ({ id, fields })), { typecast: true }));
+            }
+            res.json({ success: true, orders: updated.map(serializePartOrder) });
+        } catch (e: any) {
+            if (e?.status === 400) return res.status(400).json({ error: e.message });
+            const setup = partBookSetupError(book, e);
+            console.error(`[API] Error POST ${basePath}/bulk-update:`, e?.message);
+            res.status(500).json({ error: setup || 'Error actualizando los registros' });
+        }
+    });
+
+    // Borrar un pedido entero (p. ej. se mandó el PDF al proveedor equivocado).
+    app.post(`${basePath}/bulk-delete`, async (req, res) => {
+        if (!base) return res.status(500).json({ error: 'DB no disponible' });
+        const ids = sanitizePartRecordIds(req.body?.ids);
+        if (ids.length === 0) return res.status(400).json({ error: 'Faltan los registros a borrar' });
+        try {
+            for (let i = 0; i < ids.length; i += 10) {
+                await base(book.table).destroy(ids.slice(i, i + 10));
+            }
+            res.json({ success: true, deleted: ids });
+        } catch (e: any) {
+            console.error(`[API] Error POST ${basePath}/bulk-delete:`, e?.message);
+            res.status(500).json({ error: 'Error borrando los registros' });
         }
     });
 
@@ -7210,6 +7354,7 @@ function registerPartRoutes(basePath: string, book: PartBook) {
                     return {
                         'Matrícula': o.matricula,
                         'Pieza': o.pieza,
+                        'Cantidad': o.cantidad ?? '',
                         'Referencia': o.referencia,
                         'Proveedor': o.proveedor,
                         'Fecha pedido': fmt(o.orderedAt),
@@ -7217,11 +7362,14 @@ function registerPartRoutes(basePath: string, book: PartBook) {
                         'Vence el': vence,
                         'Estado': estado,
                         'Fecha llegada': fmt(o.arrivedAt),
-                        'Pedido por': o.orderedBy
+                        'Pedido por': o.orderedBy,
+                        // Mismo valor en todas las piezas de un PDF → se puede
+                        // filtrar/agrupar el pedido en Excel. Vacío = pieza suelta.
+                        'Pedido (PDF)': o.pedidoGrupo
                     };
                 });
             const ws = XLSX.utils.json_to_sheet(rows);
-            ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 16 }, { wch: 16 }, { wch: 17 }, { wch: 14 }, { wch: 14 }, { wch: 11 }, { wch: 17 }, { wch: 14 }];
+            ws['!cols'] = [{ wch: 12 }, { wch: 28 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 17 }, { wch: 14 }, { wch: 14 }, { wch: 11 }, { wch: 17 }, { wch: 14 }, { wch: 22 }];
             const wb = XLSX.utils.book_new();
             XLSX.utils.book_append_sheet(wb, ws, book.sheetName);
             const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
@@ -7238,6 +7386,383 @@ function registerPartRoutes(basePath: string, book: PartBook) {
 
 registerPartRoutes('/api/part-orders', PART_ORDERS_BOOK);
 registerPartRoutes('/api/part-abonos', PART_ABONOS_BOOK);
+
+// ==========================================
+//  PEDIDO DE PIEZAS EN PDF (chat → proveedor)
+// ==========================================
+// Cuando alguien de Recambios/Taller manda un PDF a un chat, Gemini lo lee. Si
+// es una lista de pedido, cada línea se guarda en PartOrders con un pedidoGrupo
+// común (el panel las enseña como UN pedido desplegable) y en el chat queda
+// una nota interna con lo registrado. Va en segundo plano: el envío del PDF no
+// espera a la IA… salvo con la ventana de 24 h cerrada, donde hay que saber
+// ANTES si es un pedido para mandarlo dentro de la plantilla.
+
+// Plantilla aprobada con cabecera de DOCUMENTO y sin variables: la única vía
+// para que el PDF llegue con la ventana de 24 h cerrada. Se crea a mano en
+// WhatsApp Manager; mientras no exista, esos envíos fallan como antes y el
+// aviso de fallo de Meta quita las piezas del panel (sin pedidos fantasma).
+const PART_ORDER_PDF_TEMPLATE = 'pedido_proveedor_pdf';
+// Remitente de las notas internas que deja este flujo en el chat.
+const PART_ORDER_NOTE_SENDER = 'Pedidos de Piezas';
+const PDF_ORDER_TTL_MS = 24 * 60 * 60 * 1000;
+// Gemini admite peticiones de hasta 20 MB y el PDF viaja en base64 (+33 %).
+// Un pedido real pesa ~100 KB; esto solo corta documentos desproporcionados.
+const PDF_ORDER_MAX_BYTES = 14 * 1024 * 1024;
+
+interface PdfOrderRead { esPedido: boolean; validation: PdfOrderValidation; }
+
+// ¿Es de Recambios/Taller quien envía? Misma regla que el botón "Pedidos de
+// Piezas" del Sidebar: rol recambios/taller, o el NOMBRE del perfil lo contiene
+// (el perfil TALLER tiene rol Admin). Cacheado: el rol casi nunca cambia.
+const partsProfileCache = new Map<string, { ok: boolean; at: number }>();
+async function isPartsProfile(senderName: string): Promise<boolean> {
+    const name = String(senderName || '').trim();
+    const lower = name.toLowerCase();
+    if (!name) return false;
+    if (lower.includes('recambios') || lower.includes('taller')) return true;
+    const hit = partsProfileCache.get(lower);
+    if (hit && Date.now() - hit.at < 10 * 60 * 1000) return hit.ok;
+    if (!base) return false;
+    try {
+        const r = await base('Agents').select({ filterByFormula: `{name} = '${escAt(name)}'`, maxRecords: 1 }).firstPage();
+        const role = String(r[0]?.get('role') || '').toLowerCase();
+        const ok = role === 'recambios' || role === 'taller';
+        partsProfileCache.set(lower, { ok, at: Date.now() });
+        return ok;
+    } catch (e: any) {
+        console.warn('[PedidoPDF] No se pudo leer el rol del agente:', e?.message);
+        return false;
+    }
+}
+
+// ¿Ha escrito el contacto por ESTA línea en las últimas 24 h? Es la ventana de
+// atención de Meta: fuera de ella solo entran plantillas. null = no se pudo
+// saber (Airtable caído) → quien llama lo trata como abierta, igual que antes.
+async function isServiceWindowOpen(cleanPhone: string, originPhoneId: string): Promise<boolean | null> {
+    if (!base) return null;
+    try {
+        const recs = await base('Messages').select({
+            filterByFormula: `AND({sender}='${escAt(cleanPhone)}', {origin_phone_id}='${escAt(originPhoneId)}')`,
+            sort: [{ field: 'timestamp', direction: 'desc' }],
+            maxRecords: 1,
+            fields: ['timestamp']
+        }).firstPage();
+        if (recs.length === 0) return false;
+        const last = new Date(String(recs[0].get('timestamp') || '')).getTime();
+        if (!Number.isFinite(last)) return null;
+        // Media hora de margen: justo en el borde de las 24 h fallaría igual.
+        return Date.now() - last < 23.5 * 60 * 60 * 1000;
+    } catch (e: any) {
+        console.warn('[PedidoPDF] No se pudo comprobar la ventana de 24 h:', e?.message);
+        return null;
+    }
+}
+
+// Lee el PDF con Gemini (lo ve entero: texto y maquetación) y valida el
+// resultado contra la capa de texto del propio PDF. Lanza si Gemini falla.
+async function readPartOrderPdf(buffer: Buffer): Promise<PdfOrderRead> {
+    if (!genAI) throw new Error('Gemini no está configurado');
+    if (buffer.length > PDF_ORDER_MAX_BYTES) throw Object.assign(new Error('PDF demasiado grande para la IA'), { code: 'TOO_BIG' });
+    let pdfText = '';
+    try {
+        const pdfParse = require('pdf-parse');
+        pdfText = String((await pdfParse(buffer))?.text || '');
+    } catch (e: any) {
+        // PDF raro: la IA lo lee igual (visión); solo se pierde la verificación.
+        console.warn('[PedidoPDF] pdf-parse no pudo sacar el texto:', e?.message);
+    }
+    const model = genAI.getGenerativeModel({
+        model: MODEL_NAME,
+        // temperature 0: aquí se copian datos, no se redacta nada.
+        generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema: PDF_ORDER_SCHEMA }
+    });
+    metrics.geminiCalls++;
+    try {
+        const result = await withTimeout(model.generateContent([
+            { inlineData: { mimeType: 'application/pdf', data: buffer.toString('base64') } },
+            { text: PDF_ORDER_PROMPT }
+        ]), 60000);
+        const parsed = JSON.parse(result.response.text());
+        return { esPedido: parsed?.esPedido === true, validation: validatePdfOrderLines(parsed, pdfText) };
+    } catch (e) {
+        metrics.geminiErrors++;
+        throw e;
+    }
+}
+
+// Mientras la plantilla no exista en una línea (aún sin crear o sin aprobar en
+// su WABA), no se vuelve a preguntar a Meta en 10 min: cada intento lista las
+// plantillas de todas las WABAs y, antes, hace esperar a que la IA lea el PDF.
+// Por LÍNEA: que falte en una no puede frenar a otra que sí la tiene.
+const pdfTemplateMissingUntil = new Map<string, number>();
+const pdfTemplateKnownMissing = (originPhoneId: string) => Date.now() < (pdfTemplateMissingUntil.get(originPhoneId) || 0);
+
+// Envía el PDF DENTRO de la plantilla pedido_proveedor_pdf reutilizando el
+// media que ya se subió a Meta (id), sin URL pública. Prueba idiomas igual que
+// sendTemplateWithDocument: #132001 = no existe en ese idioma o en esta WABA.
+async function sendPartOrderPdfTemplate(
+    cleanTo: string, mediaId: string, fileName: string, originPhoneId: string, token: string
+): Promise<{ ok: true; wamid?: string } | { ok: false; error: string }> {
+    if (pdfTemplateKnownMissing(originPhoneId)) return { ok: false, error: `La plantilla ${PART_ORDER_PDF_TEMPLATE} no está disponible en esta línea (comprobado hace poco)` };
+    const resolved = await resolveTemplateLanguage(PART_ORDER_PDF_TEMPLATE, originPhoneId);
+    const candidates = [resolved, 'es', 'es_ES'].filter((c, i, arr): c is string => !!c && arr.indexOf(c) === i);
+    let lastErr = '';
+    let allMissing = true;
+    for (const langCode of candidates) {
+        try {
+            const r = await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId}/messages`, {
+                messaging_product: 'whatsapp', to: cleanTo, type: 'template',
+                template: {
+                    name: PART_ORDER_PDF_TEMPLATE,
+                    language: { code: langCode },
+                    components: [{ type: 'header', parameters: [{ type: 'document', document: { id: mediaId, filename: fileName } }] }]
+                }
+            }, { headers: { Authorization: `Bearer ${token}` } });
+            templateLangCache.set(PART_ORDER_PDF_TEMPLATE, langCode);
+            return { ok: true, wamid: r.data?.messages?.[0]?.id };
+        } catch (e: any) {
+            const metaErr = e.response?.data?.error;
+            lastErr = metaErr ? `Meta ${metaErr.code || ''}: ${metaErr.message || ''}`.trim() : (e.message || 'error');
+            if (metaErr?.code === 132001) continue;
+            allMissing = false;
+            break;
+        }
+    }
+    if (allMissing) pdfTemplateMissingUntil.set(originPhoneId, Date.now() + 10 * 60 * 1000);
+    return { ok: false, error: lastErr || `La plantilla ${PART_ORDER_PDF_TEMPLATE} no existe en esta línea` };
+}
+
+// PDF enviado (wamid) → piezas creadas a partir de él. Si Meta avisa después
+// de que el PDF NO llegó (ventana cerrada, número sin WhatsApp…), se quitan del
+// panel: un pedido que el proveedor no ha visto es un pedido fantasma. El aviso
+// puede llegar ANTES de que la IA termine; por eso queda marcado `failed` y el
+// registro lo mira antes y después de guardar.
+interface PdfOrderTrack {
+    cleanTo: string;
+    originPhoneId: string;
+    fileName: string;
+    ids: string[];          // piezas creadas a partir de ESTE envío
+    grupo: string;          // su pedidoGrupo (para la nota si hay que borrar a mano)
+    // Suelta la reserva anti-duplicados, pero solo si la hizo este envío: un
+    // reenvío que no creó nada nunca libera la de otro pedido.
+    releaseDedupe?: () => void;
+    failed: boolean;
+    failDetail: string;
+}
+const pdfOrderByMsgId = new Map<string, PdfOrderTrack>();
+// Mismo PDF al mismo proveedor en 24 h → no se duplican las piezas (reenvíos).
+// `pending` = se está leyendo/guardando ahora mismo (dos envíos seguidos).
+const pdfOrderDedupe = new Map<string, { at: number; count: number; pending: boolean }>();
+
+function trackPdfOrderMessage(wamid: string, info: { cleanTo: string; originPhoneId: string; fileName: string }) {
+    pdfOrderByMsgId.set(wamid, { ...info, ids: [], grupo: '', failed: false, failDetail: '' });
+    const t = setTimeout(() => pdfOrderByMsgId.delete(wamid), PDF_ORDER_TTL_MS);
+    t.unref();
+}
+
+function postPartOrderNote(cleanTo: string, originPhoneId: string, text: string): Promise<void> {
+    return saveAndEmitMessage({
+        text, sender: PART_ORDER_NOTE_SENDER, recipient: cleanTo,
+        timestamp: new Date().toISOString(), type: 'note', origin_phone_id: originPhoneId
+    }).catch((e: any) => console.warn('[PedidoPDF] No se pudo dejar la nota en el chat:', e?.message));
+}
+
+// Quita del panel las piezas de un PDF que no llegó. Reintenta una vez cada
+// lote (un 429 de Airtable no debe dejar un pedido fantasma) y devuelve cuántas
+// no se pudieron borrar, para avisar de que hay que hacerlo a mano.
+async function removePdfOrderPieces(track: PdfOrderTrack): Promise<{ removed: number; left: number }> {
+    const ids = track.ids;
+    track.ids = [];
+    // El reenvío del mismo PDF, cuando llegue, sí debe registrarse.
+    track.releaseDedupe?.();
+    if (!base || ids.length === 0) return { removed: 0, left: 0 };
+    let removed = 0, left = 0;
+    for (let i = 0; i < ids.length; i += 10) {
+        const chunk = ids.slice(i, i + 10);
+        let ok = false;
+        for (let attempt = 1; attempt <= 2 && !ok; attempt++) {
+            try {
+                await base(PART_ORDERS_BOOK.table).destroy(chunk);
+                ok = true;
+            } catch (e: any) {
+                console.warn(`[PedidoPDF] No se pudieron quitar piezas de un pedido no entregado (intento ${attempt}):`, e?.message);
+                if (attempt === 1) await delay(1500);
+            }
+        }
+        if (ok) removed += chunk.length; else left += chunk.length;
+    }
+    return { removed, left };
+}
+
+function pdfNotDeliveredNote(fileName: string, detail: string, res: { removed: number; left: number }, grupo: string): string {
+    const partes: string[] = [];
+    if (res.removed === 0 && res.left === 0) partes.push('No se ha registrado nada en Pedidos de Piezas.');
+    if (res.removed > 0) partes.push(`Se ${res.removed === 1 ? 'ha quitado la pieza que se había registrado' : `han quitado las ${res.removed} piezas que se habían registrado`} en Pedidos de Piezas, para que no quede un pedido fantasma.`);
+    if (res.left > 0) partes.push(`No se ${res.left === 1 ? 'ha podido quitar 1 pieza' : `han podido quitar ${res.left} piezas`} del pedido ${grupo}: bórralo a mano en Pedidos de Piezas (papelera del pedido).`);
+    const pista = /131047/.test(detail)
+        ? ` La ventana de 24 h con este proveedor está cerrada: el PDF solo llega dentro de la plantilla ${PART_ORDER_PDF_TEMPLATE} (aprobada en Meta) o después de que el proveedor os escriba.`
+        : '';
+    return `⚠️ El PDF «${fileName}» no ha llegado al proveedor (${detail}). ${partes.join(' ')}${pista}`;
+}
+
+// Webhook de Meta: un mensaje saliente ha fallado. Si era el PDF de un pedido
+// ya registrado, se quitan sus piezas del panel. Si la IA aún no había
+// terminado, lo verá registerPartOrdersFromPdf y avisará ella.
+async function handlePartOrderPdfFailed(wamid: string, detail: string): Promise<void> {
+    const track = pdfOrderByMsgId.get(wamid);
+    if (!track || track.failed) return;
+    track.failed = true;
+    track.failDetail = detail;
+    // Se suelta ya la reserva anti-duplicados: si el trabajador reenvía el PDF
+    // mientras la IA aún lee el primero, el reenvío (que sí llegará) se registra.
+    track.releaseDedupe?.();
+    if (track.ids.length === 0) return;
+    const res = await removePdfOrderPieces(track);
+    await postPartOrderNote(track.cleanTo, track.originPhoneId, pdfNotDeliveredNote(track.fileName, detail, res, track.grupo));
+}
+
+async function registerPartOrdersFromPdf(ctx: {
+    buffer: Buffer;
+    fileName: string;
+    cleanTo: string;
+    senderName: string;
+    originPhoneId: string;
+    wamid?: string;
+    viaTemplate: boolean;
+    preRead: PdfOrderRead | null;   // ya leído antes de enviar (ventana cerrada)
+}): Promise<void> {
+    if (!base) return;
+    const note = (text: string) => postPartOrderNote(ctx.cleanTo, ctx.originPhoneId, text);
+    const track = ctx.wamid ? pdfOrderByMsgId.get(ctx.wamid) : undefined;
+    // La línea entra en la clave: el mismo proveedor puede recibir la misma
+    // referencia de dos líneas distintas (Recambios y Taller comparten
+    // proveedor pero escriben desde números diferentes), y son dos envíos
+    // independientes — si uno falla, el otro no debe quedar mudo por haberse
+    // dado por "ya registrado" sin comprobar la línea.
+    const dedupeKey = `${ctx.cleanTo}:${ctx.originPhoneId}:${crypto.createHash('sha256').update(ctx.buffer).digest('hex')}`;
+
+    // Limpieza: registros de más de 24 h y reservas colgadas (leer y guardar
+    // nunca tarda 10 min; si una se queda "pending", algo falló a medias).
+    for (const [k, v] of pdfOrderDedupe) {
+        const age = Date.now() - v.at;
+        if (v.pending ? age > 10 * 60 * 1000 : age > PDF_ORDER_TTL_MS) pdfOrderDedupe.delete(k);
+    }
+    // Si Meta ya dijo que este envío no llegó, no se reserva nada (que un
+    // reenvío del mismo PDF sí pueda registrarse) ni se lee el PDF.
+    if (track?.failed) {
+        // Si ya se leyó y no era un pedido, no hay nada que contar aquí (la
+        // burbuja del chat ya sale como no entregada).
+        if (!(ctx.preRead && !ctx.preRead.esPedido)) {
+            await note(pdfNotDeliveredNote(ctx.fileName, track.failDetail, { removed: 0, left: 0 }, ''));
+        }
+        return;
+    }
+    const prev = pdfOrderDedupe.get(dedupeKey);
+    if (prev) {
+        const mins = Math.max(1, Math.round((Date.now() - prev.at) / 60000));
+        await note(prev.pending
+            ? 'ℹ️ Este PDF se ha enviado dos veces seguidas: se registra una sola vez en Pedidos de Piezas.'
+            : `ℹ️ Este PDF ya se registró en Pedidos de Piezas hace ${mins < 60 ? `${mins} min` : `${Math.round(mins / 60)} h`} (${prev.count} ${prev.count === 1 ? 'pieza' : 'piezas'}). No se duplica.`);
+        return;
+    }
+    // Reserva YA, antes de cualquier await: si el mismo PDF se envía dos veces
+    // seguidas, el segundo envío la encuentra y no registra el pedido otra vez.
+    const reservation = { at: Date.now(), count: 0, pending: true };
+    pdfOrderDedupe.set(dedupeKey, reservation);
+    const releaseDedupe = () => { if (pdfOrderDedupe.get(dedupeKey) === reservation) pdfOrderDedupe.delete(dedupeKey); };
+    // El webhook de fallo la suelta aunque la IA siga leyendo (ver handlePartOrderPdfFailed).
+    if (track) track.releaseDedupe = releaseDedupe;
+
+    let read = ctx.preRead;
+    let readError: any = null;
+    if (!read) {
+        try {
+            read = await readPartOrderPdf(ctx.buffer);
+        } catch (e: any) {
+            readError = e;
+            console.error(`[PedidoPDF] Error leyendo «${ctx.fileName}» con Gemini:`, e?.message);
+        }
+    }
+    if (read && !read.esPedido) {
+        releaseDedupe();
+        console.log(`[PedidoPDF] «${ctx.fileName}» no es un pedido de piezas: no se registra nada.`);
+        return;
+    }
+    // Antes que cualquier "añádelo a mano": si el PDF no llegó al proveedor,
+    // eso es lo primero que hay que saber (y no hay pedido que apuntar).
+    if (track?.failed) {
+        releaseDedupe();
+        await note(pdfNotDeliveredNote(ctx.fileName, track.failDetail, { removed: 0, left: 0 }, ''));
+        return;
+    }
+    if (!read) {
+        releaseDedupe();
+        const motivo = readError?.code === 'TIMEOUT' ? 'la IA ha tardado demasiado'
+            : readError?.code === 'TOO_BIG' ? 'es demasiado grande para leerlo'
+            : 'fallo de la IA';
+        await note(`⚠️ No se ha podido leer el PDF «${ctx.fileName}» para registrar el pedido (${motivo}). Si era un pedido de piezas, añádelo a mano en Pedidos de Piezas.`);
+        return;
+    }
+    if (read.validation.lines.length === 0) {
+        releaseDedupe();
+        await note(`⚠️ El PDF «${ctx.fileName}» parece un pedido, pero no se ha podido registrar ninguna línea${read.validation.rejected.length > 0 ? ' (sus referencias no aparecen en el texto del PDF)' : ''}. Añádelo a mano en Pedidos de Piezas.`);
+        return;
+    }
+
+    const proveedor = await partOrderProveedorName(ctx.cleanTo);
+    const grupo = newPedidoGrupoId();
+    const t0 = Date.now();
+    const rows = read.validation.lines.map((l, i) => {
+        const fields: Record<string, any> = {
+            matricula: l.matricula,
+            pieza: l.pieza,
+            referencia: l.referencia,
+            proveedor,
+            // +1 ms por línea: dentro del pedido el panel ordena por esta fecha
+            // y así las piezas salen en el mismo orden que en el PDF.
+            orderedAt: new Date(t0 + i).toISOString(),
+            arrived: false,
+            arrivedAt: '',
+            orderedBy: ctx.senderName || '',
+            noEta: false,
+            pedidoGrupo: grupo
+        };
+        if (l.cantidad !== null) fields.cantidad = l.cantidad;
+        return fields;
+    });
+
+    let created: any[];
+    try {
+        created = await createPartRecords(PART_ORDERS_BOOK, rows);
+    } catch (e: any) {
+        releaseDedupe();
+        const setup = partBookSetupError(PART_ORDERS_BOOK, e);
+        console.error('[PedidoPDF] Error guardando el pedido:', setup || e?.message);
+        // createPartRecords deshace lo que llegó a guardar; si ni eso pudo,
+        // hay que decir qué pedido ha quedado a medias para borrarlo a mano.
+        const left: number = e?.leftoverIds?.length || 0;
+        const aMedias = left > 0 ? ` Ojo: ${left === 1 ? 'se ha quedado 1 pieza' : `se han quedado ${left} piezas`} a medias en el pedido ${grupo}; bórralo antes de añadirlo.` : '';
+        await note(`⚠️ Se ha leído el PDF «${ctx.fileName}» pero no se ha podido guardar el pedido (${setup || 'fallo de Airtable'}). Añádelo a mano en Pedidos de Piezas.${aMedias}`);
+        return;
+    }
+    const ids = created.map(r => r.id);
+    reservation.pending = false;
+    reservation.count = ids.length;
+    reservation.at = Date.now();
+    console.log(`📦 [PedidoPDF] ${ids.length} pieza(s) de «${ctx.fileName}» registradas (grupo ${grupo}, prov "${proveedor}", por "${ctx.senderName}")`);
+
+    if (track) {
+        track.ids = ids;
+        track.grupo = grupo;
+        // Carrera: Meta pudo avisar del fallo mientras se guardaba.
+        if (track.failed) {
+            const res = await removePdfOrderPieces(track);
+            await note(pdfNotDeliveredNote(ctx.fileName, track.failDetail, res, grupo));
+            return;
+        }
+    }
+    await note(buildPdfOrderNote({ fileName: ctx.fileName, validation: read.validation, viaTemplate: ctx.viaTemplate }));
+}
 
 // Recarga las cuentas de WhatsApp desde Airtable SIN reiniciar el servidor.
 // Útil tras añadir un número nuevo a la tabla WhatsAppAccounts.
@@ -10159,25 +10684,79 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
         if (file.mimetype.startsWith('image')) msgType = 'image';
         else if (isAudio) msgType = 'audio';
 
-        console.log(`📤 [Upload] Enviando mensaje tipo: ${msgType} a ${cleanTo}`);
+        // 📦 ¿PDF de un pedido de piezas? (ver "PEDIDO DE PIEZAS EN PDF"). Solo
+        // cuenta si lo manda un perfil de Recambios/Taller. Con la ventana de
+        // 24 h cerrada el PDF suelto no llegaría: si la IA confirma que es un
+        // pedido, sale dentro de la plantilla pedido_proveedor_pdf.
+        const sendFromId = originPhoneId || waPhoneId;
+        const isPdfOrderCandidate = msgType === 'document'
+            && (fileMimeType === 'application/pdf' || /\.pdf$/i.test(fileName))
+            && await isPartsProfile(senderName);
+        let preRead: PdfOrderRead | null = null;
+        let sentViaTemplate = false;
+        let wamid: string | undefined;
+        // Si ya se sabe que la plantilla no existe, no se hace esperar al
+        // trabajador a que la IA lea el PDF antes de enviarlo: saldría suelto igual.
+        if (isPdfOrderCandidate && !pdfTemplateKnownMissing(sendFromId) && await isServiceWindowOpen(cleanTo, sendFromId) === false) {
+            try {
+                preRead = await readPartOrderPdf(file.buffer);
+            } catch (e: any) {
+                console.warn(`[PedidoPDF] No se pudo leer «${fileName}» antes de enviarlo:`, e?.message);
+            }
+            // Basta con que sea un pedido: aunque ninguna línea se pueda
+            // verificar (y haya que apuntarlo a mano), el PDF tiene que llegar.
+            if (preRead?.esPedido) {
+                const tpl = await sendPartOrderPdfTemplate(cleanTo, mediaId, fileName, sendFromId, token);
+                if (tpl.ok) {
+                    sentViaTemplate = true;
+                    wamid = tpl.wamid;
+                    console.log(`✅ [PedidoPDF] Ventana de 24 h cerrada: «${fileName}» enviado con la plantilla ${PART_ORDER_PDF_TEMPLATE}.`);
+                } else {
+                    console.warn(`⚠️ [PedidoPDF] Ventana de 24 h cerrada y la plantilla ${PART_ORDER_PDF_TEMPLATE} no se pudo usar (${tpl.error}). Se envía el PDF suelto.`);
+                }
+            }
+        }
 
-        const payload: any = { messaging_product: "whatsapp", to: cleanTo, type: msgType };
-        payload[msgType] = { id: mediaId, ...(msgType === 'document' && { filename: fileName }) };
+        if (!sentViaTemplate) {
+            console.log(`📤 [Upload] Enviando mensaje tipo: ${msgType} a ${cleanTo}`);
 
-        const msgRes = await axios.post(`https://graph.facebook.com/v21.0/${originPhoneId || waPhoneId}/messages`, payload, { headers: { Authorization: `Bearer ${token}` } });
-        console.log(`✅ [Upload] Mensaje enviado a WhatsApp:`, msgRes.data);
+            const payload: any = { messaging_product: "whatsapp", to: cleanTo, type: msgType };
+            payload[msgType] = { id: mediaId, ...(msgType === 'document' && { filename: fileName }) };
+
+            const msgRes = await axios.post(`https://graph.facebook.com/v21.0/${sendFromId}/messages`, payload, { headers: { Authorization: `Bearer ${token}` } });
+            console.log(`✅ [Upload] Mensaje enviado a WhatsApp:`, msgRes.data);
+            wamid = msgRes.data?.messages?.[0]?.id;
+        }
+
+        // Que Meta acepte el envío no significa que llegue (ventana de 24 h
+        // cerrada, número sin WhatsApp…): el fallo llega luego por el webhook de
+        // estados, a veces en 1-2 s. Se registra YA, antes de cualquier await,
+        // para no perder ese aviso: marca la burbuja como no entregada y, si era
+        // un pedido en PDF, quita sus piezas del panel.
+        const timestamp = new Date().toISOString();
+        registerPendingDelivery(wamid, { recipient: cleanTo, sender: senderName, timestamp });
+        if (isPdfOrderCandidate && wamid) trackPdfOrderMessage(wamid, { cleanTo, originPhoneId: originPhoneId || '', fileName });
 
         let textLog = file.originalname; let saveType = 'document';
         if (msgType === 'image') { textLog = "📷 [Imagen]"; saveType = 'image'; }
         else if (msgType === 'audio') { textLog = "🎤 [Audio]"; saveType = 'audio'; }
 
-        await saveAndEmitMessage({ text: textLog, sender: senderName, recipient: cleanTo, timestamp: new Date().toISOString(), type: saveType, mediaId: mediaId, origin_phone_id: originPhoneId });
+        await saveAndEmitMessage({ text: textLog, sender: senderName, recipient: cleanTo, timestamp, type: saveType, mediaId: mediaId, origin_phone_id: originPhoneId });
         await handleContactUpdate(cleanTo, `Tú (${senderName}): 📎 Archivo`, undefined, originPhoneId);
         // Responder con un audio/foto/documento también ES atender la alarma
         // de la pestaña "Atención" — este camino es HTTP y no pasa por el
         // socket 'chatMessage', así que hay que limpiarla aquí explícitamente.
         clearAttentionForContact(cleanTo, 'adjunto').catch(() => {});
         res.json({ success: true });
+
+        // 📦 Registro del pedido en segundo plano: la respuesta ya ha salido y
+        // nada de esto puede tumbar el envío del PDF.
+        if (isPdfOrderCandidate) {
+            registerPartOrdersFromPdf({
+                buffer: file.buffer, fileName, cleanTo, senderName, originPhoneId: originPhoneId || '',
+                wamid, viaTemplate: sentViaTemplate, preRead
+            }).catch((e: any) => console.error('[PedidoPDF] Error inesperado registrando el pedido:', e?.message));
+        }
     } catch (e: any) {
         console.error("❌ [Upload] Error:", e.response?.data || e.message || e);
         res.status(500).json({ error: "Error subiendo archivo", details: e.response?.data || e.message });
@@ -10741,6 +11320,9 @@ app.post('/webhook', async (req, res) => {
                         });
                         pendingDeliveryByMsgId.delete(st.id);
                     }
+                    // 📦 Si era el PDF de un pedido de piezas, sus piezas salen del
+                    // panel: el proveedor no lo ha recibido (pedido fantasma).
+                    handlePartOrderPdfFailed(st.id, detail).catch(e => console.warn('[PedidoPDF] Error tratando un PDF no entregado:', e?.message));
                 } else {
                     console.log(`📊 [WEBHOOK] Status "${st.status}" para ${st.recipient_id} (msg ${st.id})`);
                 }
