@@ -455,20 +455,15 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                     </tr>
                                 </thead>
                                 <tbody className={isDark ? 'bg-slate-900/30' : 'bg-white'}>
-                                    {filtered.map(o => (
-                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${isOverdue(o) ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
+                                    {filtered.map(o => {
+                                        // Diferenciamos los ABONOS pintando la fila entera de rojo
+                                        // flojito (igual que un pedido vencido). El chip de Estado
+                                        // conserva su propio color. Los pedidos, rojo solo si vencen.
+                                        const redRow = o.kind === 'abono' || isOverdue(o);
+                                        return (
+                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${redRow ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
                                             <td className={`px-4 py-2.5 font-mono font-bold text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{o.matricula || '—'}</td>
-                                            <td className="px-4 py-2.5">
-                                                <div className="flex items-center gap-2">
-                                                    {/* En la vista mixta "Todos", marca los abonos para distinguirlos */}
-                                                    {filter === 'all' && o.kind === 'abono' && (
-                                                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase inline-flex items-center gap-1 ${isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>
-                                                            <RotateCcw className="w-2.5 h-2.5" /> Abono
-                                                        </span>
-                                                    )}
-                                                    <span>{o.pieza || '—'}</span>
-                                                </div>
-                                            </td>
+                                            <td className="px-4 py-2.5">{o.pieza || '—'}</td>
                                             <td className={`px-4 py-2.5 font-mono text-xs ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{o.referencia || '—'}</td>
                                             <td className="px-4 py-2.5 font-semibold">{o.proveedor || '—'}</td>
                                             <td className={`px-4 py-2.5 font-mono text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{fmtDate(o.orderedAt)}</td>
@@ -511,7 +506,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                                 </button>
                                             </td>
                                         </tr>
-                                    ))}
+                                        );
+                                    })}
                                 </tbody>
                             </table>
                         </div>
