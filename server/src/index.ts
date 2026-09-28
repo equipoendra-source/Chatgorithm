@@ -6931,8 +6931,11 @@ function partOrdersSetupError(e: any): string | null {
 }
 
 function serializePartOrder(r: any) {
-    // Plazo prometido por el proveedor (días). Opcional: null = sin plazo, y el
-    // panel cae al respaldo de DELAY_DAYS. Airtable devuelve number o undefined.
+    // Plazo prometido por el proveedor (días). Opcional. Tres estados:
+    //   - etaDays: N       → cuenta atrás, alarma si se pasa
+    //   - noEta: true      → marcado como "sin fecha" a mano; NUNCA salta alarma
+    //   - ambos vacíos     → sin decidir aún (respaldo de 3 días, comportamiento
+    //                        antiguo — es el estado de los auto-creados por plantilla)
     const etaRaw = r.get('etaDays');
     const etaDays = (etaRaw === undefined || etaRaw === null || etaRaw === '')
         ? null
@@ -6947,7 +6950,8 @@ function serializePartOrder(r: any) {
         arrived: !!r.get('arrived'),
         arrivedAt: (r.get('arrivedAt') as string) || '',
         orderedBy: (r.get('orderedBy') as string) || '',
-        etaDays: (etaDays !== null && Number.isFinite(etaDays)) ? etaDays : null
+        etaDays: (etaDays !== null && Number.isFinite(etaDays)) ? etaDays : null,
+        noEta: !!r.get('noEta')
     };
 }
 
@@ -7079,6 +7083,9 @@ app.post('/api/part-orders', async (req, res) => {
         return res.status(400).json({ error: 'Indica al menos la pieza o la referencia.' });
     }
     const etaDays = normalizeEtaDays(req.body?.etaDays);
+    // "sin fecha" es una elección explícita del usuario. Solo se acepta si NO
+    // viene también un etaDays: los dos estados son excluyentes.
+    const noEta = req.body?.noEta === true && etaDays === null;
     try {
         const fields: any = {
             matricula: String(matricula || '').trim(),
@@ -7088,7 +7095,8 @@ app.post('/api/part-orders', async (req, res) => {
             orderedAt: new Date().toISOString(),
             arrived: false,
             arrivedAt: '',
-            orderedBy: String(orderedBy || '').trim()
+            orderedBy: String(orderedBy || '').trim(),
+            noEta
         };
         if (etaDays !== null) fields.etaDays = etaDays;
         const created = await base(TABLE_PART_ORDERS).create([{ fields }], { typecast: true });
@@ -7108,10 +7116,18 @@ app.put('/api/part-orders/:id', async (req, res) => {
         for (const k of ['matricula', 'pieza', 'referencia', 'proveedor'] as const) {
             if (body[k] !== undefined) fields[k] = String(body[k] || '').trim();
         }
-        // Plazo prometido: si viene en el body se actualiza (null = borrar el
-        // plazo). Es el camino de la edición en línea desde la tabla.
+        // Plazo prometido y flag "sin fecha" son excluyentes: al poner uno se
+        // borra el otro, para no dejar un pedido con etaDays=5 y noEta=true a
+        // la vez (estado ambiguo).
         if (body.etaDays !== undefined) {
-            fields.etaDays = normalizeEtaDays(body.etaDays);
+            const eta = normalizeEtaDays(body.etaDays);
+            fields.etaDays = eta;
+            if (eta !== null) fields.noEta = false;   // fijar plazo cancela "sin fecha"
+        }
+        if (body.noEta !== undefined) {
+            const flag = !!body.noEta;
+            fields.noEta = flag;
+            if (flag) fields.etaDays = null;          // marcar "sin fecha" borra el plazo
         }
         // Marcar / desmarcar llegada estampa o limpia arrivedAt automáticamente.
         if (body.arrived !== undefined) {
@@ -7157,11 +7173,11 @@ app.get('/api/part-orders/export', async (_req, res) => {
                 const vence = (hasEta && o.orderedAt)
                     ? fmtDay(new Date(new Date(o.orderedAt).getTime() + (o.etaDays as number) * 86400000))
                     : '';
-                // Estado: los pendientes vencidos (según el plazo prometido, o el
-                // respaldo de 3 días si no hay plazo) salen como VENCIDO para la
-                // reclamación al proveedor.
+                // Estado en el Excel. Los "sin fecha" salen tal cual (nunca
+                // vencen); el resto usa plazo o respaldo de 3 días.
                 let estado: string;
                 if (o.arrived) estado = 'Llegada';
+                else if (o.noEta) estado = 'Sin fecha';
                 else {
                     const overdue = hasEta
                         ? daysSinceExport(o.orderedAt) > (o.etaDays as number)
@@ -7174,7 +7190,7 @@ app.get('/api/part-orders/export', async (_req, res) => {
                     'Referencia': o.referencia,
                     'Proveedor': o.proveedor,
                     'Fecha pedido': fmt(o.orderedAt),
-                    'Plazo prometido (días)': hasEta ? o.etaDays : '',
+                    'Plazo prometido (días)': hasEta ? o.etaDays : (o.noEta ? 'Sin fecha' : ''),
                     'Vence el': vence,
                     'Estado': estado,
                     'Fecha llegada': fmt(o.arrivedAt),

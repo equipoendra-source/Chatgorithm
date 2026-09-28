@@ -25,7 +25,12 @@ interface PartOrder {
     arrived: boolean;
     arrivedAt: string;   // ISO
     orderedBy: string;
-    etaDays: number | null;  // plazo prometido por el proveedor (días); null = sin plazo
+    // Plazo prometido y flag "sin fecha" son excluyentes:
+    //   etaDays: N   → cuenta atrás, alarma al pasarse.
+    //   noEta: true  → el usuario dice "no hay fecha aún"; nunca salta alarma.
+    //   ambos vacíos → sin decidir (respaldo de 3 días, comportamiento antiguo).
+    etaDays: number | null;
+    noEta: boolean;
 }
 
 interface Props {
@@ -66,19 +71,24 @@ const ETA_PRESETS: { label: string; days: number }[] = [
 const hasEta = (o: PartOrder): boolean => o.etaDays !== null && Number.isFinite(o.etaDays as number);
 
 // Estado calculado de un pedido. La cuenta atrás usa el plazo prometido
-// (etaDays); si no hay plazo, cae al respaldo de DELAY_DAYS.
+// (etaDays). Si el usuario ha marcado "sin fecha" (noEta=true) nunca genera
+// alarma; si no hay plazo NI noEta, cae al respaldo de DELAY_DAYS.
 type OrderStatus =
     | { kind: 'arrived' }
     | { kind: 'overdue'; overdueDays: number }   // vencido según el plazo → reclamar
     | { kind: 'due-today' }
     | { kind: 'due-tomorrow' }
     | { kind: 'counting'; remaining: number }     // faltan X días (con plazo)
-    | { kind: 'pending'; days: number }           // sin plazo, dentro del respaldo
-    | { kind: 'late-fallback'; days: number };    // sin plazo, pasado el respaldo
+    | { kind: 'no-eta'; days: number }            // usuario dijo "sin fecha" — nunca alarma
+    | { kind: 'pending'; days: number }           // sin plazo NI noEta, dentro del respaldo
+    | { kind: 'late-fallback'; days: number };    // sin plazo NI noEta, pasado el respaldo
 
 const computeStatus = (o: PartOrder): OrderStatus => {
     if (o.arrived) return { kind: 'arrived' };
     const d = daysSince(o.orderedAt);
+    // "Sin fecha" gana sobre todo lo demás: el usuario decidió que este pedido
+    // no tiene plazo asociado, así que no vence nunca.
+    if (o.noEta) return { kind: 'no-eta', days: d };
     if (!hasEta(o)) {
         return d >= DELAY_DAYS ? { kind: 'late-fallback', days: d } : { kind: 'pending', days: d };
     }
@@ -90,9 +100,10 @@ const computeStatus = (o: PartOrder): OrderStatus => {
 };
 
 // ¿Pendiente y ya vencido? (con plazo → pasó el plazo; sin plazo → pasó el
-// respaldo). Alimenta la tarjeta "Vencidos", el resaltado de fila y el orden.
+// respaldo; "sin fecha" → NUNCA). Alimenta la tarjeta "Vencidos", el
+// resaltado de fila y el orden.
 const isOverdue = (o: PartOrder): boolean => {
-    if (o.arrived) return false;
+    if (o.arrived || o.noEta) return false;
     const k = computeStatus(o).kind;
     return k === 'overdue' || k === 'late-fallback';
 };
@@ -109,6 +120,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     const [search, setSearch] = useState('');
     const [showAdd, setShowAdd] = useState(false);
     const [saving, setSaving] = useState(false);
+    // eta: '' = sin decidir (default), '__none__' = "sin fecha" marcado a mano,
+    // '1'..'N' = días prometidos. Se traduce a { etaDays, noEta } al enviar.
     const [form, setForm] = useState({ matricula: '', pieza: '', referencia: '', proveedor: '', eta: '' });
     // Edición del plazo de un pedido concreto (modal con chips rápidos).
     const [etaModal, setEtaModal] = useState<PartOrder | null>(null);
@@ -207,12 +220,14 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         }
         setSaving(true);
         try {
+            const noEta = form.eta === '__none__';
             const r = await fetch(`${API_URL}/part-orders`, {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     matricula: form.matricula, pieza: form.pieza,
                     referencia: form.referencia, proveedor: form.proveedor,
-                    etaDays: form.eta.trim() === '' ? '' : form.eta,
+                    etaDays: (noEta || form.eta.trim() === '') ? '' : form.eta,
+                    noEta,
                     orderedBy: currentUser?.username || ''
                 })
             });
@@ -228,14 +243,22 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         finally { setSaving(false); }
     };
 
-    // Guarda (o borra, con null) el plazo prometido de un pedido. Camino de la
-    // edición en línea desde la tabla.
-    const saveEta = async (o: PartOrder, days: number | null) => {
+    // Guarda el plazo de un pedido. Tres modos posibles:
+    //   { days: N }    → fija etaDays y limpia noEta
+    //   { noEta: true} → marca "sin fecha" y borra etaDays
+    //   { clear: true }→ vuelve al estado "sin decidir" (respaldo de 3 días)
+    // Los tres van al mismo PUT; el backend aplica la exclusión mutua.
+    const saveEta = async (o: PartOrder, mode: { days?: number; noEta?: boolean; clear?: boolean }) => {
         setEtaSaving(true);
         try {
+            const body = mode.days !== undefined
+                ? { etaDays: mode.days }
+                : mode.noEta
+                    ? { noEta: true }
+                    : { etaDays: '', noEta: false };
             const r = await fetch(`${API_URL}/part-orders/${o.id}`, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ etaDays: days === null ? '' : days })
+                body: JSON.stringify(body)
             });
             if (r.ok) {
                 const d = await r.json();
@@ -250,7 +273,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     };
 
     const openEtaModal = (o: PartOrder) => {
-        setEtaInput(o.etaDays != null ? String(o.etaDays) : '');
+        // '__none__' = "sin fecha", '' = sin decidir, número = días.
+        setEtaInput(o.noEta ? '__none__' : (o.etaDays != null ? String(o.etaDays) : ''));
         setEtaModal(o);
     };
 
@@ -289,6 +313,9 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                 return chip('bg-amber-500/20 text-amber-500', <Clock className="w-3 h-3" />, 'Vence mañana');
             case 'counting':
                 return chip('bg-amber-500/20 text-amber-500', <Clock className="w-3 h-3" />, `Faltan ${st.remaining} días`);
+            case 'no-eta':
+                // Gris neutro: pendiente pero sin cuenta atrás — no es alarma.
+                return chip(isDark ? 'bg-slate-700/50 text-slate-300' : 'bg-slate-200 text-slate-600', <Clock className="w-3 h-3" />, `Sin fecha · pendiente${st.days > 0 ? ` (${st.days === 1 ? '1 día' : `${st.days} días`})` : ''}`);
             case 'pending':
                 return chip('bg-amber-500/20 text-amber-500', <Clock className="w-3 h-3" />, `Pendiente · ${st.days === 0 ? 'hoy' : st.days === 1 ? '1 día' : `${st.days} días`}`);
         }
@@ -410,6 +437,11 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                                         className={`text-xs font-bold px-2 py-1 rounded-md border transition ${isDark ? 'border-white/10 text-slate-200 hover:bg-white/5' : 'border-slate-200 text-slate-700 hover:bg-slate-100'}`}>
                                                         {o.etaDays} {o.etaDays === 1 ? 'día' : 'días'}
                                                     </button>
+                                                ) : o.noEta ? (
+                                                    <button onClick={() => openEtaModal(o)} title="Cambiar a un plazo o quitar"
+                                                        className={`text-xs font-bold px-2 py-1 rounded-md border transition inline-flex items-center gap-1 ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
+                                                        Sin fecha
+                                                    </button>
                                                 ) : (
                                                     <button onClick={() => openEtaModal(o)} title="Fijar el plazo prometido por el proveedor"
                                                         className={`text-xs font-semibold px-2 py-1 rounded-md border border-dashed transition inline-flex items-center gap-1 ${isDark ? 'border-white/10 text-slate-500 hover:text-slate-300 hover:bg-white/5' : 'border-slate-300 text-slate-400 hover:text-slate-600 hover:bg-slate-50'}`}>
@@ -496,18 +528,31 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                             {p.label}
                                         </button>
                                     ))}
+                                    {/* "Sin fecha" — el proveedor no ha dado plazo; no salta alarma */}
+                                    <button type="button" onClick={() => setForm(f => ({ ...f, eta: '__none__' }))}
+                                        className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${form.eta === '__none__'
+                                            ? 'bg-slate-600 text-white border-slate-600'
+                                            : (isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100')}`}>
+                                        Sin fecha
+                                    </button>
                                 </div>
-                                <div className="flex items-center gap-2">
-                                    <input type="number" min={0} className={inputCls} value={form.eta}
-                                        onChange={e => setForm(f => ({ ...f, eta: e.target.value }))} placeholder="Días (p. ej. 2)" />
-                                    {form.eta.trim() !== '' && (
-                                        <button type="button" onClick={() => setForm(f => ({ ...f, eta: '' }))}
-                                            className={`px-3 py-2 rounded-lg text-xs font-semibold border ${isDark ? 'border-white/10 text-slate-400 hover:bg-white/5' : 'border-slate-200 text-slate-500 hover:bg-slate-100'}`}>
-                                            Quitar
-                                        </button>
-                                    )}
-                                </div>
-                                <p className={`text-[11px] mt-1.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>Lo que te diga el proveedor (48h = 2 días). Salta alarma de reclamación al pasarse.</p>
+                                {form.eta !== '__none__' && (
+                                    <div className="flex items-center gap-2">
+                                        <input type="number" min={0} className={inputCls} value={form.eta}
+                                            onChange={e => setForm(f => ({ ...f, eta: e.target.value }))} placeholder="Días (p. ej. 2)" />
+                                        {form.eta.trim() !== '' && (
+                                            <button type="button" onClick={() => setForm(f => ({ ...f, eta: '' }))}
+                                                className={`px-3 py-2 rounded-lg text-xs font-semibold border ${isDark ? 'border-white/10 text-slate-400 hover:bg-white/5' : 'border-slate-200 text-slate-500 hover:bg-slate-100'}`}>
+                                                Quitar
+                                            </button>
+                                        )}
+                                    </div>
+                                )}
+                                <p className={`text-[11px] mt-1.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                    {form.eta === '__none__'
+                                        ? 'Pedido pendiente sin plazo definido. No saltará alarma hasta que le pongas un plazo o lo marques como llegado.'
+                                        : 'Lo que te diga el proveedor (48h = 2 días). Salta alarma de reclamación al pasarse.'}
+                                </p>
                             </div>
                         </div>
                         <div className={`px-6 py-4 border-t flex justify-end gap-2 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
@@ -542,7 +587,11 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                             </button>
                         </div>
                         <div className="px-6 py-4 flex flex-col gap-3">
-                            <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>¿Qué plazo te ha dado el proveedor? (48h = 2 días). Al pasarse sin marcar la llegada, saltará la alarma de reclamación.</p>
+                            <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                {etaInput === '__none__'
+                                    ? 'Marcado como "Sin fecha": el proveedor no ha dado plazo. No saltará alarma hasta que le pongas uno o lo marques como llegado.'
+                                    : '¿Qué plazo te ha dado el proveedor? (48h = 2 días). Al pasarse sin marcar la llegada, saltará la alarma de reclamación.'}
+                            </p>
                             <div className="flex flex-wrap gap-1.5">
                                 {ETA_PRESETS.map(p => (
                                     <button key={p.days} type="button" onClick={() => setEtaInput(String(p.days))}
@@ -552,34 +601,43 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                         {p.label}
                                     </button>
                                 ))}
+                                <button type="button" onClick={() => setEtaInput('__none__')}
+                                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${etaInput === '__none__'
+                                        ? 'bg-slate-600 text-white border-slate-600'
+                                        : (isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100')}`}>
+                                    Sin fecha
+                                </button>
                             </div>
-                            <div>
-                                <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Días</label>
-                                <input type="number" min={0} autoFocus className={inputCls} value={etaInput}
-                                    onChange={e => setEtaInput(e.target.value)} placeholder="p. ej. 2" />
-                            </div>
+                            {etaInput !== '__none__' && (
+                                <div>
+                                    <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Días</label>
+                                    <input type="number" min={0} autoFocus className={inputCls} value={etaInput}
+                                        onChange={e => setEtaInput(e.target.value)} placeholder="p. ej. 2" />
+                                </div>
+                            )}
                         </div>
                         <div className={`px-6 py-4 border-t flex justify-between gap-2 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                             <div>
-                                {etaModal.etaDays != null && (
-                                    <button onClick={() => saveEta(etaModal, null)} disabled={etaSaving}
+                                {(etaModal.etaDays != null || etaModal.noEta) && (
+                                    <button onClick={() => saveEta(etaModal, { clear: true })} disabled={etaSaving}
                                         className={`px-4 py-2 rounded-xl border text-sm font-semibold transition disabled:opacity-40 ${isDark ? 'border-red-500/40 text-red-400 hover:bg-red-500/10' : 'border-red-200 text-red-500 hover:bg-red-50'}`}>
-                                        Quitar plazo
+                                        Quitar
                                     </button>
                                 )}
                             </div>
                             <div className="flex gap-2">
                                 <button onClick={() => setEtaModal(null)} className={`px-4 py-2 rounded-xl border text-sm font-semibold ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>Cancelar</button>
                                 <button onClick={() => {
+                                    if (etaInput === '__none__') { saveEta(etaModal, { noEta: true }); return; }
                                     const t = etaInput.trim();
-                                    if (t === '') { saveEta(etaModal, null); return; }
+                                    if (t === '') { saveEta(etaModal, { clear: true }); return; }
                                     const n = Math.floor(Number(t));
                                     if (!Number.isFinite(n) || n < 0) { alert('Indica un número de días válido (0 o más).'); return; }
-                                    saveEta(etaModal, n);
+                                    saveEta(etaModal, { days: n });
                                 }} disabled={etaSaving}
                                     className="flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold transition active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed">
                                     {etaSaving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Clock className="w-4 h-4" />}
-                                    Guardar plazo
+                                    Guardar
                                 </button>
                             </div>
                         </div>
