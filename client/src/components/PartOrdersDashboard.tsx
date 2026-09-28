@@ -458,14 +458,13 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                 </thead>
                                 <tbody className={isDark ? 'bg-slate-900/30' : 'bg-white'}>
                                     {filtered.map(o => {
-                                        // Los ABONOS se distinguen del pedido con las LETRAS en rojo
-                                        // (columnas de datos) y un fondo rojo flojito. El chip de
-                                        // Estado y los botones conservan su color. Los pedidos
-                                        // vencidos NO pintan la fila: se ven por su chip de Estado.
+                                        // Los ABONOS se distinguen del pedido SOLO con las LETRAS en
+                                        // rojo (columnas de datos); sin fondo de fila. El chip de
+                                        // Estado y los botones conservan su color.
                                         const abono = o.kind === 'abono';
                                         const txt = (slate: string) => abono ? (isDark ? 'text-red-400' : 'text-red-500') : slate;
                                         return (
-                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${abono ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
+                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'}`}>
                                             <td className={`px-4 py-2.5 font-mono font-bold text-xs ${txt(isDark ? 'text-slate-200' : 'text-slate-800')}`}>{o.matricula || '—'}</td>
                                             <td className={`px-4 py-2.5 ${abono ? (isDark ? 'text-red-400' : 'text-red-500') : ''}`}>{o.pieza || '—'}</td>
                                             <td className={`px-4 py-2.5 font-mono text-xs ${txt(isDark ? 'text-slate-300' : 'text-slate-600')}`}>{o.referencia || '—'}</td>
