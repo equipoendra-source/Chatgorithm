@@ -456,10 +456,11 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                 </thead>
                                 <tbody className={isDark ? 'bg-slate-900/30' : 'bg-white'}>
                                     {filtered.map(o => {
-                                        // Diferenciamos los ABONOS pintando la fila entera de rojo
-                                        // flojito (igual que un pedido vencido). El chip de Estado
-                                        // conserva su propio color. Los pedidos, rojo solo si vencen.
-                                        const redRow = o.kind === 'abono' || isOverdue(o);
+                                        // El fondo rojo flojito de fila queda RESERVADO a los abonos
+                                        // (así se distinguen de un vistazo). Los pedidos vencidos NO
+                                        // pintan la fila: se reconocen por su chip rojo de Estado
+                                        // ("Retrasado / Reclamar"), que sigue igual.
+                                        const redRow = o.kind === 'abono';
                                         return (
                                         <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${redRow ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
                                             <td className={`px-4 py-2.5 font-mono font-bold text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{o.matricula || '—'}</td>
