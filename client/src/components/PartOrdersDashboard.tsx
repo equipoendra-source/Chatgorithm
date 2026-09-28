@@ -81,7 +81,6 @@ interface PartOrder {
 interface Props {
     onBack?: () => void;
     currentUser?: { username: string; role: string };
-    variant?: Variant;
 }
 
 // Umbral de retraso de RESPALDO: solo se usa en pedidos SIN plazo prometido
@@ -154,10 +153,14 @@ const isOverdue = (o: PartOrder): boolean => {
     return k === 'overdue' || k === 'late-fallback';
 };
 
-export default function PartOrdersDashboard({ onBack, currentUser, variant = 'orders' }: Props) {
+export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
-    const cfg = VARIANT_CFG[variant];
+    // Pedidos vs Abonos se elige con una pestaña de la barra de filtros, SIN
+    // salir del panel ni tener un botón aparte. cfg (textos, endpoint, icono)
+    // deriva del dataset activo.
+    const [dataset, setDataset] = useState<Variant>('orders');
+    const cfg = VARIANT_CFG[dataset];
     const apiRoot = `${API_URL}/${cfg.apiBase}`;
 
     const [orders, setOrders] = useState<PartOrder[]>([]);
@@ -186,7 +189,7 @@ export default function PartOrdersDashboard({ onBack, currentUser, variant = 'or
                 setTableMissing(!!d.tableMissing);
             }
         } catch (e) {
-            console.error(`[Part:${variant}] Error cargando:`, e);
+            console.error(`[Part:${dataset}] Error cargando:`, e);
         } finally {
             setLoading(false); setRefreshing(false);
         }
@@ -199,7 +202,19 @@ export default function PartOrdersDashboard({ onBack, currentUser, variant = 'or
         const interval = setInterval(() => { if (!showAdd && !etaModal) load(true); }, 15000);
         return () => clearInterval(interval);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [showAdd, etaModal]);
+    }, [showAdd, etaModal, dataset]);
+
+    // Cambia entre Pedidos y Abonos: limpia la lista y los filtros para no
+    // mostrar un instante los datos del otro conjunto; el efecto de arriba
+    // recarga con el endpoint nuevo.
+    const switchDataset = (v: Variant) => {
+        if (v === dataset) return;
+        setDataset(v);
+        setFilter('all');
+        setSearch('');
+        setOrders([]);
+        setLoading(true);
+    };
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
@@ -443,6 +458,15 @@ export default function PartOrdersDashboard({ onBack, currentUser, variant = 'or
                         {label}
                     </button>
                 ))}
+                {/* Pestaña que salta al OTRO conjunto (Pedidos ↔ Abonos), dentro
+                    del mismo panel. Tinte azul para distinguirla de los filtros
+                    de estado: no es un filtro, cambia de tabla. */}
+                <button onClick={() => switchDataset(dataset === 'orders' ? 'abonos' : 'orders')}
+                    title={dataset === 'orders' ? 'Ver los abonos a proveedores' : 'Volver a los pedidos de piezas'}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 border ${isDark ? 'text-sky-300 border-sky-500/40 hover:bg-sky-500/10' : 'text-sky-700 border-sky-200 bg-sky-50 hover:bg-sky-100'}`}>
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    {dataset === 'orders' ? 'Abonos' : 'Pedidos'}
+                </button>
             </div>
 
             {/* ===== Tabla ===== */}

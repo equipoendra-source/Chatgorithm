@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import {
     Users, Search, RefreshCw, UserCheck, Briefcase, Filter as FilterIcon,
     Smartphone, UserPlus, Upload, FileSpreadsheet, Phone, MessageSquare,
-    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone, Package, RotateCcw,
+    User, ChevronDown, CheckCircle, Hash, Calendar as CalendarIcon, X, Megaphone, Package,
     Pin, PinOff
 } from 'lucide-react';
 import { PhoneDialer } from './PhoneDialer';
@@ -50,7 +50,7 @@ interface SidebarProps {
     isConnected?: boolean;
     onlineUsers: string[];
     typingStatus: { [chatId: string]: string };
-    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'part_orders' | 'part_abonos') => void;
+    setView: (view: 'chat' | 'settings' | 'calendar' | 'team_chat' | 'campaigns' | 'part_orders') => void;
     currentView?: string;
 
     selectedAccountId: string | null;
@@ -1159,14 +1159,9 @@ export function Sidebar({
                                 const u = (user.username || '').toLowerCase();
                                 return ['recambios', 'taller'].includes(r) || u.includes('recambios') || u.includes('taller');
                             })() && (
-                                <>
-                                    <button onClick={() => setView('part_orders')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Pedidos de Piezas">
-                                        <Package className="w-4 h-4" />
-                                    </button>
-                                    <button onClick={() => setView('part_abonos')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Abonos a Proveedores">
-                                        <RotateCcw className="w-4 h-4" />
-                                    </button>
-                                </>
+                                <button onClick={() => setView('part_orders')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Pedidos de Piezas">
+                                    <Package className="w-4 h-4" />
+                                </button>
                             )}
                             <button onClick={() => setView('campaigns')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-orange-400 hover:border-orange-500' : 'bg-white border-slate-200 text-slate-400 hover:text-orange-600 hover:border-orange-200'}`} title="Campañas de marketing">
                                 <Megaphone className="w-4 h-4" />
