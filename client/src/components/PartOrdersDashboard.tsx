@@ -1,4 +1,4 @@
-import { useState, useEffect, useMemo, type ReactNode, type ComponentType } from 'react';
+import { useState, useEffect, useMemo, type ReactNode } from 'react';
 import {
     Package, PackageCheck, ArrowLeft, Plus, X, Search, RefreshCw,
     Download, Trash2, Loader2, AlertTriangle, Clock, RotateCcw
@@ -7,58 +7,18 @@ import { API_URL } from '../config/api';
 import { useTheme } from '../context/ThemeContext';
 
 // ==========================================================
-//  PEDIDOS / ABONOS A PROVEEDORES — panel de Recambios
+//  PEDIDOS Y ABONOS A PROVEEDORES — panel de Recambios
 // ==========================================================
-// Un mismo componente sirve DOS paneles hermanos según `variant`:
-//   'orders' → Pedidos de Piezas (tabla PartOrders, /api/part-orders)
-//   'abonos' → Abonos a Proveedores (tabla PartAbonos, /api/part-abonos)
-// Comparten toda la lógica (plazo, alarma "reclamar", "sin fecha", export);
-// solo cambian textos, endpoint e icono. Alta manual + marcar hecho + Excel.
-// Los registros se crean solos al enviar su plantilla (pedido_proveedor /
-// abono_proveedor). Solo lo ven los perfiles de Recambios/Taller.
+// UN SOLO listado que junta pedidos (tabla PartOrders) y abonos (PartAbonos).
+// Las pestañas filtran:
+//   Todos      → pedidos + abonos, cualquier estado
+//   Pendientes → solo pedidos pendientes (no llegados)
+//   Llegadas   → solo pedidos llegados
+//   Abonos     → solo abonos (cualquier estado)
+// Cada fila sabe si es 'order' o 'abono' (kind), y las acciones (marcar
+// hecho, plazo, borrar) van al endpoint correcto. Solo lo ven Recambios/Taller.
 
-type Variant = 'orders' | 'abonos';
-
-interface VariantCfg {
-    apiBase: string;      // segmento de la API (sin barra inicial)
-    title: string;
-    subtitle: string;
-    entity: string;       // 'pedido' | 'abono' (textos de crear/borrar)
-    entityPlural: string; // 'pedidos' | 'abonos'
-    addLabel: string;     // 'Añadir pedido'
-    addTitle: string;     // título del modal de alta
-    doneVerb: string;     // 'Marcar llegada' | 'Marcar abonado'
-    doneNoun: string;     // 'Llegada' | 'Abonado' (chip + fecha)
-    doneTab: string;      // 'Llegadas' | 'Abonados' (pestaña + tarjeta)
-    doneCol: string;      // cabecera de columna
-    undoConfirm: string;  // confirm al deshacer el estado "hecho"
-    excelName: string;
-    tableName: string;    // nombre de la tabla Airtable (aviso de setup)
-    Icon: ComponentType<{ className?: string }>;
-}
-
-const VARIANT_CFG: Record<Variant, VariantCfg> = {
-    orders: {
-        apiBase: 'part-orders',
-        title: 'Pedidos de Piezas',
-        subtitle: 'Seguimiento de pedidos a proveedores · Recambios',
-        entity: 'pedido', entityPlural: 'pedidos',
-        addLabel: 'Añadir pedido', addTitle: 'Añadir pedido',
-        doneVerb: 'Marcar llegada', doneNoun: 'Llegada', doneTab: 'Llegadas', doneCol: 'Llegada',
-        undoConfirm: '¿Deshacer la llegada de esta pieza? Volverá a contar como pendiente.',
-        excelName: 'pedidos-piezas.xlsx', tableName: 'PartOrders', Icon: Package,
-    },
-    abonos: {
-        apiBase: 'part-abonos',
-        title: 'Abonos a Proveedores',
-        subtitle: 'Seguimiento de abonos a proveedores · Recambios',
-        entity: 'abono', entityPlural: 'abonos',
-        addLabel: 'Añadir abono', addTitle: 'Añadir abono',
-        doneVerb: 'Marcar abonado', doneNoun: 'Abonado', doneTab: 'Abonados', doneCol: 'Abono',
-        undoConfirm: '¿Deshacer el abono de esta pieza? Volverá a contar como pendiente.',
-        excelName: 'abonos-proveedores.xlsx', tableName: 'PartAbonos', Icon: RotateCcw,
-    },
-};
+type Kind = 'order' | 'abono';
 
 interface PartOrder {
     id: string;
@@ -72,10 +32,11 @@ interface PartOrder {
     orderedBy: string;
     // Plazo prometido y flag "sin fecha" son excluyentes:
     //   etaDays: N   → cuenta atrás, alarma al pasarse.
-    //   noEta: true  → el usuario dice "no hay fecha aún"; nunca salta alarma.
-    //   ambos vacíos → sin decidir (respaldo de 3 días, comportamiento antiguo).
+    //   noEta: true  → "no hay fecha aún"; nunca salta alarma.
+    //   ambos vacíos → sin decidir (respaldo de 3 días).
     etaDays: number | null;
     noEta: boolean;
+    kind: Kind;          // lo añade el cliente al cargar (no viene del backend)
 }
 
 interface Props {
@@ -83,10 +44,11 @@ interface Props {
     currentUser?: { username: string; role: string };
 }
 
-// Umbral de retraso de RESPALDO: solo se usa en pedidos SIN plazo prometido
-// (los viejos y los auto-creados por plantilla). Si el pedido tiene etaDays,
-// la alarma se calcula sobre ese plazo, no sobre esta constante.
+// Umbral de retraso de RESPALDO: solo se usa en registros SIN plazo prometido.
 const DELAY_DAYS = 3;
+
+// Endpoint según el tipo de registro.
+const rootFor = (kind: Kind) => `${API_URL}/${kind === 'abono' ? 'part-abonos' : 'part-orders'}`;
 
 const daysSince = (iso: string): number => {
     if (!iso) return 0;
@@ -102,7 +64,6 @@ const fmtDate = (iso: string): string => {
 };
 
 // Plazos rápidos que suele dar el proveedor por teléfono ("48h", "5 días"…).
-// Se ofrecen como chips tanto al crear el pedido como al editar el plazo.
 const ETA_PRESETS: { label: string; days: number }[] = [
     { label: '24h', days: 1 },
     { label: '48h', days: 2 },
@@ -115,24 +76,29 @@ const ETA_PRESETS: { label: string; days: number }[] = [
 
 const hasEta = (o: PartOrder): boolean => o.etaDays !== null && Number.isFinite(o.etaDays as number);
 
-// Estado calculado de un pedido. La cuenta atrás usa el plazo prometido
-// (etaDays). Si el usuario ha marcado "sin fecha" (noEta=true) nunca genera
-// alarma; si no hay plazo NI noEta, cae al respaldo de DELAY_DAYS.
+// Textos que dependen del tipo (pedido vs abono).
+const kindNoun = (k: Kind) => (k === 'abono' ? 'abono' : 'pedido');
+const doneVerb = (k: Kind) => (k === 'abono' ? 'Marcar abonado' : 'Marcar llegada');
+const doneNoun = (k: Kind) => (k === 'abono' ? 'Abonado' : 'Llegada');
+const undoText = (k: Kind) => (k === 'abono'
+    ? '¿Deshacer el abono de esta pieza? Volverá a contar como pendiente.'
+    : '¿Deshacer la llegada de esta pieza? Volverá a contar como pendiente.');
+
+// Estado calculado de un registro. La cuenta atrás usa el plazo (etaDays); si
+// hay noEta nunca hay alarma; si no hay plazo NI noEta, cae al respaldo.
 type OrderStatus =
     | { kind: 'arrived' }
-    | { kind: 'overdue'; overdueDays: number }   // vencido según el plazo → reclamar
+    | { kind: 'overdue'; overdueDays: number }
     | { kind: 'due-today' }
     | { kind: 'due-tomorrow' }
-    | { kind: 'counting'; remaining: number }     // faltan X días (con plazo)
-    | { kind: 'no-eta'; days: number }            // usuario dijo "sin fecha" — nunca alarma
-    | { kind: 'pending'; days: number }           // sin plazo NI noEta, dentro del respaldo
-    | { kind: 'late-fallback'; days: number };    // sin plazo NI noEta, pasado el respaldo
+    | { kind: 'counting'; remaining: number }
+    | { kind: 'no-eta'; days: number }
+    | { kind: 'pending'; days: number }
+    | { kind: 'late-fallback'; days: number };
 
 const computeStatus = (o: PartOrder): OrderStatus => {
     if (o.arrived) return { kind: 'arrived' };
     const d = daysSince(o.orderedAt);
-    // "Sin fecha" gana sobre todo lo demás: el usuario decidió que este pedido
-    // no tiene plazo asociado, así que no vence nunca.
     if (o.noEta) return { kind: 'no-eta', days: d };
     if (!hasEta(o)) {
         return d >= DELAY_DAYS ? { kind: 'late-fallback', days: d } : { kind: 'pending', days: d };
@@ -144,9 +110,8 @@ const computeStatus = (o: PartOrder): OrderStatus => {
     return { kind: 'counting', remaining };
 };
 
-// ¿Pendiente y ya vencido? (con plazo → pasó el plazo; sin plazo → pasó el
-// respaldo; "sin fecha" → NUNCA). Alimenta la tarjeta "Vencidos", el
-// resaltado de fila y el orden.
+// ¿Pendiente y ya vencido? (con plazo → pasó el plazo; sin plazo → respaldo;
+// "sin fecha" → NUNCA). Alimenta la tarjeta "Vencidos", el resaltado y el orden.
 const isOverdue = (o: PartOrder): boolean => {
     if (o.arrived || o.noEta) return false;
     const k = computeStatus(o).kind;
@@ -156,40 +121,48 @@ const isOverdue = (o: PartOrder): boolean => {
 export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     const { theme } = useTheme();
     const isDark = theme === 'dark';
-    // Pedidos vs Abonos se elige con una pestaña de la barra de filtros, SIN
-    // salir del panel ni tener un botón aparte. cfg (textos, endpoint, icono)
-    // deriva del dataset activo.
-    const [dataset, setDataset] = useState<Variant>('orders');
-    const cfg = VARIANT_CFG[dataset];
-    const apiRoot = `${API_URL}/${cfg.apiBase}`;
 
-    const [orders, setOrders] = useState<PartOrder[]>([]);
+    const [items, setItems] = useState<PartOrder[]>([]);   // pedidos + abonos juntos
     const [tableMissing, setTableMissing] = useState(false);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
-    const [filter, setFilter] = useState<'all' | 'pending' | 'arrived'>('all');
+    const [filter, setFilter] = useState<'all' | 'pending' | 'arrived' | 'abonos'>('all');
     const [search, setSearch] = useState('');
     const [showAdd, setShowAdd] = useState(false);
     const [saving, setSaving] = useState(false);
-    // eta: '' = sin decidir (default), '__none__' = "sin fecha" marcado a mano,
-    // '1'..'N' = días prometidos. Se traduce a { etaDays, noEta } al enviar.
+    // eta: '' = sin decidir, '__none__' = "sin fecha", '1'..'N' = días.
     const [form, setForm] = useState({ matricula: '', pieza: '', referencia: '', proveedor: '', eta: '' });
-    // Edición del plazo de un pedido concreto (modal con chips rápidos).
     const [etaModal, setEtaModal] = useState<PartOrder | null>(null);
     const [etaInput, setEtaInput] = useState('');
     const [etaSaving, setEtaSaving] = useState(false);
 
+    // En la pestaña Abonos, "Añadir" crea un abono; en el resto, un pedido.
+    const addKind: Kind = filter === 'abonos' ? 'abono' : 'order';
+
     const load = async (silent = false) => {
         if (silent) setRefreshing(true); else setLoading(true);
         try {
-            const r = await fetch(apiRoot);
-            if (r.ok) {
-                const d = await r.json();
-                setOrders(Array.isArray(d.orders) ? d.orders : []);
-                setTableMissing(!!d.tableMissing);
+            // Pedidos y abonos en paralelo → un solo listado combinado.
+            const [ro, ra] = await Promise.all([
+                fetch(`${API_URL}/part-orders`),
+                fetch(`${API_URL}/part-abonos`),
+            ]);
+            const combined: PartOrder[] = [];
+            let missing = false;
+            if (ro.ok) {
+                const d = await ro.json();
+                if (d.tableMissing) missing = true;
+                (Array.isArray(d.orders) ? d.orders : []).forEach((o: any) => combined.push({ ...o, kind: 'order' }));
             }
+            if (ra.ok) {
+                const d = await ra.json();
+                if (d.tableMissing) missing = true;
+                (Array.isArray(d.orders) ? d.orders : []).forEach((o: any) => combined.push({ ...o, kind: 'abono' }));
+            }
+            setItems(combined);
+            setTableMissing(missing);
         } catch (e) {
-            console.error(`[Part:${dataset}] Error cargando:`, e);
+            console.error('[PartOrders] Error cargando:', e);
         } finally {
             setLoading(false); setRefreshing(false);
         }
@@ -197,84 +170,77 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
 
     useEffect(() => {
         load();
-        // Refresco silencioso, pausado mientras un modal está abierto (alta o
-        // edición de plazo) para no pisar lo que el usuario esté escribiendo.
+        // Refresco silencioso, pausado mientras un modal está abierto.
         const interval = setInterval(() => { if (!showAdd && !etaModal) load(true); }, 15000);
         return () => clearInterval(interval);
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [showAdd, etaModal, dataset]);
-
-    // Cambia entre Pedidos y Abonos: limpia la lista y los filtros para no
-    // mostrar un instante los datos del otro conjunto; el efecto de arriba
-    // recarga con el endpoint nuevo.
-    const switchDataset = (v: Variant) => {
-        if (v === dataset) return;
-        setDataset(v);
-        setFilter('all');
-        setSearch('');
-        setOrders([]);
-        setLoading(true);
-    };
+    }, [showAdd, etaModal]);
 
     const filtered = useMemo(() => {
         const q = search.trim().toLowerCase();
-        return orders.filter(o => {
-            if (filter === 'pending' && o.arrived) return false;
-            if (filter === 'arrived' && !o.arrived) return false;
+        return items.filter(o => {
+            // Filtro por pestaña.
+            if (filter === 'pending' && !(o.kind === 'order' && !o.arrived)) return false;
+            if (filter === 'arrived' && !(o.kind === 'order' && o.arrived)) return false;
+            if (filter === 'abonos' && o.kind !== 'abono') return false;
+            // Búsqueda.
             if (!q) return true;
             return [o.matricula, o.pieza, o.referencia, o.proveedor, o.orderedBy]
                 .some(v => (v || '').toLowerCase().includes(q));
         }).sort((a, b) => {
-            // Los vencidos (a reclamar) suben arriba; dentro de cada grupo, los
-            // más recientes primero.
+            // Los vencidos (a reclamar) suben arriba; luego los más recientes.
             const ao = isOverdue(a) ? 1 : 0;
             const bo = isOverdue(b) ? 1 : 0;
             if (ao !== bo) return bo - ao;
             return (b.orderedAt || '').localeCompare(a.orderedAt || '');
         });
-    }, [orders, filter, search]);
+    }, [items, filter, search]);
 
+    // Tarjetas resumen: sobre TODO el conjunto (pedidos + abonos).
     const stats = useMemo(() => {
-        const pending = orders.filter(o => !o.arrived);
+        const pending = items.filter(o => !o.arrived);
         return {
             pending: pending.length,
-            // Vencidos: pasaron su plazo prometido (o el respaldo de 3 días si
-            // no tienen plazo) sin marcarse como recibidos → hay que reclamar.
             late: pending.filter(isOverdue).length,
-            arrived: orders.filter(o => o.arrived).length,
+            done: items.filter(o => o.arrived).length,
         };
-    }, [orders]);
+    }, [items]);
 
-    // Lista de proveedores ya usados → datalist del formulario (autocompletar).
     const knownProviders = useMemo(
-        () => Array.from(new Set(orders.map(o => o.proveedor).filter(Boolean))).sort(),
-        [orders]
+        () => Array.from(new Set(items.map(o => o.proveedor).filter(Boolean))).sort(),
+        [items]
     );
 
+    // Reemplaza en el listado el item editado (comparando por id + kind, porque
+    // el backend no devuelve kind y hay que reponerlo).
+    const replaceItem = (o: PartOrder, fresh: any) => {
+        setItems(prev => prev.map(x => (x.id === o.id && x.kind === o.kind) ? { ...fresh, kind: o.kind } : x));
+    };
+
     const markArrived = async (o: PartOrder, arrived: boolean) => {
-        if (!arrived && !window.confirm(cfg.undoConfirm)) return;
+        if (!arrived && !window.confirm(undoText(o.kind))) return;
         try {
-            const r = await fetch(`${apiRoot}/${o.id}`, {
+            const r = await fetch(`${rootFor(o.kind)}/${o.id}`, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ arrived })
             });
             if (r.ok) {
                 const d = await r.json();
-                setOrders(prev => prev.map(x => x.id === o.id ? d.order : x));
+                replaceItem(o, d.order);
             } else {
                 const d = await r.json().catch(() => ({}));
-                alert(d.error || `No se pudo actualizar el ${cfg.entity}.`);
+                alert(d.error || `No se pudo actualizar el ${kindNoun(o.kind)}.`);
             }
-        } catch { alert(`Error de conexión actualizando el ${cfg.entity}.`); }
+        } catch { alert(`Error de conexión actualizando el ${kindNoun(o.kind)}.`); }
     };
 
     const removeOrder = async (o: PartOrder) => {
-        if (!window.confirm(`¿Borrar el ${cfg.entity} "${o.pieza || o.referencia}"? Esto no se puede deshacer.`)) return;
+        if (!window.confirm(`¿Borrar el ${kindNoun(o.kind)} "${o.pieza || o.referencia}"? Esto no se puede deshacer.`)) return;
         try {
-            const r = await fetch(`${apiRoot}/${o.id}`, { method: 'DELETE' });
-            if (r.ok) setOrders(prev => prev.filter(x => x.id !== o.id));
-            else alert(`No se pudo borrar el ${cfg.entity}.`);
-        } catch { alert(`Error de conexión borrando el ${cfg.entity}.`); }
+            const r = await fetch(`${rootFor(o.kind)}/${o.id}`, { method: 'DELETE' });
+            if (r.ok) setItems(prev => prev.filter(x => !(x.id === o.id && x.kind === o.kind)));
+            else alert(`No se pudo borrar el ${kindNoun(o.kind)}.`);
+        } catch { alert(`Error de conexión borrando el ${kindNoun(o.kind)}.`); }
     };
 
     const createOrder = async () => {
@@ -284,7 +250,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         setSaving(true);
         try {
             const noEta = form.eta === '__none__';
-            const r = await fetch(apiRoot, {
+            const r = await fetch(rootFor(addKind), {
                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     matricula: form.matricula, pieza: form.pieza,
@@ -296,21 +262,19 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             });
             const d = await r.json().catch(() => ({}));
             if (r.ok && d.order) {
-                setOrders(prev => [d.order, ...prev]);
+                setItems(prev => [{ ...d.order, kind: addKind }, ...prev]);
                 setForm({ matricula: '', pieza: '', referencia: '', proveedor: '', eta: '' });
                 setShowAdd(false);
             } else {
-                alert(d.error || `No se pudo crear el ${cfg.entity}.`);
+                alert(d.error || `No se pudo crear el ${kindNoun(addKind)}.`);
             }
-        } catch { alert(`Error de conexión creando el ${cfg.entity}.`); }
+        } catch { alert(`Error de conexión creando el ${kindNoun(addKind)}.`); }
         finally { setSaving(false); }
     };
 
-    // Guarda el plazo de un pedido. Tres modos posibles:
-    //   { days: N }    → fija etaDays y limpia noEta
-    //   { noEta: true} → marca "sin fecha" y borra etaDays
-    //   { clear: true }→ vuelve al estado "sin decidir" (respaldo de 3 días)
-    // Los tres van al mismo PUT; el backend aplica la exclusión mutua.
+    // Guarda el plazo de un registro. { days } fija etaDays; { noEta } marca
+    // "sin fecha"; { clear } vuelve a "sin decidir". El backend hace la
+    // exclusión mutua.
     const saveEta = async (o: PartOrder, mode: { days?: number; noEta?: boolean; clear?: boolean }) => {
         setEtaSaving(true);
         try {
@@ -319,13 +283,13 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                 : mode.noEta
                     ? { noEta: true }
                     : { etaDays: '', noEta: false };
-            const r = await fetch(`${apiRoot}/${o.id}`, {
+            const r = await fetch(`${rootFor(o.kind)}/${o.id}`, {
                 method: 'PUT', headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body)
             });
             if (r.ok) {
                 const d = await r.json();
-                setOrders(prev => prev.map(x => x.id === o.id ? d.order : x));
+                replaceItem(o, d.order);
                 setEtaModal(null);
             } else {
                 const d = await r.json().catch(() => ({}));
@@ -336,16 +300,17 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     };
 
     const openEtaModal = (o: PartOrder) => {
-        // '__none__' = "sin fecha", '' = sin decidir, número = días.
         setEtaInput(o.noEta ? '__none__' : (o.etaDays != null ? String(o.etaDays) : ''));
         setEtaModal(o);
     };
 
-    // Descarga vía fetch → blob: el interceptor de auth añade el Bearer solo;
-    // un <a href> directo no llevaría el token con ENFORCE_API_AUTH activo.
     const downloadExcel = async () => {
+        // Descarga el Excel del conjunto activo: en la pestaña Abonos, abonos;
+        // en las demás, pedidos.
+        const which = filter === 'abonos' ? 'part-abonos' : 'part-orders';
+        const file = filter === 'abonos' ? 'abonos-proveedores.xlsx' : 'pedidos-piezas.xlsx';
         try {
-            const r = await fetch(`${apiRoot}/export`);
+            const r = await fetch(`${API_URL}/${which}/export`);
             if (!r.ok) {
                 const d = await r.json().catch(() => ({}));
                 alert(d.error || 'No se pudo generar el Excel.'); return;
@@ -353,7 +318,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             const blob = await r.blob();
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = cfg.excelName; a.click();
+            a.href = url; a.download = file; a.click();
             URL.revokeObjectURL(url);
         } catch { alert('Error de conexión generando el Excel.'); }
     };
@@ -365,7 +330,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         const st = computeStatus(o);
         switch (st.kind) {
             case 'arrived':
-                return chip('bg-green-500/20 text-green-600', <PackageCheck className="w-3 h-3" />, cfg.doneNoun);
+                return chip('bg-green-500/20 text-green-600', <PackageCheck className="w-3 h-3" />, doneNoun(o.kind));
             case 'overdue':
                 return chip('bg-red-500/20 text-red-500', <AlertTriangle className="w-3 h-3" />, `Reclamar · vencido hace ${st.overdueDays === 1 ? '1 día' : `${st.overdueDays} días`}`);
             case 'late-fallback':
@@ -377,12 +342,14 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             case 'counting':
                 return chip('bg-amber-500/20 text-amber-500', <Clock className="w-3 h-3" />, `Faltan ${st.remaining} días`);
             case 'no-eta':
-                // Gris neutro: pendiente pero sin cuenta atrás — no es alarma.
                 return chip(isDark ? 'bg-slate-700/50 text-slate-300' : 'bg-slate-200 text-slate-600', <Clock className="w-3 h-3" />, `Sin fecha · pendiente${st.days > 0 ? ` (${st.days === 1 ? '1 día' : `${st.days} días`})` : ''}`);
             case 'pending':
                 return chip('bg-amber-500/20 text-amber-500', <Clock className="w-3 h-3" />, `Pendiente · ${st.days === 0 ? 'hoy' : st.days === 1 ? '1 día' : `${st.days} días`}`);
         }
     };
+
+    // Cabecera de la columna de acción (marcar hecho).
+    const doneColHeader = filter === 'abonos' ? 'Abono' : filter === 'all' ? 'Llegada / Abono' : 'Llegada';
 
     const inputCls = `w-full px-4 py-2.5 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`;
 
@@ -397,11 +364,11 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         </button>
                     )}
                     <div className="p-2.5 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
-                        <cfg.Icon className="w-5 h-5 text-white" />
+                        <Package className="w-5 h-5 text-white" />
                     </div>
                     <div>
-                        <h1 className={`text-xl font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>{cfg.title}</h1>
-                        <p className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>{cfg.subtitle}</p>
+                        <h1 className={`text-xl font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>Pedidos de Piezas</h1>
+                        <p className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Seguimiento de pedidos y abonos a proveedores · Recambios</p>
                     </div>
                     {refreshing && <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />}
                 </div>
@@ -410,7 +377,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         <Download className="w-4 h-4" /> Descargar Excel
                     </button>
                     <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:shadow-lg hover:shadow-emerald-500/30 text-white font-semibold transition active:scale-[0.98]">
-                        <Plus className="w-4 h-4" /> {cfg.addLabel}
+                        <Plus className="w-4 h-4" /> Añadir {kindNoun(addKind)}
                     </button>
                 </div>
             </div>
@@ -420,8 +387,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                 <div className={`mx-6 mt-4 p-4 rounded-xl border text-sm flex items-start gap-3 ${isDark ? 'bg-amber-500/10 border-amber-500/30 text-amber-300' : 'bg-amber-50 border-amber-200 text-amber-800'}`}>
                     <AlertTriangle className="w-5 h-5 flex-shrink-0 mt-0.5" />
                     <div>
-                        <p className="font-bold mb-1">Falta crear la tabla en Airtable</p>
-                        <p>Crea una tabla llamada <b>{cfg.tableName}</b> con las columnas: <b>matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy</b> (texto de una línea), <b>arrived</b> y <b>noEta</b> (casilla de verificación) y <b>etaDays</b> (número). En cuanto exista, este panel funcionará solo — no hace falta redesplegar nada.</p>
+                        <p className="font-bold mb-1">Falta crear una tabla en Airtable</p>
+                        <p>Este panel usa dos tablas: <b>PartOrders</b> (pedidos) y <b>PartAbonos</b> (abonos), ambas con las columnas: <b>matricula, pieza, referencia, proveedor, orderedAt, arrivedAt, orderedBy</b> (texto de una línea), <b>arrived</b> y <b>noEta</b> (casilla) y <b>etaDays</b> (número). En cuanto existan, este panel funcionará solo.</p>
                     </div>
                 </div>
             )}
@@ -431,7 +398,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                 {[
                     { label: 'Pendientes', value: stats.pending, cls: 'text-amber-500' },
                     { label: 'Vencidos · reclamar', value: stats.late, cls: 'text-red-500' },
-                    { label: cfg.doneTab, value: stats.arrived, cls: 'text-green-600' },
+                    { label: 'Completados', value: stats.done, cls: 'text-green-600' },
                 ].map(s => (
                     <div key={s.label} className={`p-3 rounded-xl border ${isDark ? 'border-white/5 bg-slate-900/40' : 'border-slate-200 bg-white'}`}>
                         <p className={`text-[10px] font-bold uppercase tracking-wide ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>{s.label}</p>
@@ -450,23 +417,15 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         className={`w-full pl-9 pr-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 placeholder-slate-500' : 'bg-white border-slate-200 text-slate-800'}`}
                     />
                 </div>
-                {([['all', 'Todos'], ['pending', 'Pendientes'], ['arrived', cfg.doneTab]] as const).map(([key, label]) => (
+                {([['all', 'Todos'], ['pending', 'Pendientes'], ['arrived', 'Llegadas'], ['abonos', 'Abonos']] as const).map(([key, label]) => (
                     <button key={key} onClick={() => setFilter(key)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition ${filter === key
+                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 ${filter === key
                             ? 'bg-emerald-600 text-white shadow-sm'
                             : (isDark ? 'text-slate-400 hover:text-slate-200 border border-white/10' : 'text-slate-500 hover:text-slate-700 border border-slate-200 bg-white')}`}>
+                        {key === 'abonos' && <RotateCcw className="w-3.5 h-3.5" />}
                         {label}
                     </button>
                 ))}
-                {/* Pestaña que salta al OTRO conjunto (Pedidos ↔ Abonos), dentro
-                    del mismo panel. Tinte azul para distinguirla de los filtros
-                    de estado: no es un filtro, cambia de tabla. */}
-                <button onClick={() => switchDataset(dataset === 'orders' ? 'abonos' : 'orders')}
-                    title={dataset === 'orders' ? 'Ver los abonos a proveedores' : 'Volver a los pedidos de piezas'}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 border ${isDark ? 'text-sky-300 border-sky-500/40 hover:bg-sky-500/10' : 'text-sky-700 border-sky-200 bg-sky-50 hover:bg-sky-100'}`}>
-                    <RotateCcw className="w-3.5 h-3.5" />
-                    {dataset === 'orders' ? 'Abonos' : 'Pedidos'}
-                </button>
             </div>
 
             {/* ===== Tabla ===== */}
@@ -475,13 +434,13 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                     <div className="flex items-center justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
                 ) : filtered.length === 0 ? (
                     <div className={`text-center py-16 text-sm ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                        <cfg.Icon className="w-10 h-10 mx-auto mb-3 opacity-40" />
-                        {orders.length === 0 ? `Todavía no hay ${cfg.entityPlural}. Añade el primero con el botón verde.` : `Ningún ${cfg.entity} coincide con el filtro.`}
+                        <Package className="w-10 h-10 mx-auto mb-3 opacity-40" />
+                        {items.length === 0 ? 'Todavía no hay nada. Añade el primero con el botón verde.' : 'Ningún registro coincide con el filtro.'}
                     </div>
                 ) : (
                     <div className={`rounded-xl border overflow-hidden ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
                         <div className="overflow-x-auto">
-                            <table className="w-full text-sm min-w-[880px]">
+                            <table className="w-full text-sm min-w-[900px]">
                                 <thead className={`text-xs uppercase ${isDark ? 'bg-slate-800/60 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
                                     <tr>
                                         <th className="px-4 py-2.5 text-left">Matrícula</th>
@@ -491,15 +450,25 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                         <th className="px-4 py-2.5 text-left">Pedido</th>
                                         <th className="px-4 py-2.5 text-left">Plazo</th>
                                         <th className="px-4 py-2.5 text-left">Estado</th>
-                                        <th className="px-4 py-2.5 text-left">{cfg.doneCol}</th>
+                                        <th className="px-4 py-2.5 text-left">{doneColHeader}</th>
                                         <th className="px-4 py-2.5"></th>
                                     </tr>
                                 </thead>
                                 <tbody className={isDark ? 'bg-slate-900/30' : 'bg-white'}>
                                     {filtered.map(o => (
-                                        <tr key={o.id} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${isOverdue(o) ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
+                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${isOverdue(o) ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
                                             <td className={`px-4 py-2.5 font-mono font-bold text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{o.matricula || '—'}</td>
-                                            <td className="px-4 py-2.5">{o.pieza || '—'}</td>
+                                            <td className="px-4 py-2.5">
+                                                <div className="flex items-center gap-2">
+                                                    {/* En la vista mixta "Todos", marca los abonos para distinguirlos */}
+                                                    {filter === 'all' && o.kind === 'abono' && (
+                                                        <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase inline-flex items-center gap-1 ${isDark ? 'bg-sky-500/20 text-sky-300' : 'bg-sky-100 text-sky-700'}`}>
+                                                            <RotateCcw className="w-2.5 h-2.5" /> Abono
+                                                        </span>
+                                                    )}
+                                                    <span>{o.pieza || '—'}</span>
+                                                </div>
+                                            </td>
                                             <td className={`px-4 py-2.5 font-mono text-xs ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{o.referencia || '—'}</td>
                                             <td className="px-4 py-2.5 font-semibold">{o.proveedor || '—'}</td>
                                             <td className={`px-4 py-2.5 font-mono text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{fmtDate(o.orderedAt)}</td>
@@ -524,19 +493,19 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                             <td className="px-4 py-2.5">{chipFor(o)}</td>
                                             <td className="px-4 py-2.5">
                                                 {o.arrived ? (
-                                                    <button onClick={() => markArrived(o, false)} title={`Pulsar para deshacer el estado "${cfg.doneNoun}"`}
+                                                    <button onClick={() => markArrived(o, false)} title={`Pulsar para deshacer el estado "${doneNoun(o.kind)}"`}
                                                         className="text-xs font-bold text-green-600 inline-flex items-center gap-1 hover:opacity-70">
                                                         <PackageCheck className="w-3.5 h-3.5" /> {fmtDate(o.arrivedAt)}
                                                     </button>
                                                 ) : (
                                                     <button onClick={() => markArrived(o, true)}
                                                         className={`text-xs font-bold px-2.5 py-1 rounded-md border border-dashed transition ${isDark ? 'border-amber-500/50 text-amber-400 hover:bg-amber-500/10' : 'border-amber-400 text-amber-600 hover:bg-amber-50'}`}>
-                                                        {cfg.doneVerb}
+                                                        {doneVerb(o.kind)}
                                                     </button>
                                                 )}
                                             </td>
                                             <td className="px-4 py-2.5 text-right">
-                                                <button onClick={() => removeOrder(o)} title={`Borrar ${cfg.entity}`}
+                                                <button onClick={() => removeOrder(o)} title={`Borrar ${kindNoun(o.kind)}`}
                                                     className={`p-1.5 rounded-md transition ${isDark ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' : 'text-slate-400 hover:text-red-600 hover:bg-red-50'}`}>
                                                     <Trash2 className="w-3.5 h-3.5" />
                                                 </button>
@@ -550,7 +519,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                 )}
             </div>
 
-            {/* ===== Modal: añadir pedido a mano ===== */}
+            {/* ===== Modal: añadir a mano ===== */}
             {showAdd && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setShowAdd(false)}>
                     <div onClick={e => e.stopPropagation()}
@@ -558,10 +527,10 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         <div className={`flex items-center justify-between px-6 py-4 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                             <div className="flex items-center gap-3">
                                 <div className="p-2 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
-                                    <cfg.Icon className="w-5 h-5 text-white" />
+                                    {addKind === 'abono' ? <RotateCcw className="w-5 h-5 text-white" /> : <Package className="w-5 h-5 text-white" />}
                                 </div>
                                 <div>
-                                    <h2 className="text-lg font-bold">{cfg.addTitle}</h2>
+                                    <h2 className="text-lg font-bold">Añadir {kindNoun(addKind)}</h2>
                                     <p className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Se registra con la fecha de ahora</p>
                                 </div>
                             </div>
@@ -584,8 +553,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                             </div>
                             <div>
                                 <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Proveedor</label>
-                                <input className={inputCls} list={`${cfg.apiBase}-providers`} value={form.proveedor} onChange={e => setForm(f => ({ ...f, proveedor: e.target.value }))} placeholder="Ford / Colón…" />
-                                <datalist id={`${cfg.apiBase}-providers`}>
+                                <input className={inputCls} list="part-providers" value={form.proveedor} onChange={e => setForm(f => ({ ...f, proveedor: e.target.value }))} placeholder="Ford / Colón…" />
+                                <datalist id="part-providers">
                                     {knownProviders.map(p => <option key={p} value={p} />)}
                                 </datalist>
                             </div>
@@ -600,7 +569,6 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                             {p.label}
                                         </button>
                                     ))}
-                                    {/* "Sin fecha" — el proveedor no ha dado plazo; no salta alarma */}
                                     <button type="button" onClick={() => setForm(f => ({ ...f, eta: '__none__' }))}
                                         className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${form.eta === '__none__'
                                             ? 'bg-slate-600 text-white border-slate-600'
@@ -622,7 +590,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                 )}
                                 <p className={`text-[11px] mt-1.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                                     {form.eta === '__none__'
-                                        ? 'Pedido pendiente sin plazo definido. No saltará alarma hasta que le pongas un plazo o lo marques como llegado.'
+                                        ? 'Pendiente sin plazo definido. No saltará alarma hasta que le pongas un plazo o lo marques como hecho.'
                                         : 'Lo que te diga el proveedor (48h = 2 días). Salta alarma de reclamación al pasarse.'}
                                 </p>
                             </div>
@@ -632,14 +600,14 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                             <button onClick={createOrder} disabled={saving}
                                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold transition active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed">
                                 {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                                Guardar {cfg.entity}
+                                Guardar {kindNoun(addKind)}
                             </button>
                         </div>
                     </div>
                 </div>
             )}
 
-            {/* ===== Modal: fijar / cambiar el plazo prometido de un pedido ===== */}
+            {/* ===== Modal: fijar / cambiar el plazo ===== */}
             {etaModal && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setEtaModal(null)}>
                     <div onClick={e => e.stopPropagation()}
@@ -661,8 +629,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         <div className="px-6 py-4 flex flex-col gap-3">
                             <p className={`text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
                                 {etaInput === '__none__'
-                                    ? 'Marcado como "Sin fecha": el proveedor no ha dado plazo. No saltará alarma hasta que le pongas uno o lo marques como llegado.'
-                                    : '¿Qué plazo te ha dado el proveedor? (48h = 2 días). Al pasarse sin marcar la llegada, saltará la alarma de reclamación.'}
+                                    ? 'Marcado como "Sin fecha": el proveedor no ha dado plazo. No saltará alarma hasta que le pongas uno o lo marques como hecho.'
+                                    : '¿Qué plazo te ha dado el proveedor? (48h = 2 días). Al pasarse sin marcar, saltará la alarma de reclamación.'}
                             </p>
                             <div className="flex flex-wrap gap-1.5">
                                 {ETA_PRESETS.map(p => (
