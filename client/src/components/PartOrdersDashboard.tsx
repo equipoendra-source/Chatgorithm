@@ -11,10 +11,9 @@ import { useTheme } from '../context/ThemeContext';
 // ==========================================================
 // UN SOLO listado que junta pedidos (tabla PartOrders) y abonos (PartAbonos).
 // Las pestañas filtran:
-//   Todos      → pedidos + abonos, cualquier estado
-//   Pendientes → solo pedidos pendientes (no recibidos)
+//   Pendientes → todo lo NO completado: pedidos no recibidos + abonos no abonados
 //   Recibidos  → solo pedidos recibidos
-//   Abonos     → solo abonos (cualquier estado)
+//   Abonos     → todos los abonos (cualquier estado)
 // Cada fila sabe si es 'order' o 'abono' (kind), y las acciones (marcar
 // hecho, plazo, borrar) van al endpoint correcto. Solo lo ven Recambios/Taller.
 
@@ -126,7 +125,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     const [tableMissing, setTableMissing] = useState(false);
     const [loading, setLoading] = useState(true);
     const [refreshing, setRefreshing] = useState(false);
-    const [filter, setFilter] = useState<'all' | 'pending' | 'arrived' | 'abonos'>('all');
+    const [filter, setFilter] = useState<'pending' | 'arrived' | 'abonos'>('pending');
     const [search, setSearch] = useState('');
     const [showAdd, setShowAdd] = useState(false);
     const [saving, setSaving] = useState(false);
@@ -180,7 +179,10 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         const q = search.trim().toLowerCase();
         return items.filter(o => {
             // Filtro por pestaña.
-            if (filter === 'pending' && !(o.kind === 'order' && !o.arrived)) return false;
+            //   Pendientes → todo lo NO completado (pedidos + abonos pendientes)
+            //   Recibidos  → solo pedidos recibidos
+            //   Abonos     → todos los abonos
+            if (filter === 'pending' && o.arrived) return false;
             if (filter === 'arrived' && !(o.kind === 'order' && o.arrived)) return false;
             if (filter === 'abonos' && o.kind !== 'abono') return false;
             // Búsqueda.
@@ -349,7 +351,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     };
 
     // Cabecera de la columna de acción (marcar hecho).
-    const doneColHeader = filter === 'abonos' ? 'Abono' : filter === 'all' ? 'Recibido / Abono' : 'Recibido';
+    const doneColHeader = filter === 'abonos' ? 'Abono' : filter === 'pending' ? 'Recibido / Abono' : 'Recibido';
 
     const inputCls = `w-full px-4 py-2.5 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200' : 'bg-white border-slate-200 text-slate-800'}`;
 
@@ -417,7 +419,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         className={`w-full pl-9 pr-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 placeholder-slate-500' : 'bg-white border-slate-200 text-slate-800'}`}
                     />
                 </div>
-                {([['all', 'Todos'], ['pending', 'Pendientes'], ['arrived', 'Recibidos'], ['abonos', 'Abonos']] as const).map(([key, label]) => (
+                {([['pending', 'Pendientes'], ['arrived', 'Recibidos'], ['abonos', 'Abonos']] as const).map(([key, label]) => (
                     <button key={key} onClick={() => setFilter(key)}
                         className={`px-3 py-1.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 ${filter === key
                             ? 'bg-emerald-600 text-white shadow-sm'
@@ -456,18 +458,19 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                 </thead>
                                 <tbody className={isDark ? 'bg-slate-900/30' : 'bg-white'}>
                                     {filtered.map(o => {
-                                        // El fondo rojo flojito de fila queda RESERVADO a los abonos
-                                        // (así se distinguen de un vistazo). Los pedidos vencidos NO
-                                        // pintan la fila: se reconocen por su chip rojo de Estado
-                                        // ("Retrasado / Reclamar"), que sigue igual.
-                                        const redRow = o.kind === 'abono';
+                                        // Los ABONOS se distinguen del pedido con las LETRAS en rojo
+                                        // (columnas de datos) y un fondo rojo flojito. El chip de
+                                        // Estado y los botones conservan su color. Los pedidos
+                                        // vencidos NO pintan la fila: se ven por su chip de Estado.
+                                        const abono = o.kind === 'abono';
+                                        const txt = (slate: string) => abono ? (isDark ? 'text-red-400' : 'text-red-500') : slate;
                                         return (
-                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${redRow ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
-                                            <td className={`px-4 py-2.5 font-mono font-bold text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>{o.matricula || '—'}</td>
-                                            <td className="px-4 py-2.5">{o.pieza || '—'}</td>
-                                            <td className={`px-4 py-2.5 font-mono text-xs ${isDark ? 'text-slate-300' : 'text-slate-600'}`}>{o.referencia || '—'}</td>
-                                            <td className="px-4 py-2.5 font-semibold">{o.proveedor || '—'}</td>
-                                            <td className={`px-4 py-2.5 font-mono text-xs ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{fmtDate(o.orderedAt)}</td>
+                                        <tr key={`${o.kind}-${o.id}`} className={`border-t ${isDark ? 'border-white/5' : 'border-slate-100'} ${abono ? (isDark ? 'bg-red-500/5' : 'bg-red-50') : ''}`}>
+                                            <td className={`px-4 py-2.5 font-mono font-bold text-xs ${txt(isDark ? 'text-slate-200' : 'text-slate-800')}`}>{o.matricula || '—'}</td>
+                                            <td className={`px-4 py-2.5 ${abono ? (isDark ? 'text-red-400' : 'text-red-500') : ''}`}>{o.pieza || '—'}</td>
+                                            <td className={`px-4 py-2.5 font-mono text-xs ${txt(isDark ? 'text-slate-300' : 'text-slate-600')}`}>{o.referencia || '—'}</td>
+                                            <td className={`px-4 py-2.5 font-semibold ${abono ? (isDark ? 'text-red-400' : 'text-red-500') : ''}`}>{o.proveedor || '—'}</td>
+                                            <td className={`px-4 py-2.5 font-mono text-xs ${txt(isDark ? 'text-slate-400' : 'text-slate-500')}`}>{fmtDate(o.orderedAt)}</td>
                                             <td className="px-4 py-2.5">
                                                 {hasEta(o) ? (
                                                     <button onClick={() => openEtaModal(o)} title="Cambiar el plazo prometido"
