@@ -757,30 +757,166 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         );
     };
 
+    // ===== MÓVIL: tarjetas en vez de tabla =====
+    // La tabla (10 columnas, 960px) solo se ve en PC (md:). En el móvil cada
+    // pieza es una tarjeta y cada pedido de un PDF, una tarjeta desplegable.
+    // Mismas acciones y mismos datos que las filas; solo cambia la forma.
+    const mobileBtn = (extra: string) =>
+        `text-xs font-bold px-3 py-2.5 rounded-lg border transition whitespace-nowrap inline-flex items-center justify-center gap-1.5 ${extra}`;
+    const mobileNeutral = isDark ? 'border-white/10 text-slate-300 active:bg-white/5' : 'border-slate-200 text-slate-600 active:bg-slate-100';
+    const mobileDoneBtn = isDark ? 'border-dashed border-amber-500/50 text-amber-400 active:bg-amber-500/10' : 'border-dashed border-amber-400 text-amber-600 active:bg-amber-50';
+    const mobileTrash = (onClick: () => void, title: string) => (
+        <button onClick={onClick} title={title} aria-label={title}
+            className={`p-2.5 rounded-lg border flex-shrink-0 ${isDark ? 'border-white/10 text-slate-400 active:text-red-400 active:bg-red-500/10' : 'border-slate-200 text-slate-400 active:text-red-600 active:bg-red-50'}`}>
+            <Trash2 className="w-4 h-4" />
+        </button>
+    );
+    const mobilePlazo = (o: PartOrder) => hasEta(o)
+        ? plazoButton(() => openEtaModal(o), 'Cambiar el plazo prometido', `${o.etaDays} ${o.etaDays === 1 ? 'día' : 'días'}`, 'set')
+        : o.noEta
+            ? plazoButton(() => openEtaModal(o), 'Cambiar a un plazo o quitar', 'Sin fecha', 'none')
+            : plazoButton(() => openEtaModal(o), 'Fijar el plazo prometido por el proveedor', <><Clock className="w-3 h-3" /> plazo</>, 'empty');
+
+    const renderOrderCard = (o: PartOrder, inGroup?: { matricula: string }) => {
+        const abono = o.kind === 'abono';
+        const red = abono ? (isDark ? 'text-red-400' : 'text-red-500') : '';
+        const showPlate = inGroup ? !!o.matricula && o.matricula !== inGroup.matricula : true;
+        const sub = [inGroup ? '' : o.proveedor, inGroup ? '' : fmtDate(o.orderedAt)].filter(Boolean).join(' · ');
+        return (
+            <div key={`card-${o.kind}-${o.id}`}
+                className={`rounded-xl border p-3 ${isDark ? 'border-white/5 bg-slate-900/50' : 'border-slate-200 bg-white'} ${inGroup ? (isDark ? 'border-l-2 border-l-emerald-500/60' : 'border-l-2 border-l-emerald-400') : ''}`}>
+                <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                        {showPlate && (
+                            <p className={`font-mono font-bold text-xs ${red || (isDark ? 'text-slate-200' : 'text-slate-800')}`}>{o.matricula || '—'}</p>
+                        )}
+                        <p className={`font-semibold text-sm break-words ${red}`}>{o.pieza || '—'}</p>
+                        {o.referencia && (
+                            <p className={`font-mono text-xs break-all ${red || (isDark ? 'text-slate-400' : 'text-slate-500')}`}>{o.referencia}</p>
+                        )}
+                    </div>
+                    <button onClick={() => openQtyModal(o)} title="Cambiar la cantidad"
+                        className={`flex-shrink-0 text-xs font-bold px-2.5 py-1.5 rounded-lg border ${o.cantidad != null
+                            ? (red || (isDark ? 'text-slate-200' : 'text-slate-700')) + (isDark ? ' border-white/10' : ' border-slate-200')
+                            : (isDark ? 'text-slate-500 border-dashed border-white/10' : 'text-slate-400 border-dashed border-slate-300')}`}>
+                        {o.cantidad != null ? `× ${fmtQty(o.cantidad)}` : 'Ctd. —'}
+                    </button>
+                </div>
+                {sub && <p className={`text-xs mt-1 ${red || (isDark ? 'text-slate-400' : 'text-slate-500')}`}>{sub}</p>}
+                <div className="flex items-center flex-wrap gap-2 mt-2.5">
+                    {chipFor(o)}
+                    {mobilePlazo(o)}
+                </div>
+                <div className="flex items-center gap-2 mt-3">
+                    {o.arrived ? (
+                        <button onClick={() => markArrived(o, false)} title={`Pulsar para deshacer el estado "${doneNoun(o.kind)}"`}
+                            className={mobileBtn(`flex-1 text-green-600 ${isDark ? 'border-green-500/30' : 'border-green-200'}`)}>
+                            <PackageCheck className="w-4 h-4" /> {doneNoun(o.kind)} {fmtDate(o.arrivedAt)}
+                        </button>
+                    ) : (
+                        <button onClick={() => markArrived(o, true)} className={mobileBtn(`flex-1 ${mobileDoneBtn}`)}>
+                            {doneVerb(o.kind)}
+                        </button>
+                    )}
+                    {mobileTrash(() => removeOrder(o), `Borrar ${kindNoun(o.kind)}`)}
+                </div>
+            </div>
+        );
+    };
+
+    const renderGroupCard = (g: { id: string; items: PartOrder[] }) => {
+        const list = g.items;
+        const open = isOpen(g.id);
+        const plates = Array.from(new Set(list.map(o => o.matricula).filter(Boolean)));
+        const groupMatricula = plates.length === 1 ? plates[0] : '';
+        const pending = list.filter(o => !o.arrived);
+        const arrivedCount = list.length - pending.length;
+        const worst = list.reduce((w, o) => (statusSeverity(o) < statusSeverity(w) ? o : w), list[0]);
+        const lastArrival = list.map(o => o.arrivedAt).filter(Boolean).sort().pop() || '';
+        const etaValues = new Set(etaPoolOf(list).map(o => o.noEta ? 'none' : (hasEta(o) ? String(o.etaDays) : '')));
+        const etaValue = etaValues.size === 1 ? [...etaValues][0] : 'mixed';
+        const preview = list.slice(0, 2).map(o => o.pieza || o.referencia).filter(Boolean).join(', ') + (list.length > 2 ? '…' : '');
+        const plazoTitle = 'Poner el mismo plazo a todas las piezas que faltan por recibir';
+        const sub = [list[0].proveedor, fmtDate(list[0].orderedAt)].filter(Boolean).join(' · ');
+        return (
+            <div key={`gcard-${g.id}`}>
+                <div className={`rounded-xl border ${list.some(isOverdue)
+                    ? (isDark ? 'border-red-500/30 bg-red-500/10' : 'border-red-200 bg-red-50')
+                    : (isDark ? 'border-white/5 bg-slate-800/40' : 'border-slate-200 bg-slate-100/70')}`}>
+                    <button type="button" aria-expanded={open} onClick={() => toggleGroup(g.id)}
+                        className="w-full text-left p-3 flex items-start gap-2">
+                        {open ? <ChevronDown className="w-5 h-5 mt-0.5 flex-shrink-0 text-slate-400" /> : <ChevronRight className="w-5 h-5 mt-0.5 flex-shrink-0 text-slate-400" />}
+                        <div className="min-w-0 flex-1">
+                            <p className={`font-mono font-bold text-xs ${isDark ? 'text-slate-200' : 'text-slate-800'}`}>
+                                {groupMatricula || (plates.length > 1 ? 'Varias matrículas' : '—')}
+                            </p>
+                            <p className="font-bold text-sm flex items-center gap-1.5">
+                                <FileText className="w-4 h-4 text-emerald-500 flex-shrink-0" /> Pedido · {list.length} piezas
+                            </p>
+                            {sub && <p className={`text-xs mt-0.5 ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{sub}</p>}
+                            {!open && preview && <p className={`text-xs mt-0.5 truncate ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>{preview}</p>}
+                            <div className="flex items-center gap-2 mt-2">
+                                {chipFor(worst)}
+                                <span className={`text-[11px] font-bold whitespace-nowrap ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>{arrivedCount}/{list.length} recibidas</span>
+                            </div>
+                        </div>
+                    </button>
+                    <div className="px-3 pb-3 flex items-center gap-2 flex-wrap">
+                        {etaValue === 'mixed'
+                            ? plazoButton(() => openGroupEtaModal(list), plazoTitle, 'Plazo: varios', 'none')
+                            : etaValue === 'none'
+                                ? plazoButton(() => openGroupEtaModal(list), plazoTitle, 'Sin fecha', 'none')
+                                : etaValue === ''
+                                    ? plazoButton(() => openGroupEtaModal(list), plazoTitle, <><Clock className="w-3 h-3" /> plazo</>, 'empty')
+                                    : plazoButton(() => openGroupEtaModal(list), plazoTitle, `${etaValue} ${etaValue === '1' ? 'día' : 'días'}`, 'set')}
+                        <div className="flex items-center gap-2 ml-auto">
+                            {pending.length > 0 ? (
+                                <button onClick={() => markGroupArrived(list)} title={`Marcar como recibidas las ${pending.length} piezas que faltan`}
+                                    className={mobileBtn(mobileDoneBtn)}>
+                                    Marcar todo
+                                </button>
+                            ) : (
+                                <span className="text-xs font-bold text-green-600 inline-flex items-center gap-1">
+                                    <PackageCheck className="w-4 h-4" /> {fmtDate(lastArrival)}
+                                </span>
+                            )}
+                            {mobileTrash(() => removeGroup(list), 'Borrar el pedido completo')}
+                        </div>
+                    </div>
+                </div>
+                {open && (
+                    <div className="mt-2 ml-3 flex flex-col gap-2">
+                        {list.map(o => renderOrderCard(o, { matricula: groupMatricula }))}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     return (
         <div className={`h-full w-full flex flex-col ${isDark ? 'bg-slate-950 text-slate-100' : 'bg-slate-50 text-slate-900'}`}>
             {/* ===== Header ===== */}
-            <div className={`px-6 py-4 border-b flex items-center justify-between flex-shrink-0 gap-3 flex-wrap ${isDark ? 'border-white/5 bg-slate-900/40' : 'border-slate-200 bg-white'}`}>
+            <div className={`px-4 py-3 md:px-6 md:py-4 border-b flex items-center justify-between flex-shrink-0 gap-3 flex-wrap ${isDark ? 'border-white/5 bg-slate-900/40' : 'border-slate-200 bg-white'}`}>
                 <div className="flex items-center gap-3">
                     {onBack && (
                         <button onClick={onBack} className={`p-2 rounded-lg ${isDark ? 'hover:bg-white/5 text-slate-400' : 'hover:bg-slate-100 text-slate-600'}`} title="Volver">
                             <ArrowLeft className="w-5 h-5" />
                         </button>
                     )}
-                    <div className="p-2.5 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
+                    <div className="hidden md:block p-2.5 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
                         <Package className="w-5 h-5 text-white" />
                     </div>
                     <div>
-                        <h1 className={`text-xl font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>Pedidos de Piezas</h1>
-                        <p className={`text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Seguimiento de pedidos y abonos a proveedores · Recambios</p>
+                        <h1 className={`text-base md:text-xl font-bold ${isDark ? 'text-slate-100' : 'text-slate-900'}`}>Pedidos de Piezas</h1>
+                        <p className={`hidden md:block text-xs ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>Seguimiento de pedidos y abonos a proveedores · Recambios</p>
                     </div>
                     {refreshing && <RefreshCw className="w-4 h-4 animate-spin text-slate-400" />}
                 </div>
                 <div className="flex items-center gap-2 flex-wrap">
-                    <button onClick={downloadExcel} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border text-sm font-semibold transition ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
-                        <Download className="w-4 h-4" /> Descargar Excel
+                    <button onClick={downloadExcel} aria-label="Descargar Excel" title="Descargar Excel" className={`flex items-center gap-2 px-3 md:px-4 py-2.5 rounded-xl border text-sm font-semibold transition ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
+                        <Download className="w-4 h-4" /> <span className="hidden md:inline">Descargar Excel</span>
                     </button>
-                    <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:shadow-lg hover:shadow-emerald-500/30 text-white font-semibold transition active:scale-[0.98]">
+                    <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 md:px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:shadow-lg hover:shadow-emerald-500/30 text-white font-semibold transition active:scale-[0.98]">
                         <Plus className="w-4 h-4" /> Añadir {kindNoun(addKind)}
                     </button>
                 </div>
@@ -798,13 +934,13 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             )}
 
             {/* ===== Tarjetas resumen ===== */}
-            <div className="px-6 pt-4 grid grid-cols-3 gap-3 flex-shrink-0">
+            <div className="px-4 md:px-6 pt-3 md:pt-4 grid grid-cols-3 gap-2 md:gap-3 flex-shrink-0">
                 {[
                     { label: 'Pendientes', value: stats.pending, cls: 'text-amber-500' },
                     { label: 'Vencidos · reclamar', value: stats.late, cls: 'text-red-500' },
                     { label: 'Completados', value: stats.done, cls: 'text-green-600' },
                 ].map(s => (
-                    <div key={s.label} className={`p-3 rounded-xl border ${isDark ? 'border-white/5 bg-slate-900/40' : 'border-slate-200 bg-white'}`}>
+                    <div key={s.label} className={`p-2.5 md:p-3 rounded-xl border ${isDark ? 'border-white/5 bg-slate-900/40' : 'border-slate-200 bg-white'}`}>
                         <p className={`text-[10px] font-bold uppercase tracking-wide ${isDark ? 'text-slate-500' : 'text-slate-500'}`}>{s.label}</p>
                         <p className={`text-2xl font-black ${s.cls}`}>{s.value}</p>
                     </div>
@@ -812,18 +948,18 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             </div>
 
             {/* ===== Filtros ===== */}
-            <div className="px-6 pt-4 pb-2 flex items-center gap-2 flex-wrap flex-shrink-0">
-                <div className="relative flex-1 min-w-[200px] max-w-sm">
+            <div className="px-4 md:px-6 pt-3 md:pt-4 pb-2 flex items-center gap-2 flex-wrap flex-shrink-0">
+                <div className="relative flex-1 max-md:basis-full min-w-[200px] max-w-sm">
                     <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                     <input
                         value={search} onChange={e => changeSearch(e.target.value)}
                         placeholder="Buscar matrícula, pieza, referencia…"
-                        className={`w-full pl-9 pr-3 py-2 rounded-lg text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 placeholder-slate-500' : 'bg-white border-slate-200 text-slate-800'}`}
+                        className={`w-full pl-9 pr-3 py-2 rounded-lg max-md:text-base md:text-sm border focus:outline-none focus:ring-2 focus:ring-emerald-500/30 ${isDark ? 'bg-slate-800/50 border-white/10 text-slate-200 placeholder-slate-500' : 'bg-white border-slate-200 text-slate-800'}`}
                     />
                 </div>
                 {([['pending', 'Pendientes'], ['arrived', 'Recibidos'], ['abonos', 'Abonos']] as const).map(([key, label]) => (
                     <button key={key} onClick={() => setFilter(key)}
-                        className={`px-3 py-1.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 ${filter === key
+                        className={`px-3 py-1.5 max-md:flex-1 max-md:justify-center max-md:py-2.5 rounded-lg text-xs font-bold transition inline-flex items-center gap-1.5 ${filter === key
                             ? 'bg-emerald-600 text-white shadow-sm'
                             : (isDark ? 'text-slate-400 hover:text-slate-200 border border-white/10' : 'text-slate-500 hover:text-slate-700 border border-slate-200 bg-white')}`}>
                         {key === 'abonos' && <RotateCcw className="w-3.5 h-3.5" />}
@@ -833,7 +969,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             </div>
 
             {/* ===== Tabla ===== */}
-            <div className="flex-1 overflow-y-auto px-6 pb-6 pt-2">
+            <div className="flex-1 overflow-y-auto px-4 md:px-6 pb-6 pt-2">
                 {loading ? (
                     <div className="flex items-center justify-center py-16"><Loader2 className="w-6 h-6 animate-spin text-slate-400" /></div>
                 ) : rows.length === 0 ? (
@@ -841,8 +977,13 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                         <Package className="w-10 h-10 mx-auto mb-3 opacity-40" />
                         {items.length === 0 ? 'Todavía no hay nada. Añade el primero con el botón verde.' : 'Ningún registro coincide con el filtro.'}
                     </div>
-                ) : (
-                    <div className={`rounded-xl border overflow-hidden ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
+                ) : (<>
+                    {/* Móvil: tarjetas */}
+                    <div className="md:hidden flex flex-col gap-2.5">
+                        {rows.map(r => r.type === 'single' ? renderOrderCard(r.order) : renderGroupCard(r))}
+                    </div>
+                    {/* PC: tabla */}
+                    <div className={`hidden md:block rounded-xl border overflow-hidden ${isDark ? 'border-white/5' : 'border-slate-200'}`}>
                         <div className="overflow-x-auto">
                             <table className="w-full text-sm min-w-[960px]">
                                 <thead className={`text-xs uppercase ${isDark ? 'bg-slate-800/60 text-slate-400' : 'bg-slate-100 text-slate-600'}`}>
@@ -866,14 +1007,14 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                             </table>
                         </div>
                     </div>
-                )}
+                </>)}
             </div>
 
             {/* ===== Modal: añadir a mano ===== */}
             {showAdd && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setShowAdd(false)}>
                     <div onClick={e => e.stopPropagation()}
-                        className={`w-full max-w-md flex flex-col rounded-2xl shadow-2xl ${isDark ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}`}>
+                        className={`w-full max-w-md max-md:max-h-[90vh] max-md:overflow-y-auto flex flex-col rounded-2xl shadow-2xl ${isDark ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}`}>
                         <div className={`flex items-center justify-between px-6 py-4 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                             <div className="flex items-center gap-3">
                                 <div className="p-2 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
