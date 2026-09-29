@@ -15,6 +15,14 @@ const tourConfig = {
     popoverClass: 'driverjs-theme',
 };
 
+// Si el elemento del paso se ve en esta pantalla. El diseño de móvil y el de
+// PC esconden partes distintas (display:none), y un paso sobre algo oculto
+// saldría flotando en una esquina.
+const isVisible = (selector: string) => {
+    const el = document.querySelector(selector);
+    return !!el && el.getClientRects().length > 0;
+};
+
 // ============================================
 // MAIN SIDEBAR TOUR (First time experience)
 // ============================================
@@ -41,6 +49,13 @@ export const startProductTour = (onComplete?: () => void) => {
                 }
             },
             {
+                element: '#tour-line-chips',
+                popover: {
+                    title: 'Tus Líneas',
+                    description: 'Toca una línea de WhatsApp para ver solo sus chats, o «Todas las líneas» para verlos todos.'
+                }
+            },
+            {
                 element: '#tour-filters',
                 popover: {
                     title: 'Filtros Potentes',
@@ -52,6 +67,20 @@ export const startProductTour = (onComplete?: () => void) => {
                 popover: {
                     title: 'Bandeja de Entrada',
                     description: 'Tus chats activos aparecen aquí. Los nuevos leads y mensajes urgentes se resaltarán automáticamente.'
+                }
+            },
+            {
+                element: '#tour-mobile-nav',
+                popover: {
+                    title: 'Chats y Equipo',
+                    description: 'Abajo cambias entre los chats con clientes y el chat interno con tus compañeros.'
+                }
+            },
+            {
+                element: '#tour-mobile-menu',
+                popover: {
+                    title: 'Más Opciones',
+                    description: 'En los tres puntos tienes los Ajustes y el botón para cerrar sesión.'
                 }
             },
             {
@@ -75,7 +104,7 @@ export const startProductTour = (onComplete?: () => void) => {
                     description: 'Accede al calendario para gestionar citas y recordatorios sin salir de la app.'
                 }
             }
-        ]
+        ].filter(step => isVisible(step.element))
     });
 
     driverObj.drive();

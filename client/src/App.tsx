@@ -5,7 +5,7 @@ import { CompanyLogin } from './components/CompanyLogin';
 import { ChatWindow } from './components/ChatWindow';
 import { Sidebar, Contact } from './components/Sidebar';
 import { Settings } from './components/Settings';
-import { MessageCircle, LogOut, Settings as SettingsIcon, WifiOff, ArrowLeft, Building2, Search } from 'lucide-react';
+import { MessageCircle, LogOut, Settings as SettingsIcon, WifiOff, ArrowLeft, Building2, Search, MoreVertical } from 'lucide-react';
 import ChatTemplateSelector from './components/ChatTemplateSelector';
 // @ts-ignore
 import CalendarDashboard from './components/CalendarDashboard';
@@ -25,6 +25,7 @@ import { AlertCenter } from './components/AlertCenter';
 import { AppointmentToast, AppointmentNotification } from './components/AppointmentToast';
 import { HumanAttentionToast, HumanAttentionNotification } from './components/HumanAttentionToast';
 import GlobalSearch from './components/GlobalSearch';
+import { useIsMobile } from './utils/useIsMobile';
 
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
@@ -115,6 +116,11 @@ function App() {
     // TEAM CHAT STATE
     const [teamChannel, setTeamChannel] = useState('general');
     const [mobileTeamChatActive, setMobileTeamChatActive] = useState(false); // Controls if mobile user is in a specific channel chat
+
+    // MÓVIL (APK y navegador): pantalla tipo WhatsApp. Lo que en PC va en el pie
+    // de la barra lateral (ajustes, cerrar sesión) sale en el menú ⋮ de arriba.
+    const isMobile = useIsMobile();
+    const [mobileMenu, setMobileMenu] = useState<{ top: number; right: number } | null>(null);
 
     const [isConnected, setIsConnected] = useState(false);
     const [showTemplates, setShowTemplates] = useState(false);
@@ -751,7 +757,8 @@ function App() {
         if (!Capacitor.isNativePlatform()) return;
 
         const backButtonListener = CapacitorApp.addListener('backButton', () => {
-            // Menú "Fijar chat" abierto en la lista: atrás solo lo cierra.
+            // Menú ⋮ o "Fijar chat" abiertos: atrás solo los cierra.
+            if (mobileMenu) { setMobileMenu(null); return; }
             if (document.querySelector('[data-pin-chat-menu]')) { window.dispatchEvent(new Event('chatgorithm:close-pin-menu')); return; }
             if (view === 'settings') { setView('chat'); return; }
             if (view === 'calendar') { setView('chat'); return; }
@@ -766,7 +773,7 @@ function App() {
         return () => {
             backButtonListener.then(l => l.remove());
         };
-    }, [view, selectedContact, mobileTeamChatActive]);
+    }, [view, selectedContact, mobileTeamChatActive, mobileMenu]);
 
     // ========================
     // RENDER FLOW
@@ -950,12 +957,12 @@ function App() {
                 </div>
 
                 {/* SIDEBAR */}
-                <div className={`w-full md:w-80 flex-shrink-0 flex flex-col border-r h-full ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) ? 'hidden md:flex' : 'flex'} ${isDark
+                <div className={`w-full md:w-80 flex-shrink-0 flex flex-col border-r h-full ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && isMobile) ? 'hidden md:flex' : 'flex'} ${isDark
                     ? 'border-white/5 bg-slate-900/30 backdrop-blur-md'
                     : 'border-slate-200 bg-slate-50'}`}>
 
                     {/* Company indicator */}
-                    <div className={`px-5 pb-4 safe-pt-header flex items-center gap-3 border-b backdrop-blur-sm ${isDark ? 'border-white/5 bg-white/5' : 'border-slate-200 bg-white'}`} id="tour-company-info">
+                    <div className={`px-5 pb-3 md:pb-4 safe-pt-header flex items-center gap-3 border-b backdrop-blur-sm ${isDark ? 'border-white/5 bg-white/5' : 'border-slate-200 bg-white'}`} id="tour-company-info">
                         {companyConfig.logoUrl ? (
                             <img
                                 src={companyConfig.logoUrl}
@@ -968,7 +975,24 @@ function App() {
                                 <Building2 className="w-4 h-4 text-white" />
                             </div>
                         )}
-                        <span className={`font-semibold text-sm tracking-wide ${isDark ? 'text-slate-100' : 'text-slate-700'}`}>{companyConfig.companyName}</span>
+                        <span className={`font-semibold text-sm tracking-wide truncate min-w-0 ${isDark ? 'text-slate-100' : 'text-slate-700'}`}>{companyConfig.companyName}</span>
+
+                        {/* Móvil: en PC esto va en el pie de la barra lateral. */}
+                        <div className="md:hidden ml-auto flex items-center gap-2 flex-shrink-0">
+                            {!isConnected && <span className="text-[10px] text-red-500 animate-pulse font-bold whitespace-nowrap">● Sin conexión</span>}
+                            <button
+                                id="tour-mobile-menu"
+                                onClick={(e) => {
+                                    const r = e.currentTarget.getBoundingClientRect();
+                                    setMobileMenu({ top: r.bottom + 6, right: Math.max(8, window.innerWidth - r.right) });
+                                }}
+                                className={`p-2 -mr-2 rounded-full transition-colors ${isDark ? 'text-slate-300 active:bg-white/10' : 'text-slate-600 active:bg-slate-100'}`}
+                                aria-label="Más opciones"
+                                title="Más opciones"
+                            >
+                                <MoreVertical className="w-5 h-5" />
+                            </button>
+                        </div>
                     </div>
 
                     {/* Sidebar content */}
@@ -978,8 +1002,16 @@ function App() {
                             onSelectContact={(c) => { setSelectedContact(c); setView('chat'); }}
                             selectedContactId={selectedContact?.id}
                             isConnected={isConnected} onlineUsers={onlineUsers} typingStatus={typingStatus}
-                            setView={setView}
+                            setView={(v) => {
+                                // Al entrar en Equipo, el móvil empieza en la lista de canales
+                                // (no dentro del último canal abierto).
+                                if (v === 'team_chat') setMobileTeamChatActive(false);
+                                setView(v);
+                            }}
                             currentView={view}
+                            // Canal de equipo a la vista: en PC siempre que se está en Equipo;
+                            // en móvil solo con un canal abierto (si no, se ve la lista).
+                            teamChannelOpen={view === 'team_chat' && (!isMobile || mobileTeamChatActive)}
                             selectedAccountId={selectedAccountId}
                             onSelectAccount={setSelectedAccountId}
                             teamChannel={teamChannel}
@@ -991,8 +1023,8 @@ function App() {
                         />
                     </div>
 
-                    {/* Footer */}
-                    <div className={`p-4 border-t flex gap-3 z-20 items-center justify-between ${isDark ? 'border-white/5 bg-black/20 backdrop-blur-md' : 'border-slate-200 bg-slate-100'}`}>
+                    {/* Footer (solo PC; en móvil ajustes y cerrar sesión van en el menú ⋮) */}
+                    <div className={`p-4 border-t hidden md:flex gap-3 z-20 items-center justify-between ${isDark ? 'border-white/5 bg-black/20 backdrop-blur-md' : 'border-slate-200 bg-slate-100'}`}>
                         <button id="tour-settings-btn" onClick={() => setView('settings')} className={`p-2.5 rounded-xl transition-all ${isDark ? 'text-slate-400 hover:text-white hover:bg-white/10' : 'text-slate-500 hover:text-slate-700 hover:bg-slate-200'}`} title="Configuración">
                             <SettingsIcon className="w-5 h-5" />
                         </button>
@@ -1016,7 +1048,7 @@ function App() {
                 </div>
 
                 {/* MAIN AREA */}
-                <main className={`flex-1 flex-col min-w-0 relative ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && window.innerWidth < 768) || (view === 'team_chat' && window.innerWidth >= 768) ? 'flex' : 'hidden md:flex'} ${isDark ? 'bg-slate-900/20 backdrop-blur-sm' : 'bg-white'}`}>
+                <main className={`flex-1 flex-col min-w-0 relative ${selectedContact || (view === 'team_chat' && mobileTeamChatActive && isMobile) || (view === 'team_chat' && !isMobile) ? 'flex' : 'hidden md:flex'} ${isDark ? 'bg-slate-900/20 backdrop-blur-sm' : 'bg-white'}`}>
                     <div className="flex-1 overflow-hidden relative flex flex-col h-full">
                         {!isConnected && <div className="absolute top-0 left-0 right-0 bg-red-500/90 backdrop-blur-sm text-white text-xs text-center z-50 flex items-center justify-center gap-2 font-bold shadow-lg safe-pt-2 pb-2"><div className="w-4 h-4 flex items-center justify-center"><WifiOff className="w-3 h-3" /></div><span>Sin conexión con el servidor.</span></div>}
 
@@ -1073,6 +1105,41 @@ function App() {
             {/* Toast de nuevas citas (Laura y manual). Al pinchar abre el calendario en el día. */}
             {appointmentToastNode}
             {globalSearchNode}
+
+            {/* Menú ⋮ del móvil. Va aquí fuera y no junto al botón: los contenedores
+                de la barra lateral usan backdrop-blur, que rompe el position:fixed. */}
+            {mobileMenu && (
+                <div className="md:hidden fixed inset-0 z-[150]" onClick={() => setMobileMenu(null)}>
+                    <div
+                        role="menu"
+                        style={{ top: mobileMenu.top, right: mobileMenu.right }}
+                        onClick={(e) => e.stopPropagation()}
+                        className={`absolute min-w-[210px] p-1 rounded-xl border shadow-xl animate-in fade-in zoom-in-95 duration-100 ${isDark ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}
+                    >
+                        <div className={`flex items-center gap-2 px-3 py-2 text-xs font-bold truncate ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                            <span className={`w-2 h-2 rounded-full flex-shrink-0 ${isConnected ? 'bg-green-500' : 'bg-red-500 animate-pulse'}`}></span>
+                            <span className="truncate">{user.username}</span>
+                        </div>
+                        <div className={`h-px my-1 ${isDark ? 'bg-slate-700' : 'bg-slate-100'}`}></div>
+                        <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => { setMobileMenu(null); setView('settings'); }}
+                            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-left transition ${isDark ? 'text-slate-200 active:bg-white/10' : 'text-slate-700 active:bg-slate-100'}`}
+                        >
+                            <SettingsIcon className="w-4 h-4" /> Ajustes
+                        </button>
+                        <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => { setMobileMenu(null); handleLogout(); }}
+                            className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-left transition ${isDark ? 'text-red-400 active:bg-red-500/10' : 'text-red-600 active:bg-red-50'}`}
+                        >
+                            <LogOut className="w-4 h-4" /> Cerrar sesión
+                        </button>
+                    </div>
+                </div>
+            )}
 
             {/* THEME SELECTION - STRICT BLOCKING */}
             {showThemeModal && (

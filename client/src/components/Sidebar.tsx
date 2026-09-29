@@ -12,6 +12,7 @@ import { useTheme } from '../context/ThemeContext';
 import { useToast } from '../context/ToastContext';
 import { colorForAccount, nameForAccount } from '../utils/accountColors';
 import { normalizeForSearch } from '../utils/searchNormalize';
+import { useIsMobile } from '../utils/useIsMobile';
 
 export interface Contact {
     id: string;
@@ -59,6 +60,9 @@ interface SidebarProps {
     // Nuevas props para el Chat de Equipo integrado
     teamChannel?: string;
     setTeamChannel?: (channel: string) => void;
+    // Si el canal `teamChannel` se está viendo ahora mismo. En móvil, en Equipo
+    // se puede estar en la lista de canales sin ninguno abierto.
+    teamChannelOpen?: boolean;
 
     // Chats fijados de este trabajador (ids de Contacts, el último fijado primero).
     pinnedChats?: string[];
@@ -136,11 +140,16 @@ export function Sidebar({
     onSelectAccount,
     teamChannel,
     setTeamChannel,
+    teamChannelOpen,
     pinnedChats
 }: SidebarProps) {
 
     const { theme } = useTheme();
     const isDark = theme === 'dark';
+    // En móvil la bandeja va al estilo WhatsApp: sin filtros avanzados, sin los
+    // botones de agenda/campañas/pedidos/llamar/contactos y con pestañas abajo.
+    const isMobile = useIsMobile();
+    const isTeamChannelOpen = teamChannelOpen ?? currentView === 'team_chat';
 
     // State for initial load
     const [isLoadingContacts, setIsLoadingContacts] = useState(true);
@@ -416,25 +425,26 @@ export function Sidebar({
             const key = getDisplayKey(msg.channel);
             if (!key) return;
             // Si justo estoy mirando ese canal, no marco como no leído.
-            if (currentView === 'team_chat' && teamChannel === key) return;
+            if (isTeamChannelOpen && teamChannel === key) return;
             setTeamUnread(prev => ({ ...prev, [key]: (prev[key] || 0) + 1 }));
         };
         socket.on('team_message', handleTeamMessage);
         return () => { socket.off('team_message', handleTeamMessage); };
-    }, [socket, user?.username, currentView, teamChannel]);
+    }, [socket, user?.username, isTeamChannelOpen, teamChannel]);
 
     // Al entrar a un canal de equipo, limpia su contador. Cubre tanto la
     // navegación dentro de team_chat como la primera entrada (teamChannel
-    // arranca en 'general' por defecto desde App.tsx).
+    // arranca en 'general' por defecto desde App.tsx). En móvil espera a que
+    // se abra el canal: estar en la lista de canales no lo da por leído.
     useEffect(() => {
-        if (currentView !== 'team_chat' || !teamChannel) return;
+        if (!isTeamChannelOpen || !teamChannel) return;
         setTeamUnread(prev => {
             if (!prev[teamChannel]) return prev;
             const n = { ...prev };
             delete n[teamChannel];
             return n;
         });
-    }, [currentView, teamChannel]);
+    }, [isTeamChannelOpen, teamChannel]);
 
     // ─── CHATS FIJADOS ───────────────────────────────────────────────────────
     // Solo las respuestas a peticiones de este dispositivo (por opId) cierran la
@@ -679,6 +689,9 @@ export function Sidebar({
         if (!matchesSearch) return false;
         if (viewScope === 'mine' && c.assigned_to !== user.username) return false;
         if (viewScope === 'attention' && !c.attention_pending) return false;
+        // En móvil no hay filtros avanzados: si venían puestos (ventana de PC
+        // estrechada), no se aplican, porque no se verían para quitarlos.
+        if (isMobile) return true;
         if (activeFilters.department && c.department !== activeFilters.department) return false;
         if (activeFilters.status && c.status !== activeFilters.status) return false;
         if (activeFilters.agent && c.assigned_to !== activeFilters.agent) return false;
@@ -693,7 +706,7 @@ export function Sidebar({
     // que los ordenamos alfabéticamente por nombre para que sean fáciles de
     // localizar (en el resto de vistas mantenemos el orden del servidor por
     // recencia de mensaje).
-    if (onlyNoConv) {
+    if (onlyNoConv && !isMobile) {
         filteredContacts.sort((a, b) =>
             normalizeForSearch(a.name).localeCompare(normalizeForSearch(b.name))
         );
@@ -718,7 +731,17 @@ export function Sidebar({
         setActiveFilters(prev => ({ ...prev, [key]: value }));
     };
 
-    const hasActiveFilters = Object.values(activeFilters).some(v => v !== '') || onlyNoConv;
+    const hasActiveFilters = !isMobile && (Object.values(activeFilters).some(v => v !== '') || onlyNoConv);
+
+    // Contadores de las pestañas de abajo (móvil). Chats: nº de chats con
+    // mensajes sin leer en la línea elegida (como el badge de Atención).
+    // Equipo: mensajes sin leer del chat interno.
+    const unreadChatsCount = contacts.filter(c => {
+        if ((unreadCounts[normalizePhone(c.phone)] || 0) === 0) return false;
+        if (selectedAccountId && c.origin_phone_id && c.origin_phone_id !== selectedAccountId) return false;
+        return true;
+    }).length;
+    const teamUnreadTotal = Object.values(teamUnread).reduce((sum, n) => sum + n, 0);
 
     const handleLineChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
         const val = e.target.value;
@@ -737,11 +760,14 @@ export function Sidebar({
             }`}>
 
             {/* HEADER */}
-            <div className={`p-4 border-b shrink-0 ${isDark
+            <div className={`p-3 md:p-4 border-b shrink-0 ${isDark
                 ? 'border-white/5 bg-slate-900/40 backdrop-blur-md'
                 : 'border-gray-200 bg-white'
                 }`}>
-                <div className="mb-4">
+                {/* Selector de línea + llamar / nuevo contacto / importar: solo PC.
+                    En móvil las líneas van como botones (abajo) y el chat interno
+                    en la pestaña Equipo. */}
+                <div className="mb-4 hidden md:block">
                     <label className={`text-[10px] font-bold uppercase tracking-wide mb-1 block ${isDark
                         ? 'text-slate-500'
                         : 'text-slate-400'
@@ -806,19 +832,44 @@ export function Sidebar({
                 {/* CASO 2: ESTAMOS EN CHATS DE CLIENTES (Muestra Filtros) */}
                 {currentView !== 'team_chat' && (
                     <>
-                        <h2 className={`text-xs font-bold uppercase tracking-wider mb-3 flex justify-between items-center ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                        <h2 className={`text-xs font-bold uppercase tracking-wider mb-3 hidden md:flex justify-between items-center ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
                             Bandeja de Entrada
                             {!isConnected && <span className="text-[10px] text-red-500 animate-pulse font-bold flex items-center gap-1">● Sin conexión</span>}
                         </h2>
 
+                        {/* MÓVIL: líneas como botones. Con una sola línea no aportan nada. */}
+                        {accounts.length > 1 && (
+                            <div id="tour-line-chips" className="md:hidden flex gap-2 overflow-x-auto -mx-3 px-3 mb-3 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+                                {[{ id: '', name: 'Todas las líneas' }, ...accounts].map(acc => {
+                                    const isActive = (selectedAccountId || '') === acc.id;
+                                    const dotHex = acc.id ? colorForAccount(acc.id).hex : null;
+                                    return (
+                                        <button
+                                            key={acc.id || 'all'}
+                                            type="button"
+                                            onClick={() => onSelectAccount(acc.id || null)}
+                                            className={`flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-full border text-xs font-bold whitespace-nowrap transition-colors ${isActive
+                                                ? (isDark ? 'bg-indigo-600 border-indigo-500 text-white' : 'bg-indigo-50 border-indigo-200 text-indigo-700')
+                                                : (isDark ? 'bg-white/5 border-white/10 text-slate-300' : 'bg-white border-slate-200 text-slate-600')
+                                                }`}
+                                        >
+                                            {dotHex && <span className="w-2 h-2 rounded-full flex-shrink-0" style={{ backgroundColor: dotHex }} />}
+                                            {acc.name}
+                                        </button>
+                                    );
+                                })}
+                            </div>
+                        )}
+
                         <div className="relative mb-3">
-                            <Search className={`w-4 h-4 absolute left-3 top-2.5 ${isDark ? 'text-slate-400' : 'text-slate-400'}`} />
+                            <Search className={`w-4 h-4 absolute left-3 top-3 md:top-2.5 ${isDark ? 'text-slate-400' : 'text-slate-400'}`} />
                             <input
                                 type="text"
                                 placeholder="Buscar chat..."
                                 value={searchQuery}
                                 onChange={(e) => setSearchQuery(e.target.value)}
-                                className={`w-full pl-9 pr-4 py-2 border-none rounded-xl text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all ${isDark
+                                // text-base en móvil: por debajo de 16px el iPhone hace zoom al escribir.
+                                className={`w-full pl-9 pr-4 py-2 border-none rounded-xl text-base md:text-sm focus:ring-2 focus:ring-blue-500 outline-none transition-all ${isDark
                                     ? 'glass-input'
                                     : 'bg-slate-100 placeholder:text-slate-400'
                                     }`}
@@ -827,15 +878,15 @@ export function Sidebar({
 
                         <div className="flex gap-2 items-center">
                             <div className={`flex p-1 rounded-xl flex-1 ${isDark ? 'glass-panel border-white/5' : 'bg-slate-100'}`}>
-                                <button onClick={() => setViewScope('all')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-lg transition-all ${viewScope === 'all'
+                                <button onClick={() => setViewScope('all')} className={`flex-1 py-2 md:py-1.5 text-xs md:text-[10px] font-bold uppercase rounded-lg transition-all ${viewScope === 'all'
                                     ? (isDark ? 'bg-indigo-600 text-white shadow-sm' : 'bg-white text-slate-800 shadow-sm')
                                     : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700')
                                     }`}>Todos</button>
-                                <button onClick={() => setViewScope('mine')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all ${viewScope === 'mine'
+                                <button onClick={() => setViewScope('mine')} className={`flex-1 py-2 md:py-1.5 text-xs md:text-[10px] font-bold uppercase rounded-md transition-all ${viewScope === 'mine'
                                     ? (isDark ? 'bg-violet-600 text-white shadow-sm' : 'bg-white text-blue-600 shadow-sm')
                                     : (isDark ? 'text-slate-400 hover:text-slate-300' : 'text-slate-500 hover:text-slate-700')
                                     }`}>Míos</button>
-                                <button onClick={() => setViewScope('attention')} className={`flex-1 py-1.5 text-[10px] font-bold uppercase rounded-md transition-all flex items-center justify-center gap-1 ${viewScope === 'attention'
+                                <button onClick={() => setViewScope('attention')} className={`flex-1 py-2 md:py-1.5 text-xs md:text-[10px] font-bold uppercase rounded-md transition-all flex items-center justify-center gap-1 ${viewScope === 'attention'
                                     ? (isDark ? 'bg-red-600 text-white shadow-sm' : 'bg-white text-red-600 shadow-sm')
                                     : (attentionCount > 0
                                         ? (isDark ? 'text-red-400 hover:text-red-300' : 'text-red-600 hover:text-red-700')
@@ -851,7 +902,7 @@ export function Sidebar({
                                 </button>
                             </div>
 
-                            <button onClick={() => setShowFilters(!showFilters)} className={`p-2 rounded-xl transition-all border ${showFilters || hasActiveFilters
+                            <button onClick={() => setShowFilters(!showFilters)} className={`hidden md:block p-2 rounded-xl transition-all border ${showFilters || hasActiveFilters
                                 ? (isDark ? 'bg-blue-600/20 border-blue-500/50 text-blue-400' : 'bg-blue-50 border-blue-200 text-blue-600')
                                 : (isDark ? 'glass-button-secondary' : 'bg-white border-slate-200 text-slate-400 hover:bg-slate-50')
                                 }`} id="tour-filters">
@@ -860,7 +911,7 @@ export function Sidebar({
                         </div>
 
                         {showFilters && (
-                            <div className={`mt-3 p-3 rounded-xl border space-y-2 animate-in slide-in-from-top-2 fade-in duration-200 ${isDark
+                            <div className={`hidden md:block mt-3 p-3 rounded-xl border space-y-2 animate-in slide-in-from-top-2 fade-in duration-200 ${isDark
                                 ? 'bg-slate-800/50 border-slate-700'
                                 : 'bg-slate-50 border-slate-200'
                                 }`}>
@@ -947,9 +998,9 @@ export function Sidebar({
                         {/* Canal General */}
                         <button
                             onClick={() => setTeamChannel && setTeamChannel('general')}
-                            className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${teamChannel === 'general' ? (isDark ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-700 shadow-sm' : 'bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-sm') : (isDark ? 'text-slate-400 hover:bg-slate-700/50 border border-transparent' : 'text-slate-600 hover:bg-slate-50 border border-transparent')}`}
+                            className={`w-full flex items-center gap-3 p-3 rounded-xl transition-all ${isTeamChannelOpen && teamChannel === 'general' ? (isDark ? 'bg-indigo-900/40 text-indigo-300 border border-indigo-700 shadow-sm' : 'bg-indigo-50 text-indigo-700 border border-indigo-200 shadow-sm') : (isDark ? 'text-slate-400 hover:bg-slate-700/50 border border-transparent' : 'text-slate-600 hover:bg-slate-50 border border-transparent')}`}
                         >
-                            <div className={`p-2 rounded-full ${teamChannel === 'general' ? (isDark ? 'bg-indigo-800 text-white' : 'bg-indigo-200') : (isDark ? 'bg-slate-700' : 'bg-slate-200')}`}>
+                            <div className={`p-2 rounded-full ${isTeamChannelOpen && teamChannel === 'general' ? (isDark ? 'bg-indigo-800 text-white' : 'bg-indigo-200') : (isDark ? 'bg-slate-700' : 'bg-slate-200')}`}>
                                 <Hash size={18} />
                             </div>
                             <span className="font-bold text-sm flex-1 text-left">General</span>
@@ -967,7 +1018,7 @@ export function Sidebar({
                             <p className="px-3 text-xs font-bold text-slate-400 uppercase mb-2">Mensajes Directos</p>
                             <div className="space-y-1">
                                 {teamAgents.filter(a => a.name !== user.username).map(agent => {
-                                    const isSelected = teamChannel === agent.name;
+                                    const isSelected = isTeamChannelOpen && teamChannel === agent.name;
                                     const isUserOnline = onlineUsers.includes(agent.name);
                                     const unread = teamUnread[agent.name] || 0;
                                     return (
@@ -1092,7 +1143,22 @@ export function Sidebar({
                                                         })()}
                                                     </div>
 
-                                                    <div className="flex gap-1 mt-2 flex-wrap items-center">
+                                                    {/* MÓVIL: una sola etiqueta. Quién lo lleva y, si nadie,
+                                                        el departamento. La línea ya se ve por el color del borde. */}
+                                                    {(contact.assigned_to || contact.department) && (
+                                                        <div className="md:hidden flex mt-1.5 min-w-0">
+                                                            {contact.assigned_to ? (
+                                                                <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded border flex items-center gap-1 min-w-0 ${isDark ? 'bg-slate-700/60 text-slate-300 border-slate-600' : 'bg-slate-100 text-slate-600 border-slate-200'}`}>
+                                                                    <UserCheck className="w-3 h-3 flex-shrink-0" />
+                                                                    <span className="truncate">{contact.assigned_to === user.username ? 'Tú' : contact.assigned_to}</span>
+                                                                </span>
+                                                            ) : (
+                                                                <span className={`px-1.5 py-0.5 text-[10px] font-bold rounded-md border uppercase tracking-wide truncate ${isDark ? 'bg-purple-900/40 text-purple-300 border-purple-700/60' : 'bg-purple-50 text-purple-700 border-purple-100'}`}>{String(contact.department)}</span>
+                                                            )}
+                                                        </div>
+                                                    )}
+
+                                                    <div className="hidden md:flex gap-1 mt-2 flex-wrap items-center">
                                                         {contact.status === 'Nuevo' && <span className="px-1.5 py-0.5 bg-emerald-100 text-emerald-700 text-[9px] font-bold rounded-md tracking-wide border border-emerald-200">NUEVO</span>}
 
                                                         {contact.tags && contact.tags.slice(0, 2).map(tag => (
@@ -1140,9 +1206,10 @@ export function Sidebar({
                 )}
             </div>
 
-            {/* FOOTER (Solo visible en chats, en team chat ya ves los usuarios arriba) */}
+            {/* FOOTER (Solo visible en chats, en team chat ya ves los usuarios arriba).
+                Solo PC: en móvil no hay agenda, campañas ni pedidos. */}
             {currentView !== 'team_chat' && (
-                <div className={`border-t px-3 pt-3 safe-bottom-2 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-slate-50 border-slate-200'}`}>
+                <div className={`hidden md:block border-t px-3 pt-3 safe-bottom-2 ${isDark ? 'bg-slate-900/40 backdrop-blur-md border-white/5' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="flex justify-between items-center mb-2">
                         <h3 className="text-[10px] font-bold text-slate-400 uppercase tracking-wider flex items-center gap-2">
                             <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
@@ -1185,6 +1252,36 @@ export function Sidebar({
                     </div>
                 </div>
             )}
+
+            {/* MÓVIL: pestañas de abajo, como WhatsApp. En PC el chat interno se
+                elige en el selector de línea. */}
+            <nav id="tour-mobile-nav" className={`md:hidden flex shrink-0 border-t safe-bottom ${isDark ? 'bg-slate-900/60 backdrop-blur-md border-white/5' : 'bg-white border-slate-200'}`}>
+                {([
+                    { key: 'chat', label: 'Chats', Icon: MessageSquare, count: unreadChatsCount, active: currentView !== 'team_chat' },
+                    { key: 'team_chat', label: 'Equipo', Icon: Users, count: teamUnreadTotal, active: currentView === 'team_chat' }
+                ] as const).map(({ key, label, Icon, count, active }) => (
+                    <button
+                        key={key}
+                        type="button"
+                        onClick={() => { if (!active) setView(key); }}
+                        aria-current={active ? 'page' : undefined}
+                        className={`flex-1 flex flex-col items-center gap-1 pt-2 pb-2.5 select-none ${active
+                            ? (isDark ? 'text-indigo-300' : 'text-indigo-700')
+                            : (isDark ? 'text-slate-400' : 'text-slate-500')
+                            }`}
+                    >
+                        <span className={`relative px-5 py-1 rounded-full transition-colors ${active ? (isDark ? 'bg-indigo-500/20' : 'bg-indigo-100') : ''}`}>
+                            <Icon className="w-5 h-5" />
+                            {count > 0 && (
+                                <span className="absolute -top-1 right-1.5 bg-purple-600 text-white text-[10px] font-bold h-4 min-w-[16px] px-1 rounded-full flex items-center justify-center leading-none">
+                                    {count > 99 ? '99+' : count}
+                                </span>
+                            )}
+                        </span>
+                        <span className="text-xs font-bold">{label}</span>
+                    </button>
+                ))}
+            </nav>
 
             {/* MODALES */}
             {showAddContact && (
