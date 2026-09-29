@@ -13,6 +13,7 @@ import { useToast } from '../context/ToastContext';
 import { colorForAccount, nameForAccount } from '../utils/accountColors';
 import { normalizeForSearch } from '../utils/searchNormalize';
 import { useIsMobile } from '../utils/useIsMobile';
+import { isPartsProfile } from '../utils/partsProfile';
 
 export interface Contact {
     id: string;
@@ -1221,11 +1222,7 @@ export function Sidebar({
                                 así que además del rol comprobamos el NOMBRE del perfil.
                                 Así funciona tanto el perfil RECAMBIOS (rol recambios)
                                 como el perfil TALLER (nombre taller, rol admin). */}
-                            {(() => {
-                                const r = (user.role || '').toLowerCase();
-                                const u = (user.username || '').toLowerCase();
-                                return ['recambios', 'taller'].includes(r) || u.includes('recambios') || u.includes('taller');
-                            })() && (
+                            {isPartsProfile(user) && (
                                 <button onClick={() => setView('part_orders')} className={`p-1.5 border rounded-md transition shadow-sm ${isDark ? 'bg-slate-700 border-slate-600 text-slate-400 hover:text-emerald-400 hover:border-emerald-500' : 'bg-white border-slate-200 text-slate-400 hover:text-emerald-600 hover:border-emerald-200'}`} title="Pedidos de Piezas">
                                     <Package className="w-4 h-4" />
                                 </button>

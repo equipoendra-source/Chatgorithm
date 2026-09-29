@@ -11,6 +11,8 @@
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
+    "dev:recambios": "vite --config vite.recambios.config.ts",
+    "build:recambios": "tsc && vite build --config vite.recambios.config.ts",
     "electron:dev": "concurrently -k \"vite\" \"wait-on tcp:5173 && electron .\"",
     "electron:build": "npx rimraf dist_electron && vite build && electron-builder --win nsis"
   },

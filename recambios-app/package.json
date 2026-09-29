@@ -1,0 +1,20 @@
+{
+  "name": "chatgorithm-recambios-android",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Envoltorio Android (Capacitor) de la app Recambios. El código web está en ../client (npm run build:recambios).",
+  "scripts": {
+    "build:web": "npm --prefix ../client run build:recambios",
+    "sync": "npm run build:web && cap sync android"
+  },
+  "dependencies": {
+    "@capacitor/android": "^8.0.0",
+    "@capacitor/app": "^8.0.0",
+    "@capacitor/cli": "^8.0.0",
+    "@capacitor/core": "^8.0.0",
+    "@capacitor/status-bar": "^8.0.2"
+  },
+  "devDependencies": {
+    "typescript": "^7.0.2"
+  }
+}
