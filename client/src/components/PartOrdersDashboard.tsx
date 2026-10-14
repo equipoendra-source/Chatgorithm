@@ -285,10 +285,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             if (list) list.push(o); else byGroup.set(o.pedidoGrupo, [o]);
         }
         for (const [id, list] of byGroup) {
-            // Un "pedido" de una sola pieza (PDF de una línea, o le borraron
-            // el resto) se ve como una fila normal.
             if (list.length === 1) { all.push({ type: 'single', order: list[0] }); continue; }
-            // Orden del PDF: cada pieza se guardó con 1 ms de diferencia.
             list.sort((a, b) => (a.orderedAt || '').localeCompare(b.orderedAt || ''));
             all.push({ type: 'group', id, items: list });
         }
@@ -300,13 +297,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             if (filter === 'arrived' && !pieces.every(o => o.kind === 'order' && o.arrived)) return false;
             if (filter === 'abonos' && !pieces.every(o => o.kind === 'abono')) return false;
             return pieces.some(matches);
-        }).sort((a, b) => {
-            // Los vencidos (a reclamar) suben arriba; luego los más recientes.
-            const ao = piecesOf(a).some(isOverdue) ? 1 : 0;
-            const bo = piecesOf(b).some(isOverdue) ? 1 : 0;
-            if (ao !== bo) return bo - ao;
-            return dateOf(b).localeCompare(dateOf(a));
-        });
+        }).sort((a, b) => dateOf(a).localeCompare(dateOf(b)));
     }, [items, filter, search]);
 
     // La columna de la flecha solo aparece si hay algún pedido agrupado.
