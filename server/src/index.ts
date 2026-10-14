@@ -7256,6 +7256,60 @@ function registerPartRoutes(basePath: string, book: PartBook) {
         }
     });
 
+    // Alta manual de VARIAS piezas del mismo coche en una sola operación. La
+    // matrícula, el proveedor y el autor son comunes; cada pieza lleva su propia
+    // descripción, referencia, cantidad y PLAZO (etaDays/noEta por pieza). Con 2+
+    // piezas comparten pedidoGrupo → salen como un pedido desplegable, igual que
+    // los que llegan por PDF. Con 1 sola, se crea suelta (sin grupo).
+    app.post(`${basePath}/bulk-create`, async (req, res) => {
+        if (!base) return res.status(500).json({ error: 'DB no disponible' });
+        const { matricula, proveedor, orderedBy } = req.body || {};
+        const piecesIn = Array.isArray(req.body?.pieces) ? req.body.pieces : [];
+        if (piecesIn.length === 0) return res.status(400).json({ error: 'Indica al menos una pieza.' });
+        // Validar y normalizar cada pieza ANTES de tocar Airtable: si una está
+        // mal, se rechaza el pedido entero (todo o nada, como el PDF).
+        const normalized: Record<string, any>[] = [];
+        for (const p of piecesIn) {
+            const pieza = String(p?.pieza || '').trim();
+            const referencia = String(p?.referencia || '').trim();
+            if (!pieza && !referencia) return res.status(400).json({ error: 'Cada pieza necesita al menos la pieza o la referencia.' });
+            const etaDays = normalizeEtaDays(p?.etaDays);
+            const noEta = p?.noEta === true && etaDays === null;
+            const cantIn = cantidadFromBody(p?.cantidad);
+            if (!cantIn.ok) return res.status(400).json({ error: CANTIDAD_INVALIDA });
+            normalized.push({ pieza, referencia, etaDays, noEta, cantidad: cantIn.value });
+        }
+        const grupo = normalized.length >= 2 ? newPedidoGrupoId() : '';
+        const t0 = Date.now();
+        try {
+            const rows = normalized.map((p, i) => {
+                const fields: any = {
+                    matricula: String(matricula || '').trim(),
+                    pieza: p.pieza,
+                    referencia: p.referencia,
+                    proveedor: String(proveedor || '').trim(),
+                    // +1 ms por pieza: el panel ordena por esta fecha dentro del
+                    // grupo, así se mantiene el orden en que se metieron.
+                    orderedAt: new Date(t0 + i).toISOString(),
+                    arrived: false,
+                    arrivedAt: '',
+                    orderedBy: String(orderedBy || '').trim(),
+                    noEta: p.noEta
+                };
+                if (p.etaDays !== null) fields.etaDays = p.etaDays;
+                if (p.cantidad !== null) fields.cantidad = p.cantidad;
+                if (grupo) fields.pedidoGrupo = grupo;
+                return fields;
+            });
+            const created = await createPartRecords(book, rows);
+            res.json({ success: true, orders: created.map(serializePartOrder) });
+        } catch (e: any) {
+            const setup = partBookSetupError(book, e);
+            console.error(`[API] Error POST ${basePath}/bulk-create:`, e?.message);
+            res.status(500).json({ error: setup || 'Error creando el pedido' });
+        }
+    });
+
     app.put(`${basePath}/:id`, async (req, res) => {
         if (!base) return res.status(500).json({ error: 'DB no disponible' });
         try {

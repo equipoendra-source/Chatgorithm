@@ -95,6 +95,12 @@ const ETA_PRESETS: { label: string; days: number }[] = [
 
 const hasEta = (o: PartOrder): boolean => o.etaDays !== null && Number.isFinite(o.etaDays as number);
 
+// Una pieza del formulario de alta manual. La matrícula y el proveedor son
+// comunes al pedido; cada pieza lleva su propia descripción, referencia,
+// cantidad y PLAZO (eta: '' sin decidir, '__none__' sin fecha, '1'..'N' días).
+interface AddPiece { pieza: string; referencia: string; cantidad: string; eta: string; }
+const emptyPiece = (): AddPiece => ({ pieza: '', referencia: '', cantidad: '1', eta: '' });
+
 // 1 → "1" · 0.5 → "0,5". null → '' (quien llama pinta "—").
 const fmtQty = (n: number | null): string =>
     n === null || n === undefined ? '' : n.toLocaleString('es-ES', { maximumFractionDigits: 2 });
@@ -181,8 +187,10 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
     const [search, setSearch] = useState('');
     const [showAdd, setShowAdd] = useState(false);
     const [saving, setSaving] = useState(false);
-    // eta: '' = sin decidir, '__none__' = "sin fecha", '1'..'N' = días.
-    const [form, setForm] = useState({ matricula: '', pieza: '', cantidad: '1', referencia: '', proveedor: '', eta: '' });
+    // Datos comunes del pedido manual (matrícula + proveedor). Cada pieza, con
+    // su plazo propio, va en `pieces`.
+    const [form, setForm] = useState({ matricula: '', proveedor: '' });
+    const [pieces, setPieces] = useState<AddPiece[]>([emptyPiece()]);
     // Edición del plazo: de un registro o de todas las piezas de un pedido.
     const [etaModal, setEtaModal] = useState<EtaTarget | null>(null);
     const [etaInput, setEtaInput] = useState('');
@@ -385,35 +393,74 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
         } catch { alert(`Error de conexión borrando el ${kindNoun(o.kind)}.`); }
     };
 
+    // Helpers del formulario multi-pieza.
+    const updatePiece = (idx: number, patch: Partial<AddPiece>) =>
+        setPieces(ps => ps.map((p, i) => (i === idx ? { ...p, ...patch } : p)));
+    const addPiece = () => setPieces(ps => [...ps, emptyPiece()]);
+    const removePiece = (idx: number) => setPieces(ps => (ps.length <= 1 ? ps : ps.filter((_, i) => i !== idx)));
+    const resetAddForm = () => { setForm({ matricula: '', proveedor: '' }); setPieces([emptyPiece()]); };
+    const openAdd = () => { resetAddForm(); setShowAdd(true); };
+
+    // Convierte una pieza del formulario en el cuerpo que espera el servidor.
+    // Devuelve null si la cantidad no es válida (quien llama avisa).
+    const piecePayload = (p: AddPiece): { pieza: string; referencia: string; cantidad: number | ''; etaDays: string; noEta: boolean } | null => {
+        const qty = parseQtyInput(p.cantidad);
+        if (qty === null) return null;
+        const noEta = p.eta === '__none__';
+        return {
+            pieza: p.pieza.trim(), referencia: p.referencia.trim(),
+            cantidad: qty,
+            etaDays: (noEta || p.eta.trim() === '') ? '' : p.eta,
+            noEta,
+        };
+    };
+
     const createOrder = async () => {
-        if (!form.pieza.trim() && !form.referencia.trim()) {
-            alert('Indica al menos la pieza o la referencia.'); return;
+        // Abonos: siempre una sola pieza (no se agrupan). Pedidos: una o varias.
+        const list = addKind === 'order' ? pieces : pieces.slice(0, 1);
+        if (list.some(p => !p.pieza.trim() && !p.referencia.trim())) {
+            alert(list.length > 1 ? 'Cada pieza necesita al menos la pieza o la referencia.' : 'Indica al menos la pieza o la referencia.');
+            return;
         }
-        const qty = parseQtyInput(form.cantidad);
-        if (qty === null) { alert(QTY_ERROR); return; }
+        const payloads = list.map(piecePayload);
+        if (payloads.some(p => p === null)) { alert(QTY_ERROR); return; }
+        const valid = payloads as NonNullable<(typeof payloads)[number]>[];
         setSaving(true);
         try {
-            const noEta = form.eta === '__none__';
-            const r = await fetch(rootFor(addKind), {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    matricula: form.matricula, pieza: form.pieza,
-                    // Ya validada y como número: el servidor no tiene que
-                    // re-interpretar el texto (".5" o "1e3").
-                    cantidad: qty,
-                    referencia: form.referencia, proveedor: form.proveedor,
-                    etaDays: (noEta || form.eta.trim() === '') ? '' : form.eta,
-                    noEta,
-                    orderedBy: currentUser?.username || ''
-                })
-            });
-            const d = await r.json().catch(() => ({}));
-            if (r.ok && d.order) {
-                setItemsLocal(prev => [{ ...d.order, kind: addKind }, ...prev]);
-                setForm({ matricula: '', pieza: '', cantidad: '1', referencia: '', proveedor: '', eta: '' });
-                setShowAdd(false);
+            if (valid.length === 1) {
+                // Una pieza → alta normal (suelta, sin grupo).
+                const r = await fetch(rootFor(addKind), {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        matricula: form.matricula, proveedor: form.proveedor,
+                        orderedBy: currentUser?.username || '',
+                        ...valid[0],
+                    })
+                });
+                const d = await r.json().catch(() => ({}));
+                if (r.ok && d.order) {
+                    setItemsLocal(prev => [{ ...d.order, kind: addKind }, ...prev]);
+                    resetAddForm(); setShowAdd(false);
+                } else {
+                    alert(d.error || `No se pudo crear el ${kindNoun(addKind)}.`);
+                }
             } else {
-                alert(d.error || `No se pudo crear el ${kindNoun(addKind)}.`);
+                // Varias piezas → alta agrupada (comparten pedidoGrupo).
+                const r = await fetch(`${rootFor(addKind)}/bulk-create`, {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        matricula: form.matricula, proveedor: form.proveedor,
+                        orderedBy: currentUser?.username || '',
+                        pieces: valid,
+                    })
+                });
+                const d = await r.json().catch(() => ({}));
+                if (r.ok && Array.isArray(d.orders)) {
+                    setItemsLocal(prev => [...d.orders.map((o: any) => ({ ...o, kind: addKind })), ...prev]);
+                    resetAddForm(); setShowAdd(false);
+                } else {
+                    alert(d.error || 'No se pudo crear el pedido.');
+                }
             }
         } catch { alert(`Error de conexión creando el ${kindNoun(addKind)}.`); }
         finally { setSaving(false); }
@@ -907,7 +954,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                     <button onClick={downloadExcel} aria-label="Descargar Excel" title="Descargar Excel" className={`flex items-center gap-2 px-3 md:px-4 py-2.5 rounded-xl border text-sm font-semibold transition ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
                         <Download className="w-4 h-4" /> <span className="hidden md:inline">Descargar Excel</span>
                     </button>
-                    <button onClick={() => setShowAdd(true)} className="flex items-center gap-2 px-4 md:px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:shadow-lg hover:shadow-emerald-500/30 text-white font-semibold transition active:scale-[0.98]">
+                    <button onClick={openAdd} className="flex items-center gap-2 px-4 md:px-5 py-2.5 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 hover:shadow-lg hover:shadow-emerald-500/30 text-white font-semibold transition active:scale-[0.98]">
                         <Plus className="w-4 h-4" /> Añadir {kindNoun(addKind)}
                     </button>
                 </div>
@@ -1005,8 +1052,8 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             {showAdd && (
                 <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={() => setShowAdd(false)}>
                     <div onClick={e => e.stopPropagation()}
-                        className={`w-full max-w-md max-md:max-h-[90vh] max-md:overflow-y-auto flex flex-col rounded-2xl shadow-2xl ${isDark ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}`}>
-                        <div className={`flex items-center justify-between px-6 py-4 border-b ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                        className={`w-full max-w-md max-h-[90vh] flex flex-col rounded-2xl shadow-2xl ${isDark ? 'bg-slate-900 text-slate-100' : 'bg-white text-slate-900'}`}>
+                        <div className={`flex items-center justify-between px-6 py-4 border-b flex-shrink-0 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                             <div className="flex items-center gap-3">
                                 <div className="p-2 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-600 shadow-lg shadow-emerald-500/20">
                                     {addKind === 'abono' ? <RotateCcw className="w-5 h-5 text-white" /> : <Package className="w-5 h-5 text-white" />}
@@ -1020,75 +1067,94 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
                                 <X className="w-5 h-5" />
                             </button>
                         </div>
-                        <div className="px-6 py-4 flex flex-col gap-3">
-                            <div>
-                                <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Matrícula</label>
-                                <input className={inputCls} value={form.matricula} onChange={e => setForm(f => ({ ...f, matricula: e.target.value.toUpperCase() }))} placeholder="1234-ABC" />
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Pieza</label>
-                                <input className={inputCls} value={form.pieza} onChange={e => setForm(f => ({ ...f, pieza: e.target.value }))} placeholder="Embrague" />
-                            </div>
+                        <div className="px-6 py-4 flex flex-col gap-4 flex-1 overflow-y-auto min-h-0">
+                            {/* Datos comunes del coche/pedido */}
                             <div className="flex gap-3">
                                 <div className="flex-1 min-w-0">
-                                    <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Referencia</label>
-                                    <input className={inputCls} value={form.referencia} onChange={e => setForm(f => ({ ...f, referencia: e.target.value }))} placeholder="REF-889" />
+                                    <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Matrícula</label>
+                                    <input className={inputCls} value={form.matricula} onChange={e => setForm(f => ({ ...f, matricula: e.target.value.toUpperCase() }))} placeholder="1234-ABC" />
                                 </div>
-                                <div className="w-24 flex-shrink-0">
-                                    <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Cantidad</label>
-                                    <input type="number" min={0} step="any" className={inputCls} value={form.cantidad} onChange={e => setForm(f => ({ ...f, cantidad: e.target.value }))} placeholder="1" />
+                                <div className="flex-1 min-w-0">
+                                    <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Proveedor</label>
+                                    <input className={inputCls} list="part-providers" value={form.proveedor} onChange={e => setForm(f => ({ ...f, proveedor: e.target.value }))} placeholder="Ford / Colón…" />
+                                    <datalist id="part-providers">
+                                        {knownProviders.map(p => <option key={p} value={p} />)}
+                                    </datalist>
                                 </div>
                             </div>
-                            <div>
-                                <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Proveedor</label>
-                                <input className={inputCls} list="part-providers" value={form.proveedor} onChange={e => setForm(f => ({ ...f, proveedor: e.target.value }))} placeholder="Ford / Colón…" />
-                                <datalist id="part-providers">
-                                    {knownProviders.map(p => <option key={p} value={p} />)}
-                                </datalist>
-                            </div>
-                            <div>
-                                <label className="block text-xs font-bold uppercase tracking-wide mb-1.5">Plazo prometido <span className="text-slate-400 normal-case font-normal">(opcional)</span></label>
-                                <div className="flex flex-wrap gap-1.5 mb-2">
-                                    {ETA_PRESETS.map(p => (
-                                        <button key={p.days} type="button" onClick={() => setForm(f => ({ ...f, eta: String(p.days) }))}
-                                            className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${String(p.days) === form.eta
-                                                ? 'bg-emerald-600 text-white border-emerald-600'
-                                                : (isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100')}`}>
-                                            {p.label}
-                                        </button>
-                                    ))}
-                                    <button type="button" onClick={() => setForm(f => ({ ...f, eta: '__none__' }))}
-                                        className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition ${form.eta === '__none__'
-                                            ? 'bg-slate-600 text-white border-slate-600'
-                                            : (isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100')}`}>
-                                        Sin fecha
-                                    </button>
-                                </div>
-                                {form.eta !== '__none__' && (
-                                    <div className="flex items-center gap-2">
-                                        <input type="number" min={0} className={inputCls} value={form.eta}
-                                            onChange={e => setForm(f => ({ ...f, eta: e.target.value }))} placeholder="Días (p. ej. 2)" />
-                                        {form.eta.trim() !== '' && (
-                                            <button type="button" onClick={() => setForm(f => ({ ...f, eta: '' }))}
-                                                className={`px-3 py-2 rounded-lg text-xs font-semibold border ${isDark ? 'border-white/10 text-slate-400 hover:bg-white/5' : 'border-slate-200 text-slate-500 hover:bg-slate-100'}`}>
-                                                Quitar
+
+                            {/* Piezas (cada una con su plazo). En abonos, solo una. */}
+                            {pieces.map((pc, idx) => (
+                                <div key={idx} className={`rounded-xl border p-3 flex flex-col gap-2.5 ${isDark ? 'border-white/10 bg-slate-800/30' : 'border-slate-200 bg-slate-50'}`}>
+                                    <div className="flex items-center justify-between">
+                                        <span className={`text-xs font-bold uppercase tracking-wide ${isDark ? 'text-slate-400' : 'text-slate-500'}`}>
+                                            {pieces.length > 1 ? `Pieza ${idx + 1}` : 'Pieza'}
+                                        </span>
+                                        {pieces.length > 1 && (
+                                            <button type="button" onClick={() => removePiece(idx)} title="Quitar esta pieza"
+                                                className={`p-1 rounded-md transition ${isDark ? 'text-slate-500 hover:text-red-400 hover:bg-red-500/10' : 'text-slate-400 hover:text-red-600 hover:bg-red-50'}`}>
+                                                <X className="w-4 h-4" />
                                             </button>
                                         )}
                                     </div>
-                                )}
-                                <p className={`text-[11px] mt-1.5 ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
-                                    {form.eta === '__none__'
-                                        ? 'Pendiente sin plazo definido. No saltará alarma hasta que le pongas un plazo o lo marques como hecho.'
-                                        : 'Lo que te diga el proveedor (48h = 2 días). Salta alarma de reclamación al pasarse.'}
-                                </p>
-                            </div>
+                                    <input className={inputCls} value={pc.pieza} onChange={e => updatePiece(idx, { pieza: e.target.value })} placeholder="Pieza (p. ej. Embrague)" />
+                                    <div className="flex gap-2">
+                                        <div className="flex-1 min-w-0">
+                                            <input className={inputCls} value={pc.referencia} onChange={e => updatePiece(idx, { referencia: e.target.value })} placeholder="Referencia" />
+                                        </div>
+                                        <div className="w-20 flex-shrink-0">
+                                            <input type="number" min={0} step="any" className={inputCls} value={pc.cantidad} onChange={e => updatePiece(idx, { cantidad: e.target.value })} placeholder="Ctd." title="Cantidad" />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <div className="flex flex-wrap gap-1.5">
+                                            {ETA_PRESETS.map(p => (
+                                                <button key={p.days} type="button" onClick={() => updatePiece(idx, { eta: String(p.days) })}
+                                                    className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border transition ${String(p.days) === pc.eta
+                                                        ? 'bg-emerald-600 text-white border-emerald-600'
+                                                        : (isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-white')}`}>
+                                                    {p.label}
+                                                </button>
+                                            ))}
+                                            <button type="button" onClick={() => updatePiece(idx, { eta: '__none__' })}
+                                                className={`px-2 py-0.5 rounded-lg text-[11px] font-bold border transition ${pc.eta === '__none__'
+                                                    ? 'bg-slate-600 text-white border-slate-600'
+                                                    : (isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-white')}`}>
+                                                Sin fecha
+                                            </button>
+                                        </div>
+                                        {pc.eta !== '__none__' && (
+                                            <div className="flex items-center gap-2 mt-1.5">
+                                                <input type="number" min={0} className={inputCls} value={pc.eta}
+                                                    onChange={e => updatePiece(idx, { eta: e.target.value })} placeholder="Plazo en días (opcional)" />
+                                                {pc.eta.trim() !== '' && (
+                                                    <button type="button" onClick={() => updatePiece(idx, { eta: '' })}
+                                                        className={`px-3 py-2 rounded-lg text-xs font-semibold border ${isDark ? 'border-white/10 text-slate-400 hover:bg-white/5' : 'border-slate-200 text-slate-500 hover:bg-slate-100'}`}>
+                                                        Quitar
+                                                    </button>
+                                                )}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            ))}
+
+                            {addKind === 'order' && (
+                                <button type="button" onClick={addPiece}
+                                    className={`flex items-center justify-center gap-1.5 py-2 rounded-xl border border-dashed text-xs font-bold transition ${isDark ? 'border-white/15 text-slate-300 hover:bg-white/5' : 'border-slate-300 text-slate-600 hover:bg-slate-100'}`}>
+                                    <Plus className="w-3.5 h-3.5" /> Añadir otra pieza del mismo coche
+                                </button>
+                            )}
+                            <p className={`text-[11px] ${isDark ? 'text-slate-500' : 'text-slate-400'}`}>
+                                El plazo es lo que te diga el proveedor (48h = 2 días); salta alarma al pasarse. "Sin fecha" = pendiente sin plazo, no salta alarma.
+                            </p>
                         </div>
-                        <div className={`px-6 py-4 border-t flex justify-end gap-2 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
+                        <div className={`px-6 py-4 border-t flex justify-end gap-2 flex-shrink-0 ${isDark ? 'border-white/10' : 'border-slate-200'}`}>
                             <button onClick={() => setShowAdd(false)} className={`px-4 py-2 rounded-xl border text-sm font-semibold ${isDark ? 'border-white/10 text-slate-300 hover:bg-white/5' : 'border-slate-200 text-slate-600 hover:bg-slate-100'}`}>Cancelar</button>
                             <button onClick={createOrder} disabled={saving}
                                 className="flex items-center gap-2 px-5 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold transition active:scale-[0.98] disabled:opacity-40 disabled:cursor-not-allowed">
                                 {saving ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
-                                Guardar {kindNoun(addKind)}
+                                {addKind === 'order' && pieces.length > 1 ? `Guardar pedido · ${pieces.length} piezas` : `Guardar ${kindNoun(addKind)}`}
                             </button>
                         </div>
                     </div>
