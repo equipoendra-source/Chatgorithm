@@ -10016,6 +10016,23 @@ app.post('/api/send-template', async (req, res) => {
         // responder — justo el caso típico de una alarma antigua pendiente.
         clearAttentionForContact(cleanTo, 'plantilla').catch(() => {});
 
+        // 🔇 PROVEEDORES: silenciar Laura automáticamente al enviar una plantilla
+        // de proveedor. Así el proveedor nunca recibe respuestas automáticas
+        // aunque alguien no haya puesto el toggle manualmente antes.
+        // Fire-and-forget: nunca bloquea el envío.
+        if (/proveedor/i.test(templateName || '') && base) {
+            (async () => {
+                try {
+                    const rp = await base('Contacts').select({ filterByFormula: `{phone}='${escAt(cleanTo)}'`, maxRecords: 1 }).firstPage();
+                    if (rp.length > 0 && !rp[0].get('ai_muted')) {
+                        await base('Contacts').update([{ id: rp[0].id, fields: { ai_muted: true } }]);
+                        console.log(`🔇 [Proveedor] ai_muted=true puesto automáticamente en ${cleanTo}`);
+                        io.emit('contact_updated_notification');
+                    }
+                } catch (e: any) { console.warn('[Proveedor] No se pudo silenciar automáticamente:', e?.message); }
+            })();
+        }
+
         // 🔩 PEDIDOS / ABONOS: si la plantilla tiene un hueco de "pieza" la
         // registramos para que aparezca en su panel de Recambios. El NOMBRE de
         // la plantilla decide el libro: las que contienen "abono" van a Abonos
