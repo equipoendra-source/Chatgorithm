@@ -297,7 +297,7 @@ export default function PartOrdersDashboard({ onBack, currentUser }: Props) {
             if (filter === 'arrived' && !pieces.every(o => o.kind === 'order' && o.arrived)) return false;
             if (filter === 'abonos' && !pieces.every(o => o.kind === 'abono')) return false;
             return pieces.some(matches);
-        }).sort((a, b) => dateOf(a).localeCompare(dateOf(b)));
+        }).sort((a, b) => dateOf(b).localeCompare(dateOf(a)));
     }, [items, filter, search]);
 
     // La columna de la flecha solo aparece si hay algún pedido agrupado.
