@@ -138,10 +138,10 @@ billingRouter.post('/setup', async (req, res) => {
             email, name: company, description: `Contacto: ${name}`,
             metadata: { contact: name, nif: taxId, plans: plans.join(',') },
         });
-        const si = await s.setupIntents.create({
+        const si = await s.setupIntents.create(<Stripe.SetupIntentCreateParams & { payment_method_types: string[] }>{
             customer: customer.id,
             usage: 'off_session',
-            automatic_payment_methods: { enabled: true, allow_redirects: 'never' },
+            payment_method_types: ['card'],
             metadata: { plans: plans.join(',') },
         });
         res.json({ clientSecret: si.client_secret, setupIntentId: si.id, summary: summary(plans) });
