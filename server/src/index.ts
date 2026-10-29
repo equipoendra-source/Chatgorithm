@@ -27,6 +27,7 @@ if (SENTRY_DSN) {
 }
 
 import express from 'express';
+import { billingRouter } from './billing';
 import { createServer } from 'http';
 import { Server } from 'socket.io';
 import cors from 'cors';
@@ -110,6 +111,9 @@ if (!socketAuthRequired) {
 }
 
 const app = express();
+
+// Cobros de la web pública (Stripe). Va ANTES del CORS/JSON globales: lleva su propio CORS y su propio parser.
+app.use('/public/billing', billingRouter);
 
 // --- CORS ---
 // Restringe orígenes según ALLOWED_ORIGINS. Si "*", abierto (con warning ya impreso).
