@@ -6651,8 +6651,13 @@ app.post('/api/company-auth', async (req, res) => {
     }
 
     try {
+        // Búsqueda tolerante: ignoramos mayúsculas/minúsculas y espacios
+        // sobrantes al principio/final, para que "SYA Motor", "sya motor" o
+        // " SYA Motor " entren igual y no salga "Empresa no encontrada" por una
+        // mayúscula. La CONTRASEÑA sí sigue comprobándose exacta más abajo.
+        const needle = String(companyId).trim().toLowerCase();
         const records = await base('Companies').select({
-            filterByFormula: `{CompanyId} = '${escAt(companyId)}'`,
+            filterByFormula: `LOWER(TRIM({CompanyId})) = '${escAt(needle)}'`,
             maxRecords: 1
         }).firstPage();
 
@@ -6662,6 +6667,9 @@ app.post('/api/company-auth', async (req, res) => {
         }
 
         const company = records[0];
+        // Id tal y como está escrito en Airtable (respeta mayúsculas), para que
+        // lo que se devuelve y el nombre del logo no dependan de cómo lo tecleó.
+        const canonicalCompanyId = (company.get('CompanyId') as string) || companyId;
         const storedPassword = company.get('Password') as string;
         const backendUrl = company.get('BackendUrl') as string;
         const companyName = company.get('CompanyName') as string;
@@ -6674,7 +6682,7 @@ app.post('/api/company-auth', async (req, res) => {
             try {
                 const uploadResult: any = await cloudinary.uploader.upload(airtableLogoUrl, {
                     folder: 'company-logos',
-                    public_id: `logo-${companyId}`,
+                    public_id: `logo-${canonicalCompanyId}`,
                     overwrite: true,
                     resource_type: 'image'
                 });
@@ -6706,11 +6714,11 @@ app.post('/api/company-auth', async (req, res) => {
             return res.status(401).json({ success: false, error: 'Contraseña incorrecta' });
         }
 
-        console.log(`✅ [Company Auth] Login exitoso: ${companyId} -> ${backendUrl}`);
+        console.log(`✅ [Company Auth] Login exitoso: ${canonicalCompanyId} -> ${backendUrl}`);
         res.json({
             success: true,
-            companyId,
-            companyName: companyName || companyId,
+            companyId: canonicalCompanyId,
+            companyName: companyName || canonicalCompanyId,
             backendUrl: backendUrl || 'https://chatgorithm.onrender.com',
             logoUrl: logoUrl || null
         });
