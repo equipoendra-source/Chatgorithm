@@ -975,7 +975,6 @@ function App() {
                                 <Building2 className="w-4 h-4 text-white" />
                             </div>
                         )}
-                        <span className={`font-semibold text-sm tracking-wide truncate min-w-0 ${isDark ? 'text-slate-100' : 'text-slate-700'}`}>{companyConfig.companyName}</span>
 
                         {/* Móvil: en PC esto va en el pie de la barra lateral. */}
                         <div className="md:hidden ml-auto flex items-center gap-2 flex-shrink-0">
