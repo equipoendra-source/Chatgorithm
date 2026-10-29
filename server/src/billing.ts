@@ -137,6 +137,8 @@ billingRouter.post('/setup', async (req, res) => {
         const customer = await s.customers.create({
             email, name: company, description: `Contacto: ${name}`,
             metadata: { contact: name, nif: taxId, plans: plans.join(',') },
+            // Solo para pruebas: STRIPE_TEST_CLOCK_ID mete al cliente en una simulación de Stripe para adelantar el reloj.
+            ...(process.env.STRIPE_TEST_CLOCK_ID ? { test_clock: process.env.STRIPE_TEST_CLOCK_ID } : {}),
         });
         const si = await s.setupIntents.create({
             customer: customer.id,
