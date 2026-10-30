@@ -1,12 +1,13 @@
 import { useState, useEffect } from 'react';
 import { io, Socket } from 'socket.io-client';
-import { LogOut, Building2, ShieldAlert } from 'lucide-react';
+import { LogOut, Building2, ShieldAlert, Package, MessageSquare } from 'lucide-react';
 import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import { StatusBar, Style } from '@capacitor/status-bar';
 import { CompanyLogin } from '../components/CompanyLogin';
 import { Login } from '../components/Login';
 import PartOrdersDashboard from '../components/PartOrdersDashboard';
+import SuppliersChat from './SuppliersChat';
 import ErrorBoundary from '../components/ErrorBoundary';
 import { ThemeProvider, useTheme } from '../context/ThemeContext';
 import { getAuthServerUrl } from '../config/api';
@@ -57,6 +58,7 @@ function Shell() {
     const [companyConfig, setCompanyConfig] = useState<CompanyConfig | null>(getSavedCompanyConfig);
     const [user, setUser] = useState<SessionUser | null>(getSavedUser);
     const [socket, setSocket] = useState<Socket | null>(null);
+    const [tab, setTab] = useState<'orders' | 'chat'>('orders');
 
     // Socket hacia el servidor de la empresa.
     useEffect(() => {
@@ -76,10 +78,18 @@ function Shell() {
         setUser(null);
     };
 
+    // La URL de la API se fija al cargar la app (config/api.ts), así que al cambiar de
+    // empresa hay que recargar para que las peticiones vayan al servidor de la nueva.
     const handleCompanyLogout = () => {
         try { localStorage.removeItem('company_config'); } catch (_) { /* no bloquear */ }
         handleLogout();
         setCompanyConfig(null);
+        window.location.reload();
+    };
+
+    const handleCompanyLogin = (config: CompanyConfig) => {
+        setCompanyConfig(config);
+        window.location.reload();
     };
 
     const handleLogin = (u: string, r: string, _p: string, _m: boolean, prefs: any = {}, id?: string, sessionToken?: string) => {
@@ -121,8 +131,12 @@ function Shell() {
                 await StatusBar.setBackgroundColor({ color: '#0f172a' });
             } catch (e) { console.warn('[StatusBar] No se pudo configurar:', e); }
         })();
-        // Un solo panel: atrás sale de la app.
-        const listener = CapacitorApp.addListener('backButton', () => { CapacitorApp.exitApp(); });
+        // Atrás: si hay una conversación abierta, el chat la cierra (preventDefault);
+        // si no, sale de la app.
+        const listener = CapacitorApp.addListener('backButton', () => {
+            const handled = !window.dispatchEvent(new CustomEvent('recambios:back', { cancelable: true }));
+            if (!handled) CapacitorApp.exitApp();
+        });
         return () => { listener.then(l => l.remove()); };
     }, []);
 
@@ -134,7 +148,7 @@ function Shell() {
     if (!companyConfig) {
         return (
             <div className={`min-h-screen flex items-center justify-center p-4 ${pageBg}`}>
-                <CompanyLogin onSuccess={setCompanyConfig} authServerUrl={getAuthServerUrl()} />
+                <CompanyLogin onSuccess={handleCompanyLogin} authServerUrl={getAuthServerUrl()} />
             </div>
         );
     }
@@ -188,8 +202,25 @@ function Shell() {
                     <LogOut className="w-4 h-4" />
                 </button>
             </div>
-            <div className="flex-1 min-h-0">
+            <div className={`flex flex-shrink-0 border-b ${isDark ? 'border-white/5 bg-slate-900' : 'border-slate-200 bg-white'}`}>
+                {([['orders', 'Pedidos', Package], ['chat', 'Proveedores', MessageSquare]] as const).map(([key, label, Icon]) => (
+                    <button
+                        key={key}
+                        onClick={() => setTab(key)}
+                        className={`flex-1 flex items-center justify-center gap-2 py-2.5 text-sm font-semibold border-b-2 transition-colors ${tab === key
+                            ? 'border-indigo-500 text-indigo-500'
+                            : 'border-transparent text-slate-400'}`}
+                    >
+                        <Icon className="w-4 h-4" /> {label}
+                    </button>
+                ))}
+            </div>
+            {/* Los dos paneles siguen montados: cambiar de pestaña no recarga los pedidos ni pierde la conversación. */}
+            <div className={`flex-1 min-h-0 ${tab === 'orders' ? '' : 'hidden'}`}>
                 <PartOrdersDashboard currentUser={user} />
+            </div>
+            <div className={`flex-1 min-h-0 ${tab === 'chat' ? '' : 'hidden'}`}>
+                <SuppliersChat socket={socket} user={user} active={tab === 'chat'} />
             </div>
         </div>
     );

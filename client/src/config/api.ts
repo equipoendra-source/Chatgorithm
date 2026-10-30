@@ -39,9 +39,22 @@ export const getCompanyBackendUrl = (): string | null => {
 const PRODUCTION_URL = 'https://chatgorithm-vubn.onrender.com';
 const LOCAL_URL = 'http://localhost:3000';
 
-export const API_BASE_URL = isCapacitorNative
-    ? PRODUCTION_URL
-    : (isWebLocal ? LOCAL_URL : PRODUCTION_URL);
+// App aparte "Recambios" (vite.recambios.config.ts define __RECAMBIOS__): cada
+// empresa tiene su propio servidor y su propia base de datos, así que la API REST
+// va al backendUrl que devolvió el login de empresa, no al servidor de Chatgorim.
+// Si no, el panel de pedidos leería y escribiría en los datos de Chatgorim.
+// Chatgorim NO usa esto: su build no define la constante y todo sigue igual.
+declare const __RECAMBIOS__: boolean | undefined;
+const isRecambiosBuild = typeof __RECAMBIOS__ !== 'undefined' && __RECAMBIOS__ === true;
+const recambiosCompanyUrl = (isRecambiosBuild && !isWebLocal)
+    ? (getCompanyBackendUrl() || '').replace(/\/+$/, '')
+    : '';
+
+export const API_BASE_URL = recambiosCompanyUrl
+    ? recambiosCompanyUrl
+    : isCapacitorNative
+        ? PRODUCTION_URL
+        : (isWebLocal ? LOCAL_URL : PRODUCTION_URL);
 
 export const API_URL = `${API_BASE_URL}/api`;
 

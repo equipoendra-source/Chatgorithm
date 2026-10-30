@@ -21,6 +21,8 @@ export default defineConfig({
     },
   ],
   base: '/',
+  // Marca el build como "Recambios": la API REST va al servidor de la empresa (ver src/config/api.ts).
+  define: { __RECAMBIOS__: 'true' },
   resolve: {
     alias: { '@': path.resolve(__dirname, './src') },
   },

@@ -10766,6 +10766,9 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
         let msgType = 'document';
         if (file.mimetype.startsWith('image')) msgType = 'image';
         else if (isAudio) msgType = 'audio';
+        // WhatsApp solo admite como VÍDEO mp4 y 3gp (H.264 + AAC, hasta 16 MB). Cualquier
+        // otro formato (mov, webm…) se sigue enviando como documento, como hasta ahora.
+        else if (/^video\/(mp4|3gpp)$/i.test(file.mimetype)) msgType = 'video';
 
         // 📦 ¿PDF de un pedido de piezas? (ver "PEDIDO DE PIEZAS EN PDF"). Solo
         // cuenta si lo manda un perfil de Recambios/Taller. Con la ventana de
@@ -10823,6 +10826,7 @@ app.post('/api/upload', upload.single('file'), async (req: any, res: any) => {
         let textLog = file.originalname; let saveType = 'document';
         if (msgType === 'image') { textLog = "📷 [Imagen]"; saveType = 'image'; }
         else if (msgType === 'audio') { textLog = "🎤 [Audio]"; saveType = 'audio'; }
+        else if (msgType === 'video') { textLog = "🎬 [Vídeo]"; saveType = 'video'; }
 
         await saveAndEmitMessage({ text: textLog, sender: senderName, recipient: cleanTo, timestamp, type: saveType, mediaId: mediaId, origin_phone_id: originPhoneId });
         await handleContactUpdate(cleanTo, `Tú (${senderName}): 📎 Archivo`, undefined, originPhoneId);
