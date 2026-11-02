@@ -3372,7 +3372,7 @@ async function runNotificationScheduler() {
         const dueRecords = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
             filterByFormula: `AND({status}='pending', IS_BEFORE({scheduledFor}, DATEADD(NOW(), 1, 'minutes')))`,
             sort: [{ field: 'scheduledFor', direction: 'asc' }],
-            maxRecords: 300
+            maxRecords: 1000
         }).all();
 
         // Caducidad: un recordatorio que lleva días vencido (o demasiado tarde para
