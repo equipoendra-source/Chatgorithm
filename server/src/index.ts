@@ -3365,15 +3365,62 @@ async function runNotificationScheduler() {
         // ============================================
         // FASE 2: Enviar notificaciones pendientes
         // ============================================
-        const allPending = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
-            filterByFormula: `{status}='pending'`, maxRecords: 50
-        }).firstPage();
+        // Se piden SOLO las que ya tocan (scheduledFor <= ahora), las más antiguas
+        // primero. Antes se pedían los primeros 50 `pending` sin más: la secuencia
+        // postventa deja pendientes a 6 y 12 meses vista, que llenaban esos 50 y
+        // los recordatorios que sí tocaban nunca llegaban a procesarse.
+        const dueRecords = await base(TABLE_SCHEDULED_NOTIFICATIONS).select({
+            filterByFormula: `AND({status}='pending', IS_BEFORE({scheduledFor}, DATEADD(NOW(), 1, 'minutes')))`,
+            sort: [{ field: 'scheduledFor', direction: 'asc' }],
+            maxRecords: 300
+        }).all();
 
-        // Filtrar las que ya son "due" (scheduledFor <= ahora)
-        const duePending = allPending.filter(n => {
+        // Caducidad: un recordatorio que lleva días vencido (o demasiado tarde para
+        // servir) NO se envía, se cancela. Evita mandar de golpe a los clientes
+        // avisos atrasados cuando hay cola acumulada. El retraso se mide desde el
+        // momento en que pasó a estar "vivo" (el más tardío entre scheduledFor y
+        // createdAt): una cita reservada para mañana a última hora crea su
+        // cita_24h con scheduledFor ya pasado y debe salir igualmente.
+        const todayKey = madridDayKey(now);
+        const MIN = 60 * 1000;
+        const staleReason = (n: any): string | null => {
             const sf = n.get('scheduledFor') as string;
-            return sf && new Date(sf).getTime() <= now.getTime();
-        });
+            if (!sf) return null;
+            const sfMs = new Date(sf).getTime();
+            const createdRaw = (n.get('createdAt') as string) || n._rawJson?.createdTime;
+            const createdMs = createdRaw ? new Date(createdRaw).getTime() : NaN;
+            const liveSince = new Date(Number.isFinite(createdMs) ? Math.max(sfMs, createdMs) : sfMs);
+            if (madridDayKey(liveSince) < todayKey) return 'vencido en un día anterior';
+            const type = (n.get('type') as string) || '';
+            const maxLateMin = type === 'cita_1h' ? 30
+                : type === 'cita_24h' ? 360
+                : type.startsWith('team_') ? 120
+                : null;
+            if (maxLateMin !== null && now.getTime() - liveSince.getTime() > maxLateMin * MIN) {
+                return `retraso superior a ${maxLateMin} min`;
+            }
+            return null;
+        };
+
+        const staleRecords: any[] = [];
+        const liveDue: any[] = [];
+        for (const n of dueRecords) (staleReason(n) ? staleRecords : liveDue).push(n);
+
+        for (let i = 0; i < staleRecords.length; i += 10) {
+            const chunk = staleRecords.slice(i, i + 10);
+            try {
+                await base(TABLE_SCHEDULED_NOTIFICATIONS).update(chunk.map(n => ({
+                    id: n.id,
+                    fields: { status: 'cancelled', error: `Caducado sin enviar: ${staleReason(n)}`.slice(0, 500) }
+                })));
+            } catch (staleErr: any) {
+                console.error('[Notif] Error cancelando caducados:', staleErr?.message);
+            }
+            await delay(250);
+        }
+        if (staleRecords.length > 0) console.log(`🧹 [Notif] ${staleRecords.length} notificación(es) caducada(s) canceladas sin enviar`);
+
+        const duePending = liveDue.slice(0, 50);
 
         for (const notif of duePending) {
             const phone = cleanNumber(notif.get('phone') as string);
