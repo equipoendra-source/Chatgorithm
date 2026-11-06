@@ -528,7 +528,7 @@ function NewSupplierModal({ lineId, onClose, onCreated }: { lineId?: string; onC
             const res = await fetch(`${API_URL}/contacts`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ phone: digits, name: name.trim(), originPhoneId: lineId }),
+                body: JSON.stringify({ phone: digits, name: name.trim(), tags: ['Proveedor'], originPhoneId: lineId }),
             });
             const data = await res.json().catch(() => ({}));
             if (!res.ok) { alert(data.error || 'No se pudo crear el proveedor.'); return; }

@@ -11388,8 +11388,16 @@ app.post('/webhook', async (req, res) => {
             // no responde a este cliente NUNCA hasta que se desmarque.
             const contactAiMuted = !!(contactRecord?.get('ai_muted'));
 
+            // 🏷️ PROVEEDOR: un contacto con la etiqueta "Proveedor" nunca recibe
+            // respuestas de Laura (ella atiende a clientes, no a proveedores). Se
+            // quita la etiqueta y Laura vuelve a contestar.
+            const contactTags = (contactRecord?.get('tags') as string[] | undefined) || [];
+            const contactIsSupplier = contactTags.some(t => String(t).trim().toLowerCase() === 'proveedor');
+
             if (!botGloballyEnabled) {
                 console.log(`🔇 [Bot] Laura DESACTIVADA globalmente. Mensaje de ${from} guardado pero sin respuesta automática.`);
+            } else if (contactIsSupplier) {
+                console.log(`🔇 [Bot] Chat ${from} tiene la etiqueta "Proveedor". Mensaje guardado, Laura no responde.`);
             } else if (contactAiMuted) {
                 console.log(`🔇 [Bot] Chat ${from} tiene ai_muted=true (silenciado por el equipo). Mensaje guardado, Laura no responde.`);
             } else if (isTodayBotBlocked()) {
@@ -13544,7 +13552,9 @@ app.post('/api/contacts', async (req, res) => {
             fields.tags = body.tags.map((t: any) => String(t).trim()).filter(Boolean);
         }
 
-        const created = await base('Contacts').create([{ fields }]);
+        // Con etiquetas, typecast: true (igual que al etiquetar desde el chat) para que
+        // Airtable cree la opción del multiselect si aún no existe (p. ej. "Proveedor").
+        const created = await base('Contacts').create([{ fields }], fields.tags ? { typecast: true } : undefined);
         const rec = created[0];
 
         // Vehículo opcional — la matrícula es la clave. Reutiliza upsertVehicle.
