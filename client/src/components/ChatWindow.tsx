@@ -1047,12 +1047,30 @@ export function ChatWindow({ socket, user, contact, config, onBack, onlineUsers,
                                 {aiMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
                                 <span className="hidden lg:inline">{aiMuted ? 'IA off' : 'IA on'}</span>
                             </button>
-                            <div className="relative">
-                                {/* Botón "Tags" retirado (Diego, 17/09/2026): el equipo detectó que
-                                    no lo usaban, ensuciaba la cabecera. Las etiquetas siguen
-                                    gestionables desde el panel lateral de detalles del contacto
-                                    (Etiquetas), así que no perdemos funcionalidad, solo el atajo. */}
-                            </div>
+                            {/* 🏷️ Proveedor ON/OFF. El botón genérico "Tags" se retiró (Diego,
+                                17/09/2026) y en escritorio no queda ningún sitio donde etiquetar, así
+                                que este atajo SOLO pone/quita la etiqueta "Proveedor": con ella el
+                                backend no responde con Laura a este contacto. Conserva el resto de
+                                etiquetas del contacto. */}
+                            <button
+                                onClick={() => {
+                                    const isSup = contactTags.some(t => t.trim().toLowerCase() === 'proveedor');
+                                    const next = isSup
+                                        ? contactTags.filter(t => t.trim().toLowerCase() !== 'proveedor')
+                                        : [...contactTags, 'Proveedor'];
+                                    setContactTags(next);
+                                    updateCRM('tags', next);
+                                }}
+                                title={contactTags.some(t => t.trim().toLowerCase() === 'proveedor')
+                                    ? 'Es proveedor: Laura no le responde — pulsa para quitar la etiqueta'
+                                    : 'Marcar como proveedor (Laura no le responderá)'}
+                                className={`flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs font-bold border transition ${contactTags.some(t => t.trim().toLowerCase() === 'proveedor')
+                                    ? 'bg-orange-500 border-orange-600 text-white hover:bg-orange-600'
+                                    : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}
+                            >
+                                <Tag className="w-3.5 h-3.5" />
+                                <span className="hidden lg:inline">Proveedor</span>
+                            </button>
                         </div>
                     )}
                     <div className="hidden md:block flex-1"></div>
